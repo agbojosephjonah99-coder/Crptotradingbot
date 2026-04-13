@@ -1,5 +1,6 @@
-const { fetchHistoricalKlines } = require('../src/services/binanceService');
-const { runBacktest } = require('../src/services/backtestService');
+const path = require('path');
+const { fetchHistoricalKlines } = require(path.join(process.cwd(), 'src/services/binanceService'));
+const { runBacktest } = require(path.join(process.cwd(), 'src/services/backtestService'));
 
 const symbols = (process.env.BINANCE_SYMBOLS || process.env.BINANCE_SYMBOL || 'SOLUSDT')
   .split(',')
@@ -23,6 +24,7 @@ module.exports = async (req, res) => {
 
     res.status(200).json({ success: true, results: resultSets });
   } catch (error) {
+    console.error('API Error:', error);
     res.status(500).json({ success: false, error: error.message || String(error) });
   }
 };
