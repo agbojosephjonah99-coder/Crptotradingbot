@@ -91,6 +91,8 @@ npm run deploy
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 
+**Note:** This deploys only the API endpoints as serverless functions. The main bot (`index.js`) is designed to run locally or on a VPS, not on Vercel.
+
 
 ## Multiple Symbols
 
