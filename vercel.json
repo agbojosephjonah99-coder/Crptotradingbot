@@ -1,22 +1,6 @@
 {
   "version": 2,
   "name": "crypto-signal-bot",
-  "builds": [
-    {
-      "src": "api/signal.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["src/**"]
-      }
-    },
-    {
-      "src": "api/backtest.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["src/**"]
-      }
-    }
-  ],
   "routes": [
     {
       "src": "/api/signal",
