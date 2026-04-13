@@ -1,6 +1,6 @@
 {
   "name": "crypto-signal-bot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "SOL/USDT crypto signal bot with backtesting and Telegram alerts",
   "main": "index.js",
   "scripts": {
