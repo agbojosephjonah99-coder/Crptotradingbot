@@ -1,6 +1,5 @@
 {
   "version": 2,
-  // Force rebuild after package update
   "builds": [
     {
       "src": "api/**/*.js",
