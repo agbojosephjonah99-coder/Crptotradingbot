@@ -1,16 +1,5 @@
 {
   "version": 2,
-  "name": "crypto-signal-bot",
-  "routes": [
-    {
-      "src": "/api/signal",
-      "dest": "/api/signal.js"
-    },
-    {
-      "src": "/api/backtest",
-      "dest": "/api/backtest.js"
-    }
-  ],
   "functions": {
     "api/**/*.js": {
       "maxDuration": 30
