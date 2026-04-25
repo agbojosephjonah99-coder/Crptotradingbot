@@ -1,11 +1,41 @@
 const axios = require('axios');
+const { sendSignalAlert } = require('../src/services/telegramService');
 
-const BASE_URL = 'https://api.binance.com/api/v3';
+// Binance mirror URLs - rotates through them to avoid 451 geo-blocks on Vercel
+const BINANCE_HOSTS = [
+  'https://api1.binance.com',
+  'https://api2.binance.com',
+  'https://api3.binance.com',
+  'https://api4.binance.com'
+];
+
+async function fetchWithFallback(path, params) {
+  let lastError;
+  for (const host of BINANCE_HOSTS) {
+    try {
+      const response = await axios.get(`${host}${path}`, {
+        params,
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0'
+        }
+      });
+      return response;
+    } catch (err) {
+      lastError = err;
+      // If it's a 451 or network error, try next host
+      if (err.response?.status === 451 || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+        continue;
+      }
+      throw err; // For other errors (like bad params), fail immediately
+    }
+  }
+  throw lastError;
+}
 
 async function fetchHistoricalKlines(symbol, interval, limit = 500) {
-  const response = await axios.get(`${BASE_URL}/klines`, {
-    params: { symbol, interval, limit }
-  });
+  const response = await fetchWithFallback('/api/v3/klines', { symbol, interval, limit });
   return response.data.map(candle => ({
     time: new Date(candle[0]).toISOString().slice(0, 16).replace('T', ' '),
     open: Number(candle[1]),
@@ -14,13 +44,6 @@ async function fetchHistoricalKlines(symbol, interval, limit = 500) {
     close: Number(candle[4]),
     volume: Number(candle[5])
   }));
-}
-
-async function fetchLatestPrice(symbol) {
-  const response = await axios.get(`${BASE_URL}/ticker/price`, {
-    params: { symbol }
-  });
-  return Number(response.data.price);
 }
 
 function calculateEMA(values, period) {
@@ -170,6 +193,10 @@ async function evaluateSymbol(symbol) {
 }
 
 module.exports = async (req, res) => {
+  // Allow CORS for dashboard
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+
   try {
     const symbols = (process.env.BINANCE_SYMBOLS || 'SOLUSDT').split(',').map(s => s.trim().toUpperCase());
     const results = [];
@@ -177,11 +204,27 @@ module.exports = async (req, res) => {
     for (const symbol of symbols) {
       const signalData = await evaluateSymbol(symbol);
       results.push(signalData);
+
+      // ✅ FIX: Send Telegram notification if signal qualifies
+      if (signalData.signal === 'BUY' || signalData.signal === 'SELL') {
+        try {
+          await sendSignalAlert(signalData);
+        } catch (telegramErr) {
+          console.error('Telegram notification failed:', telegramErr.message);
+          // Don't fail the whole request if Telegram fails
+        }
+      }
     }
 
     res.status(200).json({ success: true, results });
   } catch (error) {
     console.error('API Error:', error);
-    res.status(500).json({ success: false, error: error.message || String(error) });
+    const statusCode = error.response?.status === 451 ? 503 : 500;
+    res.status(statusCode).json({
+      success: false,
+      error: error.response?.status === 451
+        ? 'Binance API geo-restricted. All mirror hosts failed.'
+        : (error.message || String(error))
+    });
   }
 };

@@ -1,9 +1,40 @@
 const axios = require('axios');
 
-const BASE_URL = 'https://api.binance.com/api/v3';
+// Binance mirror URLs - rotates through them to avoid 451 geo-blocks on Vercel
+const BINANCE_HOSTS = [
+  'https://api1.binance.com',
+  'https://api2.binance.com',
+  'https://api3.binance.com',
+  'https://api4.binance.com'
+];
+
 const RISK_PER_TRADE = 0.01;
 const REWARD_MULTIPLIER = 2;
 const SWING_LOOKBACK = 5;
+
+async function fetchWithFallback(path, params) {
+  let lastError;
+  for (const host of BINANCE_HOSTS) {
+    try {
+      const response = await axios.get(`${host}${path}`, {
+        params,
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0'
+        }
+      });
+      return response;
+    } catch (err) {
+      lastError = err;
+      if (err.response?.status === 451 || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
 
 async function fetchHistoricalKlines(symbol, interval, limit = 500, startTime = null) {
   const result = [];
@@ -30,7 +61,7 @@ async function fetchHistoricalKlines(symbol, interval, limit = 500, startTime = 
     const params = { symbol, interval, limit: requestLimit };
     if (nextStartTime) params.startTime = nextStartTime;
 
-    const response = await axios.get(`${BASE_URL}/klines`, { params });
+    const response = await fetchWithFallback('/api/v3/klines', params);
     const page = response.data.map(candle => ({
       time: new Date(candle[0]).toISOString().slice(0, 16).replace('T', ' '),
       open: Number(candle[1]),
@@ -143,30 +174,28 @@ function runBacktest({ fourHour, oneHour, fifteenMin }, initialCapital = 10000) 
     const slice4h = fourHour.slice(0, fourHour.indexOf(base4h) + 1);
     const slice15m = fifteenMin.slice(0, i + 1);
 
-    // Simple signal evaluation (inline for self-containment)
     let signal = 'WAIT';
-    let score = 0;
 
     if (slice4h.length >= 200 && slice1h.length >= 50 && slice15m.length >= 2) {
       const last4h = slice4h[slice4h.length - 1];
       const fourHourCloses = slice4h.map(c => c.close);
-      const ema200 = fourHourCloses.slice(-200).reduce((a, b) => a + b, 0) / 200; // Simple MA
+      const ema200 = fourHourCloses.slice(-200).reduce((a, b) => a + b, 0) / 200;
 
       const trend = last4h.close > ema200 ? 'UP' : last4h.close < ema200 ? 'DOWN' : 'WAIT';
       if (trend !== 'WAIT') {
         const last1h = slice1h[slice1h.length - 1];
         const oneHourCloses = slice1h.map(c => c.close);
-        const ema50 = oneHourCloses.slice(-50).reduce((a, b) => a + b, 0) / 50; // Simple MA
+        const ema50 = oneHourCloses.slice(-50).reduce((a, b) => a + b, 0) / 50;
 
-        const current15m = slice15m[slice15m.length - 1];
-        const previous15m = slice15m[slice15m.length - 2];
+        const curr15m = slice15m[slice15m.length - 1];
+        const prev15m = slice15m[slice15m.length - 2];
 
         const isPullback = Math.abs(last1h.close - ema50) / ema50 <= 0.02;
         const confirmation = trend === 'UP'
-          ? current15m.close > previous15m.high
-          : current15m.close < previous15m.low;
+          ? curr15m.close > prev15m.high
+          : curr15m.close < prev15m.low;
 
-        score = 3; // trend
+        let score = 3;
         if (isPullback) score += 2;
         if (confirmation) score += 3;
 
@@ -271,6 +300,10 @@ function checkExit(position, candle) {
 }
 
 module.exports = async (req, res) => {
+  // Allow CORS for dashboard
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+
   try {
     const symbols = (process.env.BINANCE_SYMBOLS || 'SOLUSDT').split(',').map(s => s.trim().toUpperCase());
     const resultSets = [];
@@ -289,6 +322,12 @@ module.exports = async (req, res) => {
     res.status(200).json({ success: true, results: resultSets });
   } catch (error) {
     console.error('API Error:', error);
-    res.status(500).json({ success: false, error: error.message || String(error) });
+    const statusCode = error.response?.status === 451 ? 503 : 500;
+    res.status(statusCode).json({
+      success: false,
+      error: error.response?.status === 451
+        ? 'Binance API geo-restricted. All mirror hosts failed.'
+        : (error.message || String(error))
+    });
   }
 };
