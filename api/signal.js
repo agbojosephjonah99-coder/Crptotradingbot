@@ -1,42 +1,73 @@
 const axios = require('axios');
 const { sendSignalAlert } = require('../src/services/telegramService');
 
-// Bybit public market API - no geo-restrictions, no API key needed
-const BYBIT_BASE = 'https://api.bybit.com';
+// Kraken public REST API — no API key, no geo-restrictions on Vercel
+const KRAKEN_BASE = 'https://api.kraken.com/0/public';
 
-// Bybit interval codes
+// Kraken interval values are in minutes
 const INTERVAL_MAP = {
-  '15m': '15',
-  '1h':  '60',
-  '4h':  '240'
+  '15m': 15,
+  '1h':  60,
+  '4h':  240
 };
 
-async function fetchKlines(symbol, interval, limit = 200) {
-  const bybitInterval = INTERVAL_MAP[interval];
-  if (!bybitInterval) throw new Error(`Unsupported interval: ${interval}`);
+// Convert "SOLUSDT" → "SOLUSD", "BTCUSDT" → "XBTUSD", etc.
+function toKrakenPair(symbol) {
+  const map = {
+    'BTCUSDT':  'XBTUSD',
+    'BTCUSD':   'XBTUSD',
+    'ETHUSDT':  'ETHUSD',
+    'ETHUSD':   'ETHUSD',
+    'SOLUSDT':  'SOLUSD',
+    'SOLUSD':   'SOLUSD',
+    'BNBUSDT':  'BNBUSD',
+    'XRPUSDT':  'XRPUSD',
+    'ADAUSDT':  'ADAUSD',
+    'DOGEUSDT': 'DOGEUSD',
+    'AVAXUSDT': 'AVAXUSD',
+    'DOTUSDT':  'DOTUSD',
+    'MATICUSDT':'MATICUSD',
+    'LINKUSDT': 'LINKUSD',
+  };
+  const upper = symbol.toUpperCase();
+  if (map[upper]) return map[upper];
+  // Generic: strip trailing T from USDT pairs
+  if (upper.endsWith('USDT')) return upper.slice(0, -1);
+  return upper;
+}
 
-  const response = await axios.get(`${BYBIT_BASE}/v5/market/kline`, {
+async function fetchKlines(krakenPair, interval, limit = 720) {
+  const intervalMin = INTERVAL_MAP[interval];
+  if (!intervalMin) throw new Error(`Unsupported interval: ${interval}`);
+
+  const response = await axios.get(`${KRAKEN_BASE}/OHLC`, {
     params: {
-      category: 'spot',
-      symbol,
-      interval: bybitInterval,
-      limit
+      pair: krakenPair,
+      interval: intervalMin
     },
-    timeout: 10000
+    timeout: 12000,
+    headers: { 'User-Agent': 'CryptoTradingBot/1.0' }
   });
 
-  if (response.data.retCode !== 0) {
-    throw new Error(`Bybit API error: ${response.data.retMsg}`);
+  if (response.data.error && response.data.error.length > 0) {
+    throw new Error(`Kraken API error: ${response.data.error.join(', ')}`);
   }
 
-  // Bybit returns newest-first — reverse to oldest-first
-  return response.data.result.list.reverse().map(c => ({
-    time:   new Date(Number(c[0])).toISOString().slice(0, 16).replace('T', ' '),
+  // Result key is usually the pair name but may differ (e.g. SOLUSD → SOLUSD)
+  const resultKey = Object.keys(response.data.result).find(k => k !== 'last');
+  if (!resultKey) throw new Error(`No OHLC data found for pair: ${krakenPair}`);
+
+  const candles = response.data.result[resultKey];
+
+  // Kraken format: [time, open, high, low, close, vwap, volume, count]
+  // Already oldest-first, drop the last (in-progress) candle
+  return candles.slice(0, -1).slice(-limit).map(c => ({
+    time:   new Date(Number(c[0]) * 1000).toISOString().slice(0, 16).replace('T', ' '),
     open:   Number(c[1]),
     high:   Number(c[2]),
     low:    Number(c[3]),
     close:  Number(c[4]),
-    volume: Number(c[5])
+    volume: Number(c[6])
   }));
 }
 
@@ -81,10 +112,13 @@ function calculateRSI(values, period = 14) {
 }
 
 async function evaluateSymbol(symbol) {
+  const krakenPair = toKrakenPair(symbol);
+
+  // Kraken returns max 720 candles — enough for 4h(200), 1h(120), 15m(20)
   const [fourHour, oneHour, fifteenMin] = await Promise.all([
-    fetchKlines(symbol, '4h', 250),
-    fetchKlines(symbol, '1h', 120),
-    fetchKlines(symbol, '15m', 20)
+    fetchKlines(krakenPair, '4h', 250),
+    fetchKlines(krakenPair, '1h', 120),
+    fetchKlines(krakenPair, '15m', 20)
   ]);
 
   if (fourHour.length < 200 || oneHour.length < 50 || fifteenMin.length < 2) {
