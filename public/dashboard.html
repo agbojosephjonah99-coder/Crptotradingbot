@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CryptoBot V2 — Signal Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ─── CSS Reset & Variables ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:         #060a12;
+  --surface:    #0d1420;
+  --surface2:   #111c2e;
+  --border:     #1e2d45;
+  --border2:    #243450;
+  --text:       #c8d8f0;
+  --text-dim:   #5a7090;
+  --text-muted: #3a5070;
+  --buy:        #00e887;
+  --buy-dim:    #00b86a;
+  --buy-glow:   rgba(0,232,135,0.15);
+  --sell:       #ff3c5f;
+  --sell-dim:   #cc2f4c;
+  --sell-glow:  rgba(255,60,95,0.15);
+  --warn:       #ffc532;
+  --warn-glow:  rgba(255,197,50,0.15);
+  --info:       #38b4ff;
+  --info-glow:  rgba(56,180,255,0.1);
+  --hot:        #ff6b35;
+  --hot-glow:   rgba(255,107,53,0.15);
+  --accent:     #7c6af7;
+  --accent-glow:rgba(124,106,247,0.15);
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'Syne', sans-serif;
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+body {
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Grid noise overlay */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 0;
+  background-image:
+    linear-gradient(rgba(30,45,69,0.3) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30,45,69,0.3) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+}
+
+/* ─── Layout ─────────────────────────────────────────────────────────────── */
+.app { position: relative; z-index: 1; max-width: 1440px; margin: 0 auto; padding: 0 20px 40px; }
+
+/* ─── Header ─────────────────────────────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 0 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+.header-brand { display: flex; align-items: center; gap: 12px; }
+.brand-icon {
+  width: 38px; height: 38px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent) 0%, #4f9cf7 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.brand-name { font-family: var(--sans); font-size: 18px; font-weight: 700; color: #fff; }
+.brand-ver { font-size: 10px; color: var(--accent); letter-spacing: 2px; margin-top: 2px; }
+
+.header-status { display: flex; align-items: center; gap: 20px; }
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 20px;
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: 11px; color: var(--text-dim);
+}
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--buy); box-shadow: 0 0 6px var(--buy);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+.refresh-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; border-radius: var(--radius-sm);
+  background: var(--surface2); border: 1px solid var(--border2);
+  color: var(--text); font-family: var(--mono); font-size: 12px;
+  cursor: pointer; transition: all 0.2s;
+}
+.refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+.countdown { color: var(--warn); font-weight: 600; min-width: 30px; text-align: center; }
+
+/* ─── Tabs ───────────────────────────────────────────────────────────────── */
+.tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
+.tab {
+  padding: 10px 20px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px;
+  color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent;
+  transition: all 0.2s; white-space: nowrap;
+  font-family: var(--sans);
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-color: var(--accent); }
+.tab .tab-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 6px;
+  border-radius: 10px; background: var(--surface2); font-size: 10px;
+  color: var(--text-dim);
+}
+.tab.active .tab-badge { background: var(--accent-glow); color: var(--accent); }
+
+/* ─── Panel ──────────────────────────────────────────────────────────────── */
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ─── Signal Cards ───────────────────────────────────────────────────────── */
+.cards-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px;
+  transition: border-color 0.2s, transform 0.2s;
+  position: relative; overflow: hidden;
+}
+.card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--accent);
+}
+.card.buy::before  { background: var(--buy); }
+.card.sell::before { background: var(--sell); }
+.card.warn::before { background: var(--warn); }
+.card.hot::before  { background: var(--hot); }
+.card:hover { border-color: var(--border2); transform: translateY(-2px); }
+
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+.card-symbol { font-family: var(--sans); font-size: 20px; font-weight: 700; color: #fff; }
+.card-exchange { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+.signal-badge {
+  padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700;
+  letter-spacing: 1px; text-transform: uppercase;
+}
+.badge-buy    { background: var(--buy-glow); color: var(--buy); border: 1px solid rgba(0,232,135,0.3); }
+.badge-wait   { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
+.badge-warn   { background: var(--warn-glow); color: var(--warn); border: 1px solid rgba(255,197,50,0.3); }
+.badge-sell   { background: var(--sell-glow); color: var(--sell); border: 1px solid rgba(255,60,95,0.3); }
+.badge-hot    { background: var(--hot-glow); color: var(--hot); border: 1px solid rgba(255,107,53,0.3); }
+.badge-hold   { background: var(--info-glow); color: var(--info); border: 1px solid rgba(56,180,255,0.3); }
+.badge-error  { background: rgba(255,60,95,0.1); color: #ff6080; border: 1px solid rgba(255,60,95,0.2); }
+
+/* Price row */
+.price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 16px; }
+.price-value { font-size: 26px; font-weight: 700; color: #fff; letter-spacing: -1px; }
+.price-change { font-size: 13px; font-weight: 600; }
+.price-change.up   { color: var(--buy); }
+.price-change.down { color: var(--sell); }
+
+/* Levels grid */
+.levels { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.level {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.level-label { font-size: 9px; color: var(--text-muted); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 4px; }
+.level-value { font-size: 13px; font-weight: 600; }
+.level.entry .level-value { color: var(--info); }
+.level.sl    .level-value { color: var(--sell); }
+.level.tp    .level-value { color: var(--buy); }
+
+/* Confidence bar */
+.confidence-row { margin-bottom: 12px; }
+.confidence-header { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 11px; color: var(--text-dim); }
+.confidence-num { font-weight: 700; color: var(--text); }
+.confidence-bar-bg {
+  height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden;
+}
+.confidence-bar-fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--sell) 0%, var(--warn) 50%, var(--buy) 100%);
+  transition: width 0.6s ease;
+}
+
+/* Indicators */
+.indicators { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.indicator-chip {
+  padding: 3px 8px; border-radius: 4px;
+  background: var(--surface2); border: 1px solid var(--border);
+  font-size: 10px; color: var(--text-dim);
+}
+.indicator-chip.active { color: var(--buy); border-color: rgba(0,232,135,0.2); }
+
+/* Factors list */
+.factors { margin-top: 10px; }
+.factor {
+  padding: 4px 0; font-size: 11px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+}
+.factor:last-child { border: none; }
+.factor::before { content: '›'; color: var(--accent); }
+
+/* ─── Volume Chip ────────────────────────────────────────────────────────── */
+.vol-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 4px;
+  background: rgba(255,197,50,0.08); border: 1px solid rgba(255,197,50,0.2);
+  font-size: 10px; color: var(--warn);
+}
+
+/* ─── Pump Rating ────────────────────────────────────────────────────────── */
+.pump-rating {
+  font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+  padding: 2px 8px; border-radius: 4px;
+}
+.pump-HOT  { background: var(--hot-glow); color: var(--hot); }
+.pump-WARM { background: var(--warn-glow); color: var(--warn); }
+.pump-WATCH{ background: var(--info-glow); color: var(--info); }
+.pump-COLD { background: var(--surface2); color: var(--text-muted); }
+
+/* ─── Position Panel ─────────────────────────────────────────────────────── */
+.position-form {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 24px; margin-bottom: 24px;
+}
+.form-title { font-family: var(--sans); font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+.form-sub { font-size: 11px; color: var(--text-dim); margin-bottom: 20px; }
+.form-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+.form-input {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+  color: var(--text); font-family: var(--mono); font-size: 13px;
+  transition: border-color 0.2s; outline: none;
+}
+.form-input:focus { border-color: var(--accent); }
+.form-input::placeholder { color: var(--text-muted); }
+.btn-add {
+  padding: 10px 24px; border-radius: var(--radius-sm);
+  background: var(--accent); border: none;
+  color: #fff; font-family: var(--mono); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s;
+}
+.btn-add:hover { background: #6a58e0; transform: translateY(-1px); }
+.btn-add:active { transform: translateY(0); }
+
+/* Position cards */
+.position-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  position: relative; overflow: hidden;
+}
+.position-card.profit::before { content: ''; position: absolute; top:0; left:0; right:0; height:2px; background: var(--buy); }
+.position-card.loss::before   { content: ''; position: absolute; top:0; left:0; right:0; height:2px; background: var(--sell); }
+
+.position-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.position-symbol { font-family: var(--sans); font-size: 18px; font-weight: 700; color: #fff; }
+.position-pnl { font-size: 20px; font-weight: 700; }
+.position-pnl.up   { color: var(--buy); }
+.position-pnl.down { color: var(--sell); }
+
+.position-prices { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; margin-bottom: 14px; }
+.pos-price { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+.pos-price-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.pos-price-value { font-size: 14px; font-weight: 600; color: var(--text); }
+
+.rec-box {
+  padding: 12px 14px; border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+}
+.rec-box.HOLD         { background: var(--info-glow); border: 1px solid rgba(56,180,255,0.2); }
+.rec-box.TAKE_PROFIT  { background: var(--buy-glow); border: 1px solid rgba(0,232,135,0.3); }
+.rec-box.STOP_LOSS    { background: var(--sell-glow); border: 1px solid rgba(255,60,95,0.3); }
+.rec-box.TRAIL_STOP   { background: var(--warn-glow); border: 1px solid rgba(255,197,50,0.3); }
+.rec-box.CLOSE_PARTIAL{ background: var(--hot-glow); border: 1px solid rgba(255,107,53,0.3); }
+
+.rec-label { font-size: 10px; font-weight: 700; letter-spacing: 2px; margin-bottom: 4px; text-transform: uppercase; }
+.rec-box.HOLD .rec-label         { color: var(--info); }
+.rec-box.TAKE_PROFIT .rec-label  { color: var(--buy); }
+.rec-box.STOP_LOSS .rec-label    { color: var(--sell); }
+.rec-box.TRAIL_STOP .rec-label   { color: var(--warn); }
+.rec-box.CLOSE_PARTIAL .rec-label{ color: var(--hot); }
+
+.rec-actions { font-size: 11px; color: var(--text-dim); line-height: 1.8; }
+
+.position-footer { display: flex; justify-content: space-between; align-items: center; }
+.pos-meta { font-size: 10px; color: var(--text-muted); }
+.btn-remove {
+  padding: 5px 14px; border-radius: 4px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); font-family: var(--mono); font-size: 11px;
+  cursor: pointer; transition: all 0.2s;
+}
+.btn-remove:hover { border-color: var(--sell); color: var(--sell); }
+
+/* Loading + empty states */
+.state-loading, .state-empty {
+  text-align: center; padding: 60px 20px; color: var(--text-muted);
+}
+.state-loading .spinner {
+  width: 32px; height: 32px; border: 2px solid var(--border2);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin: 0 auto 16px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.state-label { font-size: 12px; margin-top: 8px; }
+
+/* ─── Stats bar ──────────────────────────────────────────────────────────── */
+.stats-bar {
+  display: flex; gap: 20px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 20px; margin-bottom: 20px;
+}
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+.stat-value { font-size: 16px; font-weight: 700; color: var(--text); }
+.stat-value.buy  { color: var(--buy); }
+.stat-value.sell { color: var(--sell); }
+.stat-value.warn { color: var(--warn); }
+
+/* ─── Responsive ─────────────────────────────────────────────────────────── */
+@media(max-width: 640px) {
+  .cards-grid { grid-template-columns: 1fr; }
+  .header-status { gap: 10px; }
+  .brand-name { font-size: 14px; }
+  .form-row { grid-template-columns: 1fr 1fr; }
+  .levels, .position-prices { grid-template-columns: 1fr 1fr; }
+}
+
+/* ─── Toast ──────────────────────────────────────────────────────────────── */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  padding: 12px 18px; border-radius: var(--radius-sm);
+  background: var(--surface2); border: 1px solid var(--border2);
+  color: var(--text); font-size: 12px;
+  animation: slideIn 0.3s ease, fadeOut 0.3s ease 2.7s forwards;
+}
+.toast.success { border-color: rgba(0,232,135,0.4); }
+.toast.error   { border-color: rgba(255,60,95,0.4); }
+@keyframes slideIn  { from { transform: translateX(40px); opacity:0; } to { transform:translateX(0); opacity:1; } }
+@keyframes fadeOut  { to { opacity: 0; transform: translateY(10px); } }
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="brand-icon">⚡</div>
+      <div>
+        <div class="brand-name">CryptoBot Intelligence</div>
+        <div class="brand-ver">V2 SIGNAL ENGINE</div>
+      </div>
+    </div>
+    <div class="header-status">
+      <div class="status-pill">
+        <div class="status-dot"></div>
+        <span id="lastUpdate">Ready</span>
+      </div>
+      <button class="refresh-btn" onclick="refreshAll()">
+        ↻ Refresh <span class="countdown" id="countdown">—</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('scanner')" id="tab-scanner">
+      📡 Market Scanner <span class="tab-badge" id="badge-scanner">—</span>
+    </div>
+    <div class="tab" onclick="switchTab('listings')" id="tab-listings">
+      🚀 New Listings <span class="tab-badge" id="badge-listings">—</span>
+    </div>
+    <div class="tab" onclick="switchTab('positions')" id="tab-positions">
+      💼 My Positions <span class="tab-badge" id="badge-positions">0</span>
+    </div>
+  </div>
+
+  <!-- Scanner Panel -->
+  <div class="panel active" id="panel-scanner">
+    <div class="stats-bar" id="scanner-stats" style="display:none">
+      <div class="stat"><div class="stat-label">BUY Signals</div><div class="stat-value buy" id="stat-buy">—</div></div>
+      <div class="stat"><div class="stat-label">Waiting</div><div class="stat-value" id="stat-wait">—</div></div>
+      <div class="stat"><div class="stat-label">Bearish Alert</div><div class="stat-value sell" id="stat-bear">—</div></div>
+      <div class="stat"><div class="stat-label">Scanned</div><div class="stat-value" id="stat-scanned">—</div></div>
+    </div>
+    <div class="cards-grid" id="scanner-cards">
+      <div class="state-loading" style="grid-column:1/-1">
+        <div class="spinner"></div>
+        <div class="state-label">Fetching multi-timeframe signals…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Listings Panel -->
+  <div class="panel" id="panel-listings">
+    <div class="stats-bar" id="listings-stats" style="display:none">
+      <div class="stat"><div class="stat-label">HOT Listings</div><div class="stat-value warn" id="stat-hot">—</div></div>
+      <div class="stat"><div class="stat-label">Scanned Pairs</div><div class="stat-value" id="stat-total">—</div></div>
+      <div class="stat"><div class="stat-label">Exchange</div><div class="stat-value">Binance</div></div>
+    </div>
+    <div class="cards-grid" id="listings-cards">
+      <div class="state-loading" style="grid-column:1/-1">
+        <div class="spinner"></div>
+        <div class="state-label">Scanning for new listings…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Positions Panel -->
+  <div class="panel" id="panel-positions">
+    <div class="position-form">
+      <div class="form-title">📌 Log a Buy</div>
+      <div class="form-sub">Tell the bot you bought a coin — it will track the best time to sell</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Symbol</label>
+          <input class="form-input" id="pos-symbol" placeholder="e.g. SOLUSDT" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Buy Price ($)</label>
+          <input class="form-input" id="pos-buy" type="number" placeholder="e.g. 150.00" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Quantity (optional)</label>
+          <input class="form-input" id="pos-qty" type="number" placeholder="e.g. 10" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Take Profit %</label>
+          <input class="form-input" id="pos-tp" type="number" placeholder="8" value="8" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Stop Loss %</label>
+          <input class="form-input" id="pos-sl" type="number" placeholder="5" value="5" />
+        </div>
+      </div>
+      <button class="btn-add" onclick="addPosition()">＋ Track Position</button>
+    </div>
+    <div id="positions-list">
+      <div class="state-empty">
+        <div style="font-size:32px;margin-bottom:12px">💼</div>
+        <div>No positions tracked yet.</div>
+        <div class="state-label">Use the form above to log a coin you bought.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────────
+const BASE = '';  // Same origin — set to your Vercel URL in production if needed
+let countdownTimer = null;
+let refreshInterval = 300; // 5 minutes
+let countdownSec = refreshInterval;
+
+// ─── Tab switching ───────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.add('active');
+  document.getElementById(`panel-${name}`).classList.add('active');
+  if (name === 'positions') renderPositions();
+}
+
+// ─── Formatting helpers ──────────────────────────────────────────────────────
+function fmt(n, decimals = 4) {
+  if (n == null || isNaN(n)) return '—';
+  if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (n >= 1)    return n.toFixed(Math.min(decimals, 4));
+  return n.toFixed(6);
+}
+
+function fmtVol(n) {
+  if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+// ─── Scanner ─────────────────────────────────────────────────────────────────
+async function loadScanner() {
+  const grid = document.getElementById('scanner-cards');
+  grid.innerHTML = `<div class="state-loading" style="grid-column:1/-1"><div class="spinner"></div><div class="state-label">Running multi-timeframe analysis…</div></div>`;
+
+  try {
+    const resp = await fetch(`${BASE}/api/v2scan`);
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.error);
+
+    const results = data.results || [];
+    const buy    = results.filter(r => r.signal === 'BUY').length;
+    const wait   = results.filter(r => r.signal === 'WAIT').length;
+    const bear   = results.filter(r => r.signal === 'BEARISH_ALERT').length;
+
+    document.getElementById('stat-buy').textContent     = buy;
+    document.getElementById('stat-wait').textContent    = wait;
+    document.getElementById('stat-bear').textContent    = bear;
+    document.getElementById('stat-scanned').textContent = results.length;
+    document.getElementById('badge-scanner').textContent = results.length;
+    document.getElementById('scanner-stats').style.display = 'flex';
+
+    if (!results.length) {
+      grid.innerHTML = `<div class="state-empty" style="grid-column:1/-1"><div>No coins configured.</div><div class="state-label">Set BINANCE_SYMBOLS in your Vercel environment variables.</div></div>`;
+      return;
+    }
+
+    // Sort: BUY first, then WAIT, then BEARISH
+    results.sort((a, b) => {
+      const order = { BUY: 0, WAIT: 1, BEARISH_ALERT: 2, ERROR: 3 };
+      return (order[a.signal] ?? 9) - (order[b.signal] ?? 9) || b.confidence - a.confidence;
+    });
+
+    grid.innerHTML = results.map(r => renderScanCard(r)).join('');
+  } catch (e) {
+    grid.innerHTML = `<div class="state-empty" style="grid-column:1/-1"><div>⚠ Failed to load signals</div><div class="state-label">${e.message}</div></div>`;
+    toast('Scanner error: ' + e.message, 'error');
+  }
+}
+
+function renderScanCard(r) {
+  const isBuy  = r.signal === 'BUY';
+  const isBear = r.signal === 'BEARISH_ALERT';
+  const isWait = r.signal === 'WAIT';
+
+  const cardClass = isBuy ? 'buy' : isBear ? 'sell' : '';
+  const badgeClass = isBuy ? 'badge-buy' : isBear ? 'badge-sell' : r.signal === 'ERROR' ? 'badge-error' : 'badge-wait';
+  const badgeLabel = isBuy ? 'BUY' : isBear ? '⚠ BEARISH' : r.signal === 'ERROR' ? 'ERROR' : 'WAIT';
+
+  if (r.signal === 'ERROR') {
+    return `<div class="card"><div class="card-header"><div><div class="card-symbol">${r.symbol}</div></div><span class="signal-badge badge-error">ERROR</span></div><div style="font-size:11px;color:var(--sell)">${r.error}</div></div>`;
+  }
+
+  const factors = (r.factors || []).map(f => `<div class="factor">${f}</div>`).join('');
+
+  const levelsHtml = (isBuy && r.entryPrice) ? `
+    <div class="levels">
+      <div class="level entry"><div class="level-label">Entry</div><div class="level-value">$${fmt(r.entryPrice)}</div></div>
+      <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(r.stopLoss)}</div></div>
+      <div class="level tp"><div class="level-label">Target 1</div><div class="level-value">$${fmt(r.takeProfit1)}</div></div>
+    </div>
+    <div class="levels" style="grid-template-columns:1fr 1fr">
+      <div class="level" style="background:rgba(0,232,135,0.05)"><div class="level-label">Target 2 (3R)</div><div class="level-value" style="color:var(--buy)">$${fmt(r.takeProfit2)}</div></div>
+      <div class="level"><div class="level-label">RSI (1H)</div><div class="level-value">${r.rsi?.toFixed(1) ?? '—'}</div></div>
+    </div>
+  ` : `
+    <div class="levels" style="grid-template-columns:1fr 1fr">
+      <div class="level"><div class="level-label">RSI (1H)</div><div class="level-value">${r.rsi?.toFixed(1) ?? '—'}</div></div>
+      <div class="level"><div class="level-label">EMA50</div><div class="level-value">$${fmt(r.ema50)}</div></div>
+    </div>
+  `;
+
+  const chips = [
+    r.macdBullish ? '<span class="indicator-chip active">MACD ↑</span>' : '<span class="indicator-chip">MACD ↓</span>',
+    r.volSurge    ? '<span class="indicator-chip active">Vol Surge</span>' : '<span class="indicator-chip">Normal Vol</span>',
+    r.candleType !== 'NONE' ? `<span class="indicator-chip active">${r.candleType}</span>` : '',
+    `<span class="indicator-chip">Trend: ${r.trend ?? '?'}</span>`,
+  ].filter(Boolean).join('');
+
+  return `
+    <div class="card ${cardClass}">
+      <div class="card-header">
+        <div>
+          <div class="card-symbol">${r.symbol}</div>
+          <div class="card-exchange">Binance / Kraken  ·  ${new Date(r.scannedAt).toLocaleTimeString()}</div>
+        </div>
+        <span class="signal-badge ${badgeClass}">${badgeLabel}</span>
+      </div>
+      <div class="price-row">
+        <div class="price-value">$${fmt(r.price)}</div>
+      </div>
+      ${levelsHtml}
+      <div class="confidence-row">
+        <div class="confidence-header">
+          <span>Confidence</span>
+          <span class="confidence-num">${r.confidence ?? 0}%</span>
+        </div>
+        <div class="confidence-bar-bg">
+          <div class="confidence-bar-fill" style="width:${r.confidence ?? 0}%"></div>
+        </div>
+      </div>
+      <div class="indicators">${chips}</div>
+      ${factors ? `<div class="factors">${factors}</div>` : ''}
+    </div>
+  `;
+}
+
+// ─── Listings ─────────────────────────────────────────────────────────────────
+async function loadListings() {
+  const grid = document.getElementById('listings-cards');
+  grid.innerHTML = `<div class="state-loading" style="grid-column:1/-1"><div class="spinner"></div><div class="state-label">Scanning ${3000}+ pairs for new listings…</div></div>`;
+
+  try {
+    const resp = await fetch(`${BASE}/api/v2listings`);
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.error);
+
+    const listings = data.topListings || [];
+    const hot = listings.filter(l => l.pumpRating === 'HOT').length;
+    document.getElementById('stat-hot').textContent   = hot;
+    document.getElementById('stat-total').textContent = data.totalScanned ?? '—';
+    document.getElementById('badge-listings').textContent = listings.length;
+    document.getElementById('listings-stats').style.display = 'flex';
+
+    if (!listings.length) {
+      grid.innerHTML = `<div class="state-empty" style="grid-column:1/-1"><div>No notable new listings found.</div></div>`;
+      return;
+    }
+
+    grid.innerHTML = listings.map(l => renderListingCard(l)).join('');
+  } catch (e) {
+    grid.innerHTML = `<div class="state-empty" style="grid-column:1/-1"><div>⚠ Failed to load listings</div><div class="state-label">${e.message}</div></div>`;
+    toast('Listings error: ' + e.message, 'error');
+  }
+}
+
+function renderListingCard(l) {
+  const isHot  = l.pumpRating === 'HOT';
+  const isWarm = l.pumpRating === 'WARM';
+  const cardClass = isHot ? 'hot' : isWarm ? 'warn' : '';
+  const pumpClass = `pump-${l.pumpRating}`;
+
+  const changeClass = l.priceChange >= 0 ? 'up' : 'down';
+  const changeSign  = l.priceChange >= 0 ? '+' : '';
+
+  const factors = (l.factors || []).map(f => `<div class="factor">${f}</div>`).join('');
+
+  return `
+    <div class="card ${cardClass}">
+      <div class="card-header">
+        <div>
+          <div class="card-symbol">${l.symbol.replace('USDT', '')} <span style="font-size:12px;color:var(--text-muted)">/ USDT</span></div>
+          <div class="card-exchange">${l.exchange}  ·  ${new Date(l.scannedAt).toLocaleTimeString()}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+          <span class="pump-rating ${pumpClass}">${l.pumpRating}</span>
+          <span style="font-size:11px;color:var(--text-dim)">Score: ${l.score}/12</span>
+        </div>
+      </div>
+      <div class="price-row">
+        <div class="price-value">$${fmt(l.price)}</div>
+        <div class="price-change ${changeClass}">${changeSign}${l.priceChange?.toFixed(2)}%</div>
+      </div>
+      <div class="levels" style="grid-template-columns:1fr 1fr">
+        <div class="level"><div class="level-label">24H Volume</div><div class="level-value" style="color:var(--warn)">${fmtVol(l.volume)}</div></div>
+        <div class="level"><div class="level-label">Trades</div><div class="level-value">${l.tradeCount?.toLocaleString()}</div></div>
+      </div>
+      <div class="confidence-row">
+        <div class="confidence-header">
+          <span>Pump Score</span>
+          <span class="confidence-num">${l.confidence ?? 0}%</span>
+        </div>
+        <div class="confidence-bar-bg">
+          <div class="confidence-bar-fill" style="width:${l.confidence ?? 0}%;background:linear-gradient(90deg,var(--warn),var(--hot))"></div>
+        </div>
+      </div>
+      <div class="indicators">
+        <span class="vol-chip">24H Vol</span>
+        <span class="indicator-chip">${changeSign}${l.priceChange?.toFixed(1)}% move</span>
+      </div>
+      ${factors ? `<div class="factors">${factors}</div>` : ''}
+    </div>
+  `;
+}
+
+// ─── Positions ────────────────────────────────────────────────────────────────
+function getPositions() {
+  try { return JSON.parse(localStorage.getItem('cb_positions') || '[]'); } catch { return []; }
+}
+function savePositions(positions) {
+  localStorage.setItem('cb_positions', JSON.stringify(positions));
+  document.getElementById('badge-positions').textContent = positions.length;
+}
+
+function addPosition() {
+  const symbol   = document.getElementById('pos-symbol').value.trim().toUpperCase().replace(/\//, '');
+  const buyPrice = parseFloat(document.getElementById('pos-buy').value);
+  const qty      = parseFloat(document.getElementById('pos-qty').value) || null;
+  const tp       = parseFloat(document.getElementById('pos-tp').value) || 8;
+  const sl       = parseFloat(document.getElementById('pos-sl').value) || 5;
+
+  if (!symbol || isNaN(buyPrice) || buyPrice <= 0) {
+    toast('Enter a valid symbol and buy price', 'error');
+    return;
+  }
+  const sym = symbol.endsWith('USDT') ? symbol : symbol + 'USDT';
+  const positions = getPositions();
+  positions.push({ sym, buyPrice, qty, tp, sl, addedAt: Date.now(), advice: null, loading: true });
+  savePositions(positions);
+  toast(`Tracking ${sym} @ $${buyPrice}`, 'success');
+  switchTab('positions');
+  renderPositions();
+}
+
+function removePosition(index) {
+  const positions = getPositions();
+  positions.splice(index, 1);
+  savePositions(positions);
+  renderPositions();
+}
+
+async function fetchAdvice(pos, index) {
+  try {
+    const url = `${BASE}/api/v2advice?symbol=${pos.sym}&buyPrice=${pos.buyPrice}&tp=${pos.tp}&sl=${pos.sl}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.success) {
+      const positions = getPositions();
+      positions[index].advice = data.advice;
+      positions[index].loading = false;
+      savePositions(positions);
+      renderPositions();
+    }
+  } catch (e) {
+    const positions = getPositions();
+    positions[index].loading = false;
+    positions[index].error = e.message;
+    savePositions(positions);
+    renderPositions();
+  }
+}
+
+function renderPositions() {
+  const positions = getPositions();
+  const list = document.getElementById('positions-list');
+  document.getElementById('badge-positions').textContent = positions.length;
+
+  if (!positions.length) {
+    list.innerHTML = `<div class="state-empty"><div style="font-size:32px;margin-bottom:12px">💼</div><div>No positions tracked yet.</div><div class="state-label">Use the form above to log a coin you bought.</div></div>`;
+    return;
+  }
+
+  // Trigger advice fetch for positions that don't have it
+  positions.forEach((pos, i) => {
+    if (!pos.advice && !pos.loading && !pos.error) {
+      const positions2 = getPositions();
+      positions2[i].loading = true;
+      savePositions(positions2);
+      fetchAdvice(pos, i);
+    }
+  });
+
+  list.innerHTML = positions.map((pos, i) => renderPositionCard(pos, i)).join('');
+}
+
+function renderPositionCard(pos, i) {
+  const { sym, buyPrice, qty, tp, sl, addedAt, advice, loading, error } = pos;
+
+  const adviceHtml = loading
+    ? `<div style="padding:12px;font-size:12px;color:var(--text-muted)"><div class="spinner" style="width:20px;height:20px;margin-bottom:8px"></div>Fetching live advice…</div>`
+    : error
+    ? `<div style="padding:10px;font-size:11px;color:var(--sell)">⚠ ${error}</div>`
+    : advice ? renderAdvice(advice) : '';
+
+  const pnlPct = advice ? advice.pnlPct : null;
+  const pnlClass = pnlPct != null ? (pnlPct >= 0 ? 'up' : 'down') : '';
+  const cardClass = pnlPct != null ? (pnlPct >= 0 ? 'profit' : 'loss') : '';
+  const pnlDisplay = advice ? advice.pnlDisplay : '…';
+
+  const currentPrice = advice ? advice.currentPrice : null;
+  const value = qty && currentPrice ? (qty * currentPrice).toFixed(2) : null;
+
+  return `
+    <div class="position-card ${cardClass}">
+      <div class="position-header">
+        <div>
+          <div class="position-symbol">${sym}</div>
+          <div style="font-size:10px;color:var(--text-muted)">Added ${new Date(addedAt).toLocaleString()}</div>
+        </div>
+        <div class="position-pnl ${pnlClass}">${pnlDisplay}</div>
+      </div>
+      <div class="position-prices">
+        <div class="pos-price">
+          <div class="pos-price-label">Buy Price</div>
+          <div class="pos-price-value">$${fmt(buyPrice)}</div>
+        </div>
+        <div class="pos-price">
+          <div class="pos-price-label">Current</div>
+          <div class="pos-price-value">${currentPrice ? `$${fmt(currentPrice)}` : '…'}</div>
+        </div>
+        <div class="pos-price">
+          <div class="pos-price-label">${qty ? 'Value' : 'Target'}</div>
+          <div class="pos-price-value">${qty && value ? `$${parseFloat(value).toLocaleString()}` : advice ? `$${fmt(advice.levels?.takeProfit1)}` : '…'}</div>
+        </div>
+      </div>
+      ${adviceHtml}
+      <div class="position-footer">
+        <div class="pos-meta">TP: ${tp}%  ·  SL: ${sl}%${qty ? `  ·  Qty: ${qty}` : ''}</div>
+        <button class="btn-remove" onclick="removePosition(${i})">✕ Remove</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdvice(advice) {
+  const rec = advice.recommendation;
+  const reasons = (advice.reasons || []).map(r => `• ${r}`).join('<br>');
+  const actions = (advice.actions || []).map(a => `→ ${a}`).join('<br>');
+  const levels = advice.levels || {};
+
+  return `
+    <div class="rec-box ${rec}">
+      <div class="rec-label">${rec.replace(/_/g, ' ')}</div>
+      <div class="rec-actions">${reasons}<br><br>${actions}</div>
+    </div>
+    <div class="levels" style="margin-bottom:10px">
+      <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(levels.stopLoss)}</div></div>
+      <div class="level tp"><div class="level-label">Take Profit</div><div class="level-value">$${fmt(levels.takeProfit1)}</div></div>
+      <div class="level"><div class="level-label">Best Sell</div><div class="level-value" style="color:var(--warn)">$${fmt(levels.bestSell)}</div></div>
+    </div>
+    <div class="indicators">
+      <span class="indicator-chip">RSI: ${advice.indicators?.rsi ?? '—'}</span>
+      ${levels.ema50 ? `<span class="indicator-chip">EMA50: $${fmt(levels.ema50)}</span>` : ''}
+      <span class="indicator-chip">Urgency: ${advice.urgency}</span>
+    </div>
+  `;
+}
+
+// ─── Refresh all ─────────────────────────────────────────────────────────────
+async function refreshAll() {
+  document.getElementById('lastUpdate').textContent = 'Refreshing…';
+  clearInterval(countdownTimer);
+  await Promise.all([loadScanner(), loadListings()]);
+  if (document.getElementById('panel-positions').classList.contains('active')) {
+    // Re-fetch advice for all positions
+    const positions = getPositions().map(p => ({ ...p, advice: null, loading: false }));
+    savePositions(positions);
+    renderPositions();
+  }
+  document.getElementById('lastUpdate').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  startCountdown();
+}
+
+function startCountdown() {
+  countdownSec = refreshInterval;
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdownSec--;
+    const m = Math.floor(countdownSec / 60);
+    const s = countdownSec % 60;
+    document.getElementById('countdown').textContent = `${m}:${s.toString().padStart(2,'0')}`;
+    if (countdownSec <= 0) { refreshAll(); }
+  }, 1000);
+}
+
+// ─── Toast ────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  // Restore position badge
+  document.getElementById('badge-positions').textContent = getPositions().length;
+
+  // Load data
+  await Promise.all([loadScanner(), loadListings()]);
+  document.getElementById('lastUpdate').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  startCountdown();
+});
+</script>
+</body>
+</html>

@@ -1,12 +1,10 @@
 {
-  "name": "crypto-signal-bot",
-  "version": "1.0.1",
-  "description": "SOL/USDT crypto signal bot with backtesting and Telegram alerts",
+  "name": "crypto-signal-bot-v2",
+  "version": "2.0.0",
+  "description": "V2 Crypto Signal Bot — New Listing Scanner, Multi-TF Scanner, Position Tracker",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "backtest": "node backtest.js",
-    "scheduler": "node scheduler.js",
     "dev": "vercel dev",
     "deploy": "vercel --prod"
   },
