@@ -1,38 +1,14 @@
 /**
- * ─── V2 Enhanced Multi-Timeframe Scanner ─────────────────────────────────────
+ * ─── V2 Enhanced Multi-Timeframe Scanner (Patched) ───────────────────────────
  * GET /api/v2scan
  *
- * TRADER'S AUDIT OF ORIGINAL — GAPS IDENTIFIED & FIXED:
- *
- * ❌ GAP 1: No ADX — was trading in choppy, ranging markets
- *    ✅ FIX: ADX < 20 → WAIT. Filters ~40% of bad trades instantly.
- *
- * ❌ GAP 2: Plain RSI for entry timing (lags)
- *    ✅ FIX: StochRSI added — more responsive, catches turns earlier.
- *
- * ❌ GAP 3: No Bollinger Bands — missed volatility squeeze setups
- *    ✅ FIX: BB %B < 0.25 in uptrend = high-probability pullback entry.
- *
- * ❌ GAP 4: No OBV — volume was a crude surge check only
- *    ✅ FIX: OBV trend (EMA of OBV) confirms smart money direction.
- *
- * ❌ GAP 5: No VWAP — missed institutional price anchor
- *    ✅ FIX: Price above VWAP = institutional buy pressure. +1 score point.
- *
- * ❌ GAP 6: Fixed % stop loss (swing low × 0.995)
- *    ✅ FIX: ATR-based stop — breathes with the coin's actual volatility.
- *
- * ❌ GAP 7: Only 2 candle patterns (breakout, engulfing)
- *    ✅ FIX: 11 patterns including hammer, pin bar, morning star, doji.
- *
- * ❌ GAP 8: No RSI divergence detection
- *    ✅ FIX: Bullish divergence = highest-probability reversal signal added.
- *
- * ❌ GAP 9: No R:R check — was suggesting entries with bad payoff
- *    ✅ FIX: Minimum 1.5:1 R:R required. Below that → WAIT.
- *
- * ❌ GAP 10: No position sizing guidance
- *    ✅ FIX: ATR-based SL + R:R + multi-TP levels returned in response.
+ * PATCH NOTES (v2.1.1):
+ *  🐛 FIX 1: Telegram TypeError crashing results — sendBuyAlert/sendBearishAlert
+ *            now called inside setImmediate + typeof guard. Never pollutes results.
+ *  🐛 FIX 2: ADX < 20 was a score bonus — now a HARD BLOCK returning WAIT.
+ *  🐛 FIX 3: Bearish divergence was ignored on BUY path — now blocks BUY signal.
+ *  🐛 FIX 4: Bearish 15M patterns had no penalty on BUY — now subtracts their strength.
+ *  🐛 FIX 5: OBV bearish was silent — now flagged explicitly in factors.
  */
 
 const axios = require('axios');
@@ -89,7 +65,7 @@ async function fetchKlines(symbol, intervalMin, intervalStr, limit) {
   catch { return await krakenKlines(toKrakenPair(symbol), intervalMin, limit); }
 }
 
-// ─── Core Signal Engine (V2 Enhanced) ────────────────────────────────────────
+// ─── Core Signal Engine ───────────────────────────────────────────────────────
 
 function evaluateSignal(c4h, c1h, c15m) {
   const n4 = c4h.length, n1 = c1h.length, n15 = c15m.length;
@@ -103,150 +79,170 @@ function evaluateSignal(c4h, c1h, c15m) {
   const ema200_4h = ema(closes4h, 200)[n4 - 1];
   const ema50_4h  = ema(closes4h, 50)[n4 - 1];
   const last4h    = c4h[n4 - 1];
+  const trend4h   = last4h.close > ema200_4h ? 'UP' : 'DOWN';
 
-  const trend4h = last4h.close > ema200_4h ? 'UP' : 'DOWN';
-
-  // ADX on 4H — is there actually a trend worth trading?
+  // ADX on 4H
   const adx4h = adx(c4h, 14);
-  const isMarketTrending = adx4h.trending; // ADX > 20
 
   // ── Layer 2: 1H Momentum ─────────────────────────────────────────────────
-  const closes1h   = c1h.map(c => c.close);
-  const ema50_1h   = ema(closes1h, 50)[n1 - 1];
-  const ema20_1h   = ema(closes1h, 20)[n1 - 1];
-  const rsi1h      = rsi(closes1h, 14);
-  const rsiNow     = rsi1h[n1 - 1];
-  const srsi       = stochRsi(closes1h);
-  const macdData   = macd(closes1h);
-  const bb1h       = bollingerBands(closes1h, 20)[n1 - 1];
-  const atr1h      = atr(c1h, 14);
-  const atrNow     = atr1h[n1 - 1];
-  const vwapArr    = vwap(c1h);
-  const vwapNow    = vwapArr[n1 - 1];
-  const obvArr     = obv(c1h);
-  const obvEmaArr  = ema(obvArr, 20);
-  const obvTrend   = obvArr[n1 - 1] > (obvEmaArr[n1 - 1] || 0) ? 'BULLISH' : 'BEARISH';
+  const closes1h  = c1h.map(c => c.close);
+  const ema50_1h  = ema(closes1h, 50)[n1 - 1];
+  const ema20_1h  = ema(closes1h, 20)[n1 - 1];
+  const rsi1h     = rsi(closes1h, 14);
+  const rsiNow    = rsi1h[n1 - 1];
+  const srsi      = stochRsi(closes1h);
+  const macdData  = macd(closes1h);
+  const bb1h      = bollingerBands(closes1h, 20)[n1 - 1];
+  const atr1h     = atr(c1h, 14);
+  const atrNow    = atr1h[n1 - 1];
+  const vwapArr   = vwap(c1h);
+  const vwapNow   = vwapArr[n1 - 1];
+  const obvArr    = obv(c1h);
+  const obvEmaArr = ema(obvArr, 20);
+  const obvTrend  = obvArr[n1 - 1] > (obvEmaArr[n1 - 1] || 0) ? 'BULLISH' : 'BEARISH';
+  const div       = detectDivergence(c1h, rsi1h);
 
-  const div = detectDivergence(c1h, rsi1h);
-
-  // ── Layer 3: 15M Entry Confirmation ─────────────────────────────────────
-  const avgVol15  = volumeAvg(c15m, Math.min(20, n15 - 1));
-  const volSurge  = avgVol15 > 0 && c15m[n15 - 1].volume > avgVol15 * 1.5;
-  const patterns  = detectPatterns(c15m);
+  // ── Layer 3: 15M Entry ───────────────────────────────────────────────────
+  const avgVol15   = volumeAvg(c15m, Math.min(20, n15 - 1));
+  const volSurge   = avgVol15 > 0 && c15m[n15 - 1].volume > avgVol15 * 1.5;
+  const patterns   = detectPatterns(c15m);
   const bullishPat = patterns.filter(p => p.bullish === true);
   const bearishPat = patterns.filter(p => p.bullish === false);
-  const patternStrength = bullishPat.reduce((s, p) => s + p.strength, 0);
 
-  // ── Scoring System (max 15 points) ──────────────────────────────────────
-  let score = 0;
-  const factors = [];
+  const entryPrice = c15m[n15 - 1].close;
 
+  // ── Shared base result fields ────────────────────────────────────────────
+  const base = {
+    patterns, price: entryPrice,
+    ema20: ema20_1h, ema50: ema50_1h, ema200: ema200_4h,
+    rsi: rsiNow, stochRsiK: srsi.k, stochRsiD: srsi.d,
+    adxValue: adx4h.adx, adxBullish: adx4h.bullishDI,
+    aboveVWAP: closes1h[n1 - 1] > vwapNow,
+    bBandPctB: bb1h ? bb1h.percentB : undefined,
+    obvTrend, atr: atrNow, divergence: div,
+    scannedAt: new Date().toISOString(),
+  };
+
+  // ════════════════════════════════════════════════════════════════════════
+  // UPTREND PATH
+  // ════════════════════════════════════════════════════════════════════════
   if (trend4h === 'UP') {
-    // ── BUY scoring ──
+    // ── HARD FILTER 1: ADX < 20 = ranging market — no trade ─────────────
+    if (!adx4h.trending) {
+      return {
+        ...base, signal: 'WAIT', score: 0, confidence: 0, trend: 'UP',
+        factors: [`ADX ${adx4h.adx !== undefined ? adx4h.adx.toFixed(1) : 'N/A'} — market is ranging (ADX < 20). No directional edge. Wait for trend.`],
+        stopLoss: null, takeProfits: null, riskReward: null,
+        nearestSupport: null, nearestResistance: null,
+      };
+    }
+
+    // ── HARD FILTER 2: Bearish divergence = trend exhaustion — no trade ──
+    if (div.bearish) {
+      return {
+        ...base, signal: 'WAIT', score: 2, confidence: 13, trend: 'UP',
+        factors: [
+          '4H uptrend confirmed, BUT:',
+          '⚠️ Bearish RSI divergence: price making higher highs while RSI makes lower highs.',
+          'Classic trend exhaustion. High reversal probability. DO NOT BUY here.',
+          'Wait for RSI to reset (drop below 40) before re-evaluating.',
+        ],
+        stopLoss: null, takeProfits: null, riskReward: null,
+        nearestSupport: null, nearestResistance: null,
+      };
+    }
+
+    // ── SCORING ──────────────────────────────────────────────────────────
+    let score = 0;
+    const factors = [];
 
     // Trend Quality (0–4)
     score += 2; factors.push('4H uptrend (above EMA200)');
     if (adx4h.adx > 25) { score += 1; factors.push(`ADX ${adx4h.adx.toFixed(1)} — strong trend`); }
-    if (isMarketTrending && last4h.close > ema50_4h) { score += 1; factors.push('4H price above EMA50 — trend intact'); }
+    if (last4h.close > ema50_4h) { score += 1; factors.push('4H price above EMA50 — trend intact'); }
 
     // Momentum Quality (0–4)
     const rsiInZone = rsiNow >= 38 && rsiNow <= 58;
-    if (rsiInZone) { score += 2; factors.push(`RSI ${rsiNow.toFixed(1)} — pullback buy zone (38–58)`); }
-    else if (rsiNow > 65) { score -= 2; factors.push(`RSI ${rsiNow.toFixed(1)} — overbought, AVOID`); }
-    else if (rsiNow < 32) { score += 1; factors.push(`RSI ${rsiNow.toFixed(1)} — oversold, watch for bounce`); }
+    if (rsiInZone)       { score += 2; factors.push(`RSI ${rsiNow.toFixed(1)} — pullback buy zone (38–58)`); }
+    else if (rsiNow > 65){ score -= 2; factors.push(`RSI ${rsiNow.toFixed(1)} — overbought, AVOID`); }
+    else if (rsiNow < 32){ score += 1; factors.push(`RSI ${rsiNow.toFixed(1)} — oversold, watch for bounce`); }
 
-    if (srsi.k !== undefined && srsi.k < 25)    { score += 1; factors.push(`StochRSI %K ${srsi.k.toFixed(1)} — oversold (entry zone)`); }
-    if (srsi.kCrossedAboveD)                     { score += 1; factors.push('StochRSI bullish cross (%K crossed above %D)'); }
+    if (srsi.k !== undefined && srsi.k < 25) { score += 1; factors.push(`StochRSI %K ${srsi.k.toFixed(1)} — oversold (entry zone)`); }
+    if (srsi.kCrossedAboveD)                  { score += 1; factors.push('StochRSI bullish cross (%K above %D)'); }
 
-    if (macdData.histogramGrowing)               { score += 1; factors.push('MACD histogram expanding — momentum building'); }
-    else if (macdData.bullishCross)              { score += 1; factors.push('MACD bullish crossover'); }
+    if (macdData.histogramGrowing)            { score += 1; factors.push('MACD histogram expanding — momentum building'); }
+    else if (macdData.bullishCross)           { score += 1; factors.push('MACD bullish crossover'); }
 
-    // Volatility & Structure (0–4)
-    if (bb1h && bb1h.percentB < 0.25)           { score += 2; factors.push(`BB %B ${(bb1h.percentB * 100).toFixed(0)}% — near lower band (buy zone)`); }
-    else if (bb1h && bb1h.percentB > 0.85)      { score -= 1; factors.push('BB %B near upper band — extended, wait for pullback'); }
+    // Volatility & Structure (0–3)
+    if (bb1h && bb1h.percentB < 0.25)        { score += 2; factors.push(`BB %B ${(bb1h.percentB * 100).toFixed(0)}% — near lower band (buy zone)`); }
+    else if (bb1h && bb1h.percentB > 0.85)   { score -= 1; factors.push('BB %B near upper band — extended'); }
 
     const nearEma50 = ema50_1h && Math.abs(closes1h[n1 - 1] - ema50_1h) / ema50_1h <= 0.04;
-    if (nearEma50)                               { score += 1; factors.push('Price pulled back to 1H EMA50 — value area'); }
+    if (nearEma50) { score += 1; factors.push('Price pulled back to 1H EMA50 — value area'); }
 
     // Volume & Institutional Flow (0–3)
-    if (closes1h[n1 - 1] > vwapNow)             { score += 1; factors.push('Price above VWAP — institutional buy pressure'); }
-    if (obvTrend === 'BULLISH')                  { score += 1; factors.push('OBV bullish — volume confirms accumulation'); }
-    if (volSurge)                                { score += 1; factors.push('Volume surge on 15M — retail FOMO kicking in'); }
+    if (closes1h[n1 - 1] > vwapNow) { score += 1; factors.push('Price above VWAP — institutional buy pressure'); }
+    if (obvTrend === 'BULLISH')      { score += 1; factors.push('OBV bullish — smart money accumulating'); }
+    else                             { factors.push('⚠️ OBV bearish — volume not confirming price move, caution'); }
+    if (volSurge)                    { score += 1; factors.push('Volume surge on 15M'); }
 
-    // Entry Confirmation (0–4 — pattern strength capped at 4)
-    const capPat = Math.min(patternStrength, 4);
-    if (capPat > 0) {
-      score += capPat;
-      factors.push(`15M patterns: ${bullishPat.map(p => p.name).join(', ')}`);
+    // Candle Patterns — bullish adds, bearish subtracts (FIX)
+    const bullishStr = bullishPat.reduce((s, p) => s + p.strength, 0);
+    const bearishStr = bearishPat.reduce((s, p) => s + p.strength, 0);
+    if (bullishStr > 0) {
+      score += Math.min(bullishStr, 4);
+      factors.push(`15M bullish patterns: ${bullishPat.map(p => p.name).join(', ')}`);
+    }
+    if (bearishStr > 0) {
+      score -= bearishStr;
+      factors.push(`⚠️ 15M bearish patterns: ${bearishPat.map(p => p.name).join(', ')} — entry timing is poor`);
     }
 
-    // Divergence bonus (high probability setup)
-    if (div.bullish) { score += 2; factors.push('⚡ Bullish RSI divergence — reversal signal (premium setup)'); }
+    // Bullish divergence bonus
+    if (div.bullish) { score += 2; factors.push('⚡ Bullish RSI divergence — premium reversal setup'); }
 
-    // ── Build result ──
+    // ── Build result ──────────────────────────────────────────────────────
     const confidence = Math.min(100, Math.round((score / 15) * 100));
-
-    // ATR-based stop (dynamic)
-    const entryPrice = c15m[n15 - 1].close;
     const stopLoss   = calcATRStop({ entryPrice, atrValue: atrNow, multiplier: 1.5 });
     const tps        = stopLoss ? calcTakeProfits({ entryPrice, stopLoss }) : null;
     const rr         = tps && stopLoss ? calcRiskReward({ entryPrice, stopLoss, takeProfit: tps.tp1.price }) : null;
 
-    // Require minimum R:R of 1.5 — anything less is not worth the risk
-    const signal = score >= 7 && (rr === null || rr >= 1.5) ? 'BUY' : 'WAIT';
-    if (score >= 7 && rr !== null && rr < 1.5) factors.push(`⚠️ R:R ${rr}:1 is below 1.5 minimum — WAIT for better entry`);
+    if (score >= 7 && rr !== null && rr < 1.5) {
+      factors.push(`⚠️ R:R ${rr}:1 below 1.5 minimum — WAIT for better entry price`);
+    }
 
+    const signal = score >= 7 && (rr === null || rr >= 1.5) ? 'BUY' : 'WAIT';
     const { support, resistance } = findSwingLevels(c1h, 3);
 
     return {
-      signal, score, confidence, trend: 'UP',
-      factors, patterns,
-      price: entryPrice,
-      ema20: ema20_1h, ema50: ema50_1h, ema200: ema200_4h,
-      rsi: rsiNow, stochRsiK: srsi.k, stochRsiD: srsi.d,
-      adxValue: adx4h.adx, adxBullish: adx4h.bullishDI,
-      aboveVWAP: closes1h[n1 - 1] > vwapNow,
-      bBandPctB: bb1h ? bb1h.percentB : undefined,
-      obvTrend,
-      atr: atrNow,
-      stopLoss,
-      takeProfits: tps,
-      riskReward: rr,
-      divergence: div,
+      ...base, signal, score, confidence, trend: 'UP', factors,
+      stopLoss, takeProfits: tps, riskReward: rr,
       nearestSupport:    support[0]    || null,
       nearestResistance: resistance[resistance.length - 1] || null,
-      scannedAt: new Date().toISOString(),
     };
   }
 
-  // ── BEARISH path ──────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // DOWNTREND PATH
+  // ════════════════════════════════════════════════════════════════════════
   let bScore = 0;
   const bFactors = [];
 
   bScore += 2; bFactors.push('4H downtrend (below EMA200)');
-  if (adx4h.adx > 25) { bScore += 1; bFactors.push(`ADX ${adx4h.adx.toFixed(1)} — strong downtrend`); }
-  if (!adx4h.bullishDI) { bScore += 1; bFactors.push('-DI dominates — sellers in control'); }
-  if (rsiNow > 55) { bScore += 1; bFactors.push(`RSI ${rsiNow.toFixed(1)} — bounce likely to fail (overbought in downtrend)`); }
-  if (rsiNow < 30) { bFactors.push(`RSI ${rsiNow.toFixed(1)} — oversold, possible short-term bounce`); }
+  if (adx4h.adx > 25)   { bScore += 1; bFactors.push(`ADX ${adx4h.adx.toFixed(1)} — strong downtrend`); }
+  if (!adx4h.bullishDI) { bScore += 1; bFactors.push('-DI dominant — sellers in control'); }
+  if (rsiNow > 55)      { bScore += 1; bFactors.push(`RSI ${rsiNow.toFixed(1)} — overbought in downtrend (bounce likely to fail)`); }
+  if (rsiNow < 30)      { bFactors.push(`RSI ${rsiNow.toFixed(1)} — oversold, possible short-term bounce`); }
   if (bearishPat.length > 0) { bScore += 2; bFactors.push(`Bearish patterns: ${bearishPat.map(p => p.name).join(', ')}`); }
-  if (div.bearish) { bScore += 2; bFactors.push('⚡ Bearish RSI divergence — weakening upside momentum'); }
+  if (div.bearish)      { bScore += 2; bFactors.push('⚡ Bearish RSI divergence — momentum collapsing'); }
 
   return {
-    signal: 'BEARISH_ALERT',
+    ...base, signal: 'BEARISH_ALERT', trend: 'DOWN',
     score: bScore,
     confidence: Math.min(100, Math.round((bScore / 10) * 100)),
-    trend: 'DOWN',
     factors: bFactors,
-    patterns,
-    price: c15m[n15 - 1].close,
-    ema50: ema50_1h, ema200: ema200_4h,
-    rsi: rsiNow, stochRsiK: srsi.k,
-    adxValue: adx4h.adx,
-    aboveVWAP: closes1h[n1 - 1] > vwapNow,
-    obvTrend,
     stopLoss: null, takeProfits: null, riskReward: null,
-    divergence: div,
-    scannedAt: new Date().toISOString(),
+    nearestSupport: null, nearestResistance: null,
   };
 }
 
@@ -270,20 +266,29 @@ module.exports = async (req, res) => {
           fetchKlines(symbol, 15,  '15m',  50),
         ]);
 
-        const sig = evaluateSignal(c4h, c1h, c15m);
+        const sig    = evaluateSignal(c4h, c1h, c15m);
         const result = { symbol, ...sig };
         results.push(result);
 
-        // Fire Telegram alerts (non-blocking)
-        if (sig.signal === 'BUY')           sendBuyAlert(result).catch(e => console.error('[TG]', e.message));
-        if (sig.signal === 'BEARISH_ALERT') sendBearishAlert(result).catch(e => console.error('[TG]', e.message));
+        // FIX: Telegram calls fully isolated — TypeError can NEVER reach outer catch
+        setImmediate(() => {
+          try {
+            if (sig.signal === 'BUY' && typeof sendBuyAlert === 'function') {
+              sendBuyAlert(result).catch(e => console.error('[TG BUY]', e.message));
+            }
+            if (sig.signal === 'BEARISH_ALERT' && typeof sendBearishAlert === 'function') {
+              sendBearishAlert(result).catch(e => console.error('[TG BEARISH]', e.message));
+            }
+          } catch (tgErr) {
+            console.error('[TG] Alert error (non-fatal):', tgErr.message);
+          }
+        });
 
       } catch (err) {
         results.push({ symbol, signal: 'ERROR', error: err.message, score: 0, confidence: 0 });
       }
     }
 
-    // Sort: BUY first by score, then WAIT, then BEARISH, then ERROR
     const order = { BUY: 0, WAIT: 1, BEARISH_ALERT: 2, ERROR: 3 };
     results.sort((a, b) => (order[a.signal] - order[b.signal]) || (b.score - a.score));
 
