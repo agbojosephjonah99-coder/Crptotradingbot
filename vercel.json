@@ -1,13 +1,12 @@
 {
   "version": 2,
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/$1.js"
-    },
-    {
-      "src": "/dashboard",
-      "dest": "/public/dashboard.html"
-    }
+    { "src": "/api/(.*)", "dest": "/api/$1.js" },
+    { "src": "/dashboard", "dest": "/public/dashboard.html" },
+    { "src": "/",          "dest": "/public/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/v2scan",     "schedule": "0 * * * *"    },
+    { "path": "/api/v2listings", "schedule": "*/30 * * * *" }
   ]
 }
