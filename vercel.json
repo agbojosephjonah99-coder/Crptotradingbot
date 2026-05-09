@@ -10,4 +10,4 @@
     { "path": "/api/v2listings", "schedule": "*/30 * * * *" },
     { "path": "/api/v2monitor",  "schedule": "0 * * * *"    }
   ]
-}
+}}
