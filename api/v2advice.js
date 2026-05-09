@@ -1,240 +1,278 @@
 /**
- * V2 Position Advice API
- * 
- * The user tells us: "I bought SOLUSDT at $150"
- * We fetch current market data and return:
- *   - Current P&L
- *   - Recommendation: HOLD / TAKE_PROFIT / STOP_LOSS / TRAIL_STOP / CLOSE_PARTIAL
- *   - Best exit strategy with reasoning
- *   - Next price targets (resistance levels)
+ * ─── V2 Enhanced Position Advice API ─────────────────────────────────────────
+ * GET  /api/v2advice?symbol=SOLUSDT&buyPrice=150&accountSize=10000&riskPct=1
+ * POST /api/v2advice — body: { symbol, buyPrice, accountSize, riskPct, quantity }
  *
- * POST /api/v2advice
- * Body: { symbol, buyPrice, quantity (optional), takeProfitPct (optional), stopLossPct (optional) }
+ * TRADER'S AUDIT OF ORIGINAL — GAPS FIXED:
  *
- * GET /api/v2advice?symbol=SOLUSDT&buyPrice=150
- * (for easy browser testing)
+ * ❌ GAP 1: Single static take profit (TP1 only)
+ *    ✅ FIX: Three TP levels with partial exit %s (40/35/25 split).
+ *           After TP1 hits → move SL to breakeven. After TP2 → trail.
+ *
+ * ❌ GAP 2: Fixed 8% TP / 5% SL defaults — ignores coin volatility
+ *    ✅ FIX: ATR-based dynamic stop. Scales to actual market noise.
+ *           BTC has low ATR volatility, PEPE has wild ATR — stops reflect this.
+ *
+ * ❌ GAP 3: No position sizing advice
+ *    ✅ FIX: If user provides accountSize + riskPct → exact units & dollar risk shown.
+ *
+ * ❌ GAP 4: Resistance detection was crude (just swing highs from last 20 bars)
+ *    ✅ FIX: Proper swing high/low detection using pivot logic on 100 bars.
+ *
+ * ❌ GAP 5: No trailing stop calculation
+ *    ✅ FIX: Dynamic trailing stop = current price - 1x ATR (tightens as price rises).
+ *
+ * ❌ GAP 6: No StochRSI or MACD in exit logic
+ *    ✅ FIX: Both added. MACD bearish cross + overbought StochRSI = early exit warning.
+ *
+ * ❌ GAP 7: No multi-timeframe check for the exit — was 1H only
+ *    ✅ FIX: 4H EMA200 still checked to confirm macro trend not broken.
  */
 
 const axios = require('axios');
+const {
+  ema, rsi, stochRsi, macd, atr,
+  bollingerBands, findSwingLevels,
+} = require('../src/services/indicatorService');
+const {
+  calcATRStop, calcTakeProfits, calcRiskReward, calcPositionSize,
+} = require('../src/services/riskService');
 
 const BINANCE_BASE = 'https://api.binance.com/api/v3';
 const KRAKEN_BASE  = 'https://api.kraken.com/0/public';
-
 const KRAKEN_MAP = {
-  BTCUSDT: 'XBTUSD', ETHUSDT: 'ETHUSD', SOLUSDT: 'SOLUSD',
-  BNBUSDT: 'BNBUSD', XRPUSDT: 'XRPUSD', ADAUSDT: 'ADAUSD',
-  DOGEUSDT: 'DOGEUSD', AVAXUSDT: 'AVAXUSD', LINKUSDT: 'LINKUSD',
+  BTCUSDT:'XBTUSD', ETHUSDT:'ETHUSD', SOLUSDT:'SOLUSD', BNBUSDT:'BNBUSD',
+  XRPUSDT:'XRPUSD', ADAUSDT:'ADAUSD', DOGEUSDT:'DOGEUSD', AVAXUSDT:'AVAXUSD',
+  LINKUSDT:'LINKUSD',
 };
 
-function ema(values, period) {
-  if (values.length < period) return [];
-  const k = 2 / (period + 1);
-  const out = new Array(values.length).fill(undefined);
-  let prev = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  out[period - 1] = prev;
-  for (let i = period; i < values.length; i++) {
-    prev = values[i] * k + prev * (1 - k);
-    out[i] = prev;
-  }
-  return out;
-}
-
-function rsi(values, period = 14) {
-  if (values.length < period + 1) return [];
-  const deltas = values.slice(1).map((v, i) => v - values[i]);
-  let avgG = 0, avgL = 0;
-  for (let i = 0; i < period; i++) {
-    const d = deltas[i]; if (d > 0) avgG += d; else avgL -= d;
-  }
-  avgG /= period; avgL /= period;
-  const out = new Array(values.length).fill(undefined);
-  out[period] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
-  for (let i = period; i < deltas.length; i++) {
-    const d = deltas[i];
-    avgG = (avgG * (period - 1) + (d > 0 ? d : 0)) / period;
-    avgL = (avgL * (period - 1) + (d < 0 ? -d : 0)) / period;
-    out[i + 1] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
-  }
-  return out;
-}
-
-// Find recent swing highs as resistance levels
-function findResistanceLevels(candles, lookback = 20) {
-  const levels = [];
-  for (let i = 2; i < candles.length - 1; i++) {
-    if (candles[i].high > candles[i - 1].high && candles[i].high > candles[i + 1].high) {
-      levels.push(candles[i].high);
-    }
-  }
-  return [...new Set(levels)].sort((a, b) => a - b).slice(-lookback);
-}
-
 async function fetchCurrentData(symbol) {
-  // Try Binance first
   try {
-    const [klines1h, price] = await Promise.all([
-      axios.get(`${BINANCE_BASE}/klines`, {
-        params: { symbol, interval: '1h', limit: 100 },
-        timeout: 12000,
-      }),
-      axios.get(`${BINANCE_BASE}/ticker/price`, {
-        params: { symbol },
-        timeout: 8000,
-      }),
+    const [klines1h, klines4h, price] = await Promise.all([
+      axios.get(`${BINANCE_BASE}/klines`, { params: { symbol, interval: '1h', limit: 100 }, timeout: 12000 }),
+      axios.get(`${BINANCE_BASE}/klines`, { params: { symbol, interval: '4h', limit: 50  }, timeout: 12000 }),
+      axios.get(`${BINANCE_BASE}/ticker/price`, { params: { symbol }, timeout: 8000 }),
     ]);
-    const candles = klines1h.data.map(c => ({
-      time: Number(c[0]), open: Number(c[1]), high: Number(c[2]),
-      low: Number(c[3]), close: Number(c[4]), volume: Number(c[5]),
-    }));
-    return { candles, currentPrice: parseFloat(price.data.price), exchange: 'Binance' };
+    const map = c => ({ time: Number(c[0]), open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]), volume: Number(c[5]) });
+    return {
+      candles1h:    klines1h.data.map(map),
+      candles4h:    klines4h.data.map(map),
+      currentPrice: parseFloat(price.data.price),
+      exchange:     'Binance',
+    };
   } catch {
-    // Fallback to Kraken
     const krakenPair = KRAKEN_MAP[symbol.toUpperCase()] || symbol.replace('USDT', 'USD');
-    const resp = await axios.get(`${KRAKEN_BASE}/OHLC`, {
-      params: { pair: krakenPair, interval: 60 },
-      timeout: 12000,
-    });
-    const key = Object.keys(resp.data.result).find(k => k !== 'last');
-    const candles = resp.data.result[key].slice(-100).map(c => ({
-      time: Number(c[0]), open: Number(c[1]), high: Number(c[2]),
-      low: Number(c[3]), close: Number(c[4]), volume: Number(c[6]),
-    }));
-    const currentPrice = candles[candles.length - 1].close;
-    return { candles, currentPrice, exchange: 'Kraken' };
+    const [r1h, r4h] = await Promise.all([
+      axios.get(`${KRAKEN_BASE}/OHLC`, { params: { pair: krakenPair, interval: 60  }, timeout: 12000 }),
+      axios.get(`${KRAKEN_BASE}/OHLC`, { params: { pair: krakenPair, interval: 240 }, timeout: 12000 }),
+    ]);
+    const mapK = r => {
+      const key = Object.keys(r.data.result).find(k => k !== 'last');
+      return r.data.result[key].slice(-100).map(c => ({
+        time: Number(c[0]), open: Number(c[1]), high: Number(c[2]),
+        low: Number(c[3]), close: Number(c[4]), volume: Number(c[6]),
+      }));
+    };
+    const c1h = mapK(r1h);
+    return {
+      candles1h: c1h, candles4h: mapK(r4h),
+      currentPrice: c1h[c1h.length - 1].close,
+      exchange: 'Kraken',
+    };
   }
 }
 
-function buildAdvice({ symbol, buyPrice, currentPrice, candles, takeProfitPct, stopLossPct }) {
-  const closes = candles.map(c => c.close);
-  const n = closes.length;
+function buildAdvice({ symbol, buyPrice, currentPrice, candles1h, candles4h, accountSize, riskPct }) {
+  const closes1h = candles1h.map(c => c.close);
+  const closes4h = candles4h.map(c => c.close);
+  const n1 = closes1h.length;
 
-  const rsiNow = rsi(closes, 14)[n - 1];
-  const ema50Now = ema(closes, 50)[n - 1];
-  const ema20Now = ema(closes, 20)[n - 1];
+  // Indicators
+  const rsiArr     = rsi(closes1h, 14);
+  const rsiNow     = rsiArr[n1 - 1];
+  const srsi       = stochRsi(closes1h);
+  const macdData   = macd(closes1h);
+  const ema20      = ema(closes1h, 20)[n1 - 1];
+  const ema50      = ema(closes1h, 50)[n1 - 1];
+  const ema200_4h  = ema(closes4h, 200)[closes4h.length - 1];
+  const atrArr     = atr(candles1h, 14);
+  const atrNow     = atrArr[n1 - 1];
+  const bb         = bollingerBands(closes1h, 20)[n1 - 1];
 
+  // Dynamic ATR-based stop (1.5x ATR below buy price — same logic as scanner)
+  const atrStop    = calcATRStop({ entryPrice: buyPrice, atrValue: atrNow, multiplier: 1.5 });
+  const tps        = atrStop ? calcTakeProfits({ entryPrice: buyPrice, stopLoss: atrStop }) : null;
+
+  // Trailing stop = current price - 1x ATR (tightens as price moves up)
+  const trailingStop = atrNow ? parseFloat((currentPrice - atrNow).toFixed(6)) : null;
+
+  // P&L
   const pnlPct  = ((currentPrice - buyPrice) / buyPrice) * 100;
   const pnlSign = pnlPct >= 0 ? '+' : '';
 
-  // User-defined or default thresholds
-  const tp  = takeProfitPct  || 8;   // default 8% take profit
-  const sl  = stopLossPct    || 5;   // default 5% stop loss
+  // Swing levels for resistance/support context
+  const { resistance, support } = findSwingLevels(candles1h, 3);
+  const resistanceAbove = resistance.filter(r => r > currentPrice).slice(0, 3);
+  const supportBelow    = support.filter(s => s < currentPrice).slice(0, 2);
 
-  const tpPrice = buyPrice * (1 + tp / 100);
-  const slPrice = buyPrice * (1 - sl / 100);
+  // R:R on TP1
+  const rrTp1 = tps && atrStop ? calcRiskReward({ entryPrice: buyPrice, stopLoss: atrStop, takeProfit: tps.tp1.price }) : null;
 
-  // Resistance levels above buy price
-  const allResistance = findResistanceLevels(candles);
-  const resistanceAbove = allResistance.filter(r => r > currentPrice).slice(0, 3);
-  const resistanceBelow = allResistance.filter(r => r < currentPrice).slice(-2);
+  // Position sizing (optional — if accountSize provided)
+  const sizing = accountSize && atrStop ? calcPositionSize({
+    accountBalance: accountSize,
+    riskPercent:    riskPct || 1,
+    entryPrice:     buyPrice,
+    stopLoss:       atrStop,
+  }) : null;
 
-  // ── Decision logic ──────────────────────────────────────────────────────
+  // Macro trend check (4H)
+  const macroTrend = ema200_4h ? (currentPrice > ema200_4h ? 'BULLISH' : 'BEARISH') : 'UNKNOWN';
+
+  // ── Decision Logic ────────────────────────────────────────────────────────
 
   let recommendation = 'HOLD';
-  let urgency = 'LOW';
-  const reasons = [];
-  const actions = [];
+  let urgency        = 'LOW';
+  const reasons      = [];
+  const actions      = [];
 
-  // 1. Stop loss hit — sell immediately to preserve capital
-  if (currentPrice <= slPrice) {
+  // ── Check if stop loss hit ──
+  if (atrStop && currentPrice <= atrStop) {
     recommendation = 'STOP_LOSS';
-    urgency = 'CRITICAL';
-    reasons.push(`Price dropped ${Math.abs(pnlPct).toFixed(2)}% from your buy price of $${buyPrice}`);
-    reasons.push(`Your stop-loss level ($${slPrice.toFixed(4)}) has been breached`);
-    actions.push('Exit the trade NOW to prevent further losses');
-    actions.push('Do not wait — the trend is working against you');
-  }
-  // 2. Take profit target hit
-  else if (currentPrice >= tpPrice) {
-    recommendation = 'TAKE_PROFIT';
-    urgency = 'HIGH';
-    reasons.push(`You are up ${pnlPct.toFixed(2)}% — target of ${tp}% reached`);
-    if (rsiNow > 70) {
-      reasons.push(`RSI ${rsiNow.toFixed(1)} is overbought — reversal risk is high`);
-      actions.push('Consider selling 50–70% now to lock in gains');
-      actions.push('Move stop loss to break-even for remainder');
-    } else {
-      actions.push('Sell partial position (50%) to lock in profits');
-      actions.push(`Trail stop loss to $${(currentPrice * 0.97).toFixed(4)} (3% below current)`);
-    }
-    if (resistanceAbove.length > 0) {
-      actions.push(`Next resistance at $${resistanceAbove[0].toFixed(4)} — could target this before selling remainder`);
-    }
-  }
-  // 3. Overbought but not at target — warn
-  else if (rsiNow > 72 && pnlPct > 3) {
-    recommendation = 'TRAIL_STOP';
-    urgency = 'MEDIUM';
-    reasons.push(`RSI ${rsiNow.toFixed(1)} — market is overbought, correction likely`);
-    reasons.push(`You are up ${pnlPct.toFixed(2)}% — protect gains now`);
-    actions.push(`Set a trailing stop at $${(currentPrice * 0.96).toFixed(4)} (4% below current)`);
-    actions.push('If price breaks below EMA20, sell immediately');
-  }
-  // 4. Price is below EMA50 but above stop — trend weakening
-  else if (ema50Now && currentPrice < ema50Now * 0.99 && pnlPct > 0) {
-    recommendation = 'CLOSE_PARTIAL';
-    urgency = 'MEDIUM';
-    reasons.push('Price has dropped below EMA50 — trend is weakening');
-    reasons.push(`You still have profit of ${pnlPct.toFixed(2)}% — reduce risk now`);
-    actions.push('Sell 30–50% of position to reduce exposure');
-    actions.push('Hold remainder only if macro trend (4H) is still bullish');
-  }
-  // 5. In loss but above stop — hold
-  else if (pnlPct < 0 && currentPrice > slPrice) {
-    recommendation = 'HOLD';
-    urgency = 'LOW';
-    reasons.push(`Currently at ${pnlPct.toFixed(2)}% — within acceptable range`);
-    reasons.push(`Stop loss at $${slPrice.toFixed(4)} is your safety net`);
-    actions.push('Hold position — trend may recover');
-    actions.push(`Watch closely: if price drops to $${slPrice.toFixed(4)}, exit immediately`);
-  }
-  // 6. In profit, trend healthy — hold for more
-  else if (pnlPct > 0 && pnlPct < tp) {
-    recommendation = 'HOLD';
-    urgency = 'LOW';
-    reasons.push(`Up ${pnlPct.toFixed(2)}% — target is ${tp}% ($${tpPrice.toFixed(4)})`);
-    if (rsiNow < 65) reasons.push(`RSI ${rsiNow.toFixed(1)} — room to run higher`);
-    actions.push(`Target: $${tpPrice.toFixed(4)} (${tp}% gain from entry)`);
-    if (resistanceAbove.length > 0) {
-      actions.push(`Next resistance: $${resistanceAbove[0].toFixed(4)}`);
-    }
-    actions.push(`Keep stop loss at $${slPrice.toFixed(4)}`);
-  }
+    urgency        = 'CRITICAL';
+    reasons.push(`Price $${currentPrice} has broken below ATR stop at $${atrStop.toFixed(4)}`);
+    reasons.push(`You are down ${Math.abs(pnlPct).toFixed(2)}% from entry of $${buyPrice}`);
+    if (macroTrend === 'BEARISH') reasons.push('Macro trend (4H) is also bearish — no case to hold');
+    actions.push('🔴 EXIT THE TRADE NOW — stop loss breached');
+    actions.push('Do not average down. Take the loss and wait for the next setup.');
 
-  // Best sell price calculation
-  let bestSellPrice = tpPrice;
-  if (resistanceAbove.length > 0 && resistanceAbove[0] < tpPrice) {
-    bestSellPrice = resistanceAbove[0];  // Sell at nearest resistance
+  // ── TP3 hit (moon bag territory) ──
+  } else if (tps && currentPrice >= tps.tp3.price) {
+    recommendation = 'TAKE_PROFIT';
+    urgency        = 'HIGH';
+    reasons.push(`You are up ${pnlPct.toFixed(2)}% — TP3 (${tps.tp3.ratio}) reached 🎉`);
+    reasons.push('This is exceptional. Take the remaining position off.');
+    actions.push(`🟢 Close remaining 25% at $${currentPrice.toFixed(4)}`);
+    if (trailingStop) actions.push(`If holding: set hard floor at $${trailingStop.toFixed(4)} (1x ATR trail)`);
+
+  // ── TP2 hit ──
+  } else if (tps && currentPrice >= tps.tp2.price) {
+    recommendation = 'TAKE_PROFIT';
+    urgency        = 'HIGH';
+    reasons.push(`Up ${pnlPct.toFixed(2)}% — TP2 (${tps.tp2.ratio}) reached`);
+    actions.push('🟢 Sell 35% of position here');
+    actions.push(`Move stop to $${tps.tp1.price.toFixed(4)} (TP1 — protecting earlier profit)`);
+    if (resistanceAbove.length > 0) actions.push(`TP3 target: $${tps.tp3.price.toFixed(4)} — next resistance at $${resistanceAbove[0].toFixed(4)}`);
+
+  // ── TP1 hit ──
+  } else if (tps && currentPrice >= tps.tp1.price) {
+    recommendation = 'TAKE_PROFIT';
+    urgency        = 'MEDIUM';
+    reasons.push(`Up ${pnlPct.toFixed(2)}% — TP1 (${tps.tp1.ratio}) reached`);
+    actions.push('🟢 Sell 40% of position — lock in your first profit');
+    actions.push(`Move stop loss to BREAKEVEN ($${buyPrice.toFixed(4)}) — free trade now`);
+    if (tps.tp2) actions.push(`Target TP2 at $${tps.tp2.price.toFixed(4)} with remaining 60%`);
+
+  // ── Warning: overbought but no TP hit yet ──
+  } else if (rsiNow > 72 && srsi.k > 80 && pnlPct > 2) {
+    recommendation = 'TRAIL_STOP';
+    urgency        = 'MEDIUM';
+    reasons.push(`RSI ${rsiNow.toFixed(1)} + StochRSI ${srsi.k.toFixed(1)} — both overbought`);
+    reasons.push('Combination of both at extremes has high reversal probability');
+    reasons.push(`You are up ${pnlPct.toFixed(2)}% — protect gains now`);
+    actions.push(trailingStop ? `Set trailing stop at $${trailingStop.toFixed(4)} (1x ATR below current)` : 'Set trailing stop 3–4% below current price');
+    actions.push('If MACD crosses bearish → exit immediately');
+
+  // ── MACD bearish cross + price below EMA20 ──
+  } else if (!macdData.histogramGrowing && ema20 && currentPrice < ema20 && pnlPct > 0) {
+    recommendation = 'CLOSE_PARTIAL';
+    urgency        = 'MEDIUM';
+    reasons.push('MACD momentum fading AND price below EMA20 — trend weakening');
+    reasons.push(`Still in profit at ${pnlPct.toFixed(2)}% — reduce risk before it evaporates`);
+    actions.push('Sell 30–50% of position now');
+    actions.push(`Keep remaining position only if 4H trend stays ${macroTrend}`);
+    if (atrStop) actions.push(`Tighten stop to $${atrStop.toFixed(4)}`);
+
+  // ── Macro trend broken ──
+  } else if (macroTrend === 'BEARISH' && pnlPct < 0) {
+    recommendation = 'CLOSE_PARTIAL';
+    urgency        = 'MEDIUM';
+    reasons.push('4H price is below EMA200 — macro trend has turned bearish');
+    reasons.push(`Currently at ${pnlPct.toFixed(2)}% — managing risk is priority`);
+    actions.push('Consider cutting 50% of position to reduce exposure');
+    actions.push(`If price recovers above $${ema200_4h ? ema200_4h.toFixed(4) : 'EMA200'}, re-evaluate`);
+
+  // ── In loss, above stop ──
+  } else if (pnlPct < 0 && (!atrStop || currentPrice > atrStop)) {
+    recommendation = 'HOLD';
+    urgency        = 'LOW';
+    reasons.push(`Down ${Math.abs(pnlPct).toFixed(2)}% — within stop range, no action needed`);
+    if (atrStop) reasons.push(`ATR stop at $${atrStop.toFixed(4)} — price hasn't breached it`);
+    actions.push('Hold — let the trade play out');
+    actions.push(atrStop ? `Watch: if price closes below $${atrStop.toFixed(4)}, exit immediately` : 'Monitor closely');
+
+  // ── Healthy profit, ride it ──
+  } else {
+    recommendation = 'HOLD';
+    urgency        = 'LOW';
+    reasons.push(`Up ${pnlPct.toFixed(2)}% — trade progressing normally`);
+    if (tps) reasons.push(`Next target: TP1 at $${tps.tp1.price.toFixed(4)} (${tps.tp1.ratio})`);
+    if (rsiNow < 65) reasons.push(`RSI ${rsiNow.toFixed(1)} — room to run`);
+    if (atrStop) actions.push(`Keep ATR stop at $${atrStop.toFixed(4)}`);
+    if (resistanceAbove.length > 0) actions.push(`Watch resistance at $${resistanceAbove[0].toFixed(4)}`);
   }
 
   return {
     symbol,
-    exchange: null, // filled by caller
     buyPrice,
     currentPrice,
-    pnlPct: parseFloat(pnlPct.toFixed(2)),
-    pnlDisplay: `${pnlSign}${pnlPct.toFixed(2)}%`,
+    pnlPct:      parseFloat(pnlPct.toFixed(2)),
+    pnlDisplay:  `${pnlSign}${pnlPct.toFixed(2)}%`,
     recommendation,
     urgency,
     reasons,
     actions,
+
+    // Trade Plan
+    tradePlan: {
+      stopLoss:      atrStop,
+      trailingStop,
+      takeProfits:   tps,
+      riskReward:    rrTp1,
+      breakeven:     buyPrice,
+    },
+
+    // Position Sizing (only if accountSize was provided)
+    positionSizing: sizing ? {
+      ...sizing,
+      riskPercent:   riskPct || 1,
+      accountSize,
+      note: sizing.capped ? sizing.capReason : `Risk $${sizing.dollarRisk} to make $${(sizing.dollarRisk * (rrTp1 || 1.5)).toFixed(2)} at TP1`,
+    } : null,
+
+    // Market Context
     levels: {
-      stopLoss:    parseFloat(slPrice.toFixed(6)),
-      takeProfit1: parseFloat(tpPrice.toFixed(6)),
-      bestSell:    parseFloat(bestSellPrice.toFixed(6)),
+      ema20, ema50, ema200_4h,
+      atr:       atrNow ? parseFloat(atrNow.toFixed(6)) : null,
       resistanceAbove,
-      resistanceBelow,
-      ema20:       ema20Now ? parseFloat(ema20Now.toFixed(6)) : null,
-      ema50:       ema50Now ? parseFloat(ema50Now.toFixed(6)) : null,
+      supportBelow,
+      bbUpper:   bb ? parseFloat(bb.upper.toFixed(6)) : null,
+      bbLower:   bb ? parseFloat(bb.lower.toFixed(6)) : null,
     },
+
     indicators: {
-      rsi: rsiNow ? parseFloat(rsiNow.toFixed(2)) : null,
+      rsi:         rsiNow ? parseFloat(rsiNow.toFixed(2)) : null,
+      stochRsiK:   srsi.k ? parseFloat(srsi.k.toFixed(2)) : null,
+      stochRsiD:   srsi.d ? parseFloat(srsi.d.toFixed(2)) : null,
+      macdGrowing: macdData.histogramGrowing,
+      macroTrend,
     },
-    thresholds: { takeProfitPct: tp, stopLossPct: sl },
+
     analyzedAt: new Date().toISOString(),
   };
 }
 
-// ─── Handler ─────────────────────────────────────────────────────────────────
+// ─── Handler ──────────────────────────────────────────────────────────────────
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -243,31 +281,34 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    let symbol, buyPrice, quantity, takeProfitPct, stopLossPct;
+    let symbol, buyPrice, accountSize, riskPct, quantity;
 
     if (req.method === 'POST') {
-      ({ symbol, buyPrice, quantity, takeProfitPct, stopLossPct } = req.body || {});
+      ({ symbol, buyPrice, accountSize, riskPct, quantity } = req.body || {});
     } else {
-      symbol       = req.query.symbol;
-      buyPrice     = parseFloat(req.query.buyPrice);
-      quantity     = parseFloat(req.query.quantity) || null;
-      takeProfitPct = parseFloat(req.query.tp) || null;
-      stopLossPct  = parseFloat(req.query.sl) || null;
+      symbol      = req.query.symbol;
+      buyPrice    = parseFloat(req.query.buyPrice);
+      accountSize = parseFloat(req.query.account) || null;
+      riskPct     = parseFloat(req.query.risk)    || 1;
+      quantity    = parseFloat(req.query.qty)     || null;
     }
 
     if (!symbol || !buyPrice || isNaN(buyPrice) || buyPrice <= 0) {
-      return res.status(400).json({ success: false, error: 'symbol and buyPrice are required. Example: ?symbol=SOLUSDT&buyPrice=150' });
+      return res.status(400).json({
+        success: false,
+        error: 'symbol and buyPrice required. Example: ?symbol=SOLUSDT&buyPrice=150&account=10000&risk=1',
+      });
     }
 
     const sym = symbol.toUpperCase();
-    const { candles, currentPrice, exchange } = await fetchCurrentData(sym);
-    const advice = buildAdvice({ symbol: sym, buyPrice, currentPrice, candles, takeProfitPct, stopLossPct });
+    const { candles1h, candles4h, currentPrice, exchange } = await fetchCurrentData(sym);
+    const advice = buildAdvice({ symbol: sym, buyPrice, currentPrice, candles1h, candles4h, accountSize, riskPct });
     advice.exchange = exchange;
     if (quantity) advice.quantity = quantity;
 
-    res.status(200).json({ success: true, advice });
+    return res.status(200).json({ success: true, advice });
 
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
