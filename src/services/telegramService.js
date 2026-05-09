@@ -195,3 +195,61 @@ module.exports = {
   sendListingBuyAlert,
   sendTestMessage,
 };
+
+// ─── Position Alert (used by v2monitor + check command) ──────────────────────
+async function sendPositionAlert(position, advice, overrideChatId) {
+  const chatId = overrideChatId || CHAT_ID;
+  if (!chatId) return;
+
+  const tp1 = advice.tradePlan?.takeProfits?.tp1;
+  const tp2 = advice.tradePlan?.takeProfits?.tp2;
+  const tp3 = advice.tradePlan?.takeProfits?.tp3;
+  const sl  = advice.tradePlan?.stopLoss;
+
+  const emoji = {
+    STOP_LOSS:     '🔴',
+    TAKE_PROFIT:   '🟢',
+    TRAIL_STOP:    '🟡',
+    CLOSE_PARTIAL: '🟠',
+    HOLD:          '⚪',
+  }[advice.recommendation] || '⚪';
+
+  const urgencyLabel = {
+    CRITICAL: '🚨 URGENT',
+    HIGH:     '⚡ High Priority',
+    MEDIUM:   '⚠️ Medium Priority',
+    LOW:      'ℹ️ Low Priority',
+  }[advice.urgency] || '';
+
+  const lines = [
+    `${emoji} *${advice.recommendation} — ${position.symbol}*  ${urgencyLabel}`,
+    ``,
+    `💰 *Bought at:* \`$${position.buyPrice}\``,
+    `📊 *Now:*       \`$${Number(advice.currentPrice).toFixed(4)}\``,
+    `📈 *P&L:*       ${advice.pnlDisplay}`,
+    position.quantity
+      ? `💵 *Value:* $${(position.quantity * advice.currentPrice).toFixed(2)}`
+      : '',
+    ``,
+    `── *What to do* ──`,
+    ...(advice.reasons || []).map(r => `  ${r}`),
+    ``,
+    ...(advice.actions || []).map(a => `  👉 ${a}`),
+    ``,
+    sl  ? `🛡 *Stop Loss:* \`$${Number(sl).toFixed(4)}\`` : '',
+    tp1 ? `🎯 *TP1 (40%):* \`$${Number(tp1.price).toFixed(4)}\`` : '',
+    tp2 ? `🎯 *TP2 (35%):* \`$${Number(tp2.price).toFixed(4)}\`` : '',
+    tp3 ? `🎯 *TP3 (25%):* \`$${Number(tp3.price).toFixed(4)}\`` : '',
+    ``,
+    `📐 *RSI:* ${advice.indicators?.rsi || 'N/A'} | *Trend:* ${advice.indicators?.macroTrend || 'N/A'}`,
+    `⏰ ${new Date().toUTCString()}`,
+  ].filter(Boolean).join('\n');
+
+  await axios.post(
+    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+    { chat_id: chatId, text: lines, parse_mode: 'Markdown', disable_web_page_preview: true },
+    { timeout: 10000 }
+  ).catch(e => console.error('[sendPositionAlert]', e.message));
+}
+
+module.exports.sendPositionAlert = sendPositionAlert;

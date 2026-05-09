@@ -312,3 +312,7 @@ module.exports = async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// Named exports for reuse by telegram-webhook.js and v2monitor.js
+module.exports.fetchCurrentData = fetchCurrentData;
+module.exports.buildAdvice      = buildAdvice;
