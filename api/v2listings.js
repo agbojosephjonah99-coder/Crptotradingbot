@@ -2,35 +2,25 @@
  * ─── V2 New Listing Scanner with BUY/SELL Signals ────────────────────────────
  * GET /api/v2listings
  *
- * HOW IT WORKS:
- *  1. Scans ALL Binance USDT pairs, excludes established coins
- *  2. Filters for minimum $500K volume (liquidity gate)
- *  3. Scores each coin for pump potential
- *  4. For HOT/WARM coins — fetches OHLC candles and runs full technical analysis
- *  5. Returns exact BUY signal with Entry, Stop Loss, TP1, TP2, TP3
- *  6. Sends Telegram alert with complete trade plan
- *
- * NOTE ON NEW LISTINGS:
- *  New coins won't have 200x 4H candles for EMA200. The analysis adapts:
- *  - Uses 1H candles (as many as available, min 20)
- *  - Shorter EMAs (20/50 instead of 50/200)
- *  - ATR-based stops (same as main scanner)
- *  - RSI + StochRSI + volume for entry timing
- *  - Flags coins with very limited history as EARLY_STAGE
+ * Now includes: Coin full name + contract address per chain (via CoinGecko)
  */
 
 const axios = require('axios');
 const {
-  ema, rsi, stochRsi, macd, bollingerBands, atr,
+  ema, rsi, stochRsi, bollingerBands, atr,
   obv, vwap, volumeAvg, detectPatterns,
 } = require('../src/services/indicatorService');
-const { calcATRStop, calcTakeProfits, calcRiskReward, isDuplicateSignal, markSignalFired } = require('../src/services/riskService');
+const {
+  calcATRStop, calcTakeProfits, calcRiskReward,
+  isDuplicateSignal, markSignalFired,
+} = require('../src/services/riskService');
 const { sendListingBuyAlert } = require('../src/services/telegramService');
 
-const BINANCE_BASE = 'https://api.binance.com/api/v3';
-const KRAKEN_BASE  = 'https://api.kraken.com/0/public';
+const BINANCE_BASE  = 'https://api.binance.com/api/v3';
+const KRAKEN_BASE   = 'https://api.kraken.com/0/public';
+const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
 
-// ─── Established Coins (excluded from new listing scan) ──────────────────────
+// ─── Established Coins (excluded) ────────────────────────────────────────────
 const ESTABLISHED = new Set([
   'BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','ADAUSDT','SOLUSDT','DOGEUSDT',
   'DOTUSDT','MATICUSDT','LTCUSDT','LINKUSDT','AVAXUSDT','UNIUSDT','ATOMUSDT',
@@ -56,7 +46,84 @@ const ESTABLISHED = new Set([
   'DRIFTUSDT','ZEREBROUSDT','AIXBTUSDT','FARTCOINUSDT','TRUMPUSDT',
 ]);
 
-// ─── Fetch OHLC for a new coin ────────────────────────────────────────────────
+// ─── Chain display names ──────────────────────────────────────────────────────
+const CHAIN_LABELS = {
+  ethereum:           'Ethereum (ERC-20)',
+  'binance-smart-chain': 'BNB Chain (BEP-20)',
+  solana:             'Solana (SPL)',
+  arbitrum:           'Arbitrum',
+  'optimistic-ethereum': 'Optimism',
+  base:               'Base',
+  polygon:            'Polygon',
+  avalanche:          'Avalanche (C-Chain)',
+  sui:                'Sui',
+  aptos:              'Aptos',
+  tron:               'Tron (TRC-20)',
+  ton:                'TON',
+};
+
+// ─── Fetch coin name + contract address from CoinGecko ───────────────────────
+// Only called for BUY-qualified coins — avoids rate limiting
+async function fetchCoinMetadata(baseAsset) {
+  try {
+    // Step 1: Search CoinGecko for the coin by ticker symbol
+    const searchResp = await axios.get(`${COINGECKO_BASE}/search`, {
+      params: { query: baseAsset },
+      timeout: 8000,
+    });
+
+    const coins = searchResp.data.coins || [];
+    if (coins.length === 0) return null;
+
+    // Find the best match — exact symbol match preferred
+    const match = coins.find(c => c.symbol.toUpperCase() === baseAsset.toUpperCase())
+      || coins[0];
+
+    if (!match) return null;
+
+    // Step 2: Fetch full coin detail to get contract addresses
+    const detailResp = await axios.get(`${COINGECKO_BASE}/coins/${match.id}`, {
+      params: {
+        localization: false,
+        tickers: false,
+        market_data: false,
+        community_data: false,
+        developer_data: false,
+        sparkline: false,
+      },
+      timeout: 8000,
+    });
+
+    const coin = detailResp.data;
+    const platforms = coin.platforms || {};
+
+    // Build a clean list of contract addresses per chain
+    const contracts = Object.entries(platforms)
+      .filter(([chain, addr]) => addr && addr.length > 0)
+      .map(([chain, addr]) => ({
+        chain,
+        chainLabel: CHAIN_LABELS[chain] || chain,
+        address: addr,
+      }));
+
+    return {
+      id:          coin.id,
+      name:        coin.name,
+      symbol:      coin.symbol?.toUpperCase(),
+      description: coin.description?.en?.split('.')[0] || '',  // first sentence only
+      contracts,
+      coingeckoUrl: `https://www.coingecko.com/en/coins/${coin.id}`,
+      // Flag if no contracts found (native chain coins like SOL, BNB)
+      isNativeAsset: contracts.length === 0,
+    };
+
+  } catch (err) {
+    console.warn(`[CoinGecko] Failed for ${baseAsset}:`, err.message);
+    return null;  // Non-fatal — trade plan still works without it
+  }
+}
+
+// ─── Fetch OHLC candles ───────────────────────────────────────────────────────
 async function fetchCoinCandles(symbol) {
   try {
     const [r1h, r15m] = await Promise.all([
@@ -79,33 +146,32 @@ async function fetchCoinCandles(symbol) {
   }
 }
 
-// ─── Technical Analysis for New Listings ─────────────────────────────────────
-// Adapted for coins with limited history (no 200x 4H candles available)
-function analyzeNewListing(symbol, ticker, candles1h, candles15m) {
+// ─── Technical Analysis (adapted for new listings) ───────────────────────────
+function analyzeNewListing(candles1h, candles15m) {
   const n1  = candles1h.length;
   const n15 = candles15m.length;
 
-  // Need at least 20 candles for any meaningful analysis
   if (n1 < 20) {
     return {
       signal: 'WATCH',
-      reason: `Only ${n1} candles available — too early for technical analysis`,
+      reason: `Only ${n1} candles — too early for technical analysis`,
       earlyStage: true,
+      candleCount: n1,
     };
   }
 
   const closes1h   = candles1h.map(c => c.close);
-  const entryPrice = candles15m.length > 0 ? candles15m[n15 - 1].close : closes1h[n1 - 1];
+  const entryPrice = n15 > 0 ? candles15m[n15 - 1].close : closes1h[n1 - 1];
 
-  // ── Indicators (adapted for limited history) ──
-  const emaPeriodFast = Math.min(20, Math.floor(n1 / 2));
-  const emaPeriodSlow = Math.min(50, Math.floor(n1 * 0.8));
+  const emaPFast  = Math.min(20, Math.floor(n1 / 2));
+  const emaPSlow  = Math.min(50, Math.floor(n1 * 0.8));
+  const rsiPeriod = Math.min(14, n1 - 2);
 
-  const emaFast   = ema(closes1h, emaPeriodFast)[n1 - 1];
-  const emaSlow   = ema(closes1h, emaPeriodSlow)[n1 - 1];
-  const rsiArr    = rsi(closes1h, Math.min(14, n1 - 2));
+  const emaFast   = ema(closes1h, emaPFast)[n1 - 1];
+  const emaSlow   = ema(closes1h, emaPSlow)[n1 - 1];
+  const rsiArr    = rsi(closes1h, rsiPeriod);
   const rsiNow    = rsiArr[n1 - 1];
-  const srsi      = stochRsi(closes1h, Math.min(14, n1 - 2));
+  const srsi      = stochRsi(closes1h, rsiPeriod);
   const atrArr    = atr(candles1h, Math.min(14, n1 - 2));
   const atrNow    = atrArr[n1 - 1];
   const bbArr     = bollingerBands(closes1h, Math.min(20, n1 - 1));
@@ -113,47 +179,39 @@ function analyzeNewListing(symbol, ticker, candles1h, candles15m) {
   const vwapArr   = vwap(candles1h);
   const vwapNow   = vwapArr[n1 - 1];
   const obvArr    = obv(candles1h);
-  const obvEma    = ema(obvArr, Math.min(10, n1 - 1));
-  const obvTrend  = obvArr[n1 - 1] > (obvEma[n1 - 1] || 0) ? 'BULLISH' : 'BEARISH';
+  const obvEmaArr = ema(obvArr, Math.min(10, n1 - 1));
+  const obvTrend  = obvArr[n1 - 1] > (obvEmaArr[n1 - 1] || 0) ? 'BULLISH' : 'BEARISH';
 
-  // 15M patterns
   const patterns   = n15 >= 3 ? detectPatterns(candles15m) : [];
   const bullishPat = patterns.filter(p => p.bullish === true);
   const bearishPat = patterns.filter(p => p.bullish === false);
 
-  // Volume surge check
   const avgVol   = volumeAvg(candles1h, Math.min(10, n1 - 1));
-  const lastVol  = candles1h[n1 - 1].volume;
-  const volSurge = avgVol > 0 && lastVol > avgVol * 2;
+  const volSurge = avgVol > 0 && candles1h[n1 - 1].volume > avgVol * 2;
 
-  // ── Scoring (max 12 for new listings — fewer confirmations available) ──
   let score = 0;
-  const factors = [];
+  const factors  = [];
   const warnings = [];
 
-  // Trend (0–3)
   const inUptrend = emaFast && emaSlow && emaFast > emaSlow;
-  if (inUptrend) {
-    score += 2; factors.push(`EMA${emaPeriodFast} above EMA${emaPeriodSlow} — short-term uptrend`);
-  } else {
-    warnings.push('Short-term EMAs bearish — wait for trend confirmation');
-  }
-  if (entryPrice > (vwapNow || 0)) { score += 1; factors.push('Price above VWAP — buyers in control'); }
+  if (inUptrend)                                { score += 2; factors.push(`EMA${emaPFast} above EMA${emaPSlow} — uptrend`); }
+  else                                          { warnings.push('Short-term EMAs bearish — wait for trend'); }
+  if (entryPrice > (vwapNow || 0))              { score += 1; factors.push('Price above VWAP — buyers in control'); }
 
-  // Momentum (0–4)
   if (rsiNow !== undefined) {
-    if (rsiNow >= 40 && rsiNow <= 65)      { score += 2; factors.push(`RSI ${rsiNow.toFixed(1)} — healthy momentum (buy zone)`); }
-    else if (rsiNow > 75)                  { score -= 1; warnings.push(`RSI ${rsiNow.toFixed(1)} — severely overbought, high dump risk`); }
-    else if (rsiNow < 35)                  { score += 1; factors.push(`RSI ${rsiNow.toFixed(1)} — oversold, potential bounce`); }
+    if (rsiNow >= 40 && rsiNow <= 65)           { score += 2; factors.push(`RSI ${rsiNow.toFixed(1)} — healthy momentum`); }
+    else if (rsiNow > 75)                       { score -= 1; warnings.push(`RSI ${rsiNow.toFixed(1)} — overbought, dump risk`); }
+    else if (rsiNow < 35)                       { score += 1; factors.push(`RSI ${rsiNow.toFixed(1)} — oversold bounce setup`); }
   }
-  if (srsi.k !== undefined && srsi.k < 30)  { score += 1; factors.push(`StochRSI ${srsi.k.toFixed(1)} — oversold entry zone`); }
-  if (srsi.kCrossedAboveD)                   { score += 1; factors.push('StochRSI bullish cross — momentum turning up'); }
+  if (srsi.k !== undefined && srsi.k < 30)      { score += 1; factors.push(`StochRSI ${srsi.k.toFixed(1)} — oversold entry`); }
+  if (srsi.kCrossedAboveD)                       { score += 1; factors.push('StochRSI bullish cross'); }
 
-  // Volume (0–3)
-  if (obvTrend === 'BULLISH')               { score += 2; factors.push('OBV rising — accumulation confirmed'); }
-  if (volSurge)                             { score += 1; factors.push('Volume 2x above average — strong interest'); }
+  if (obvTrend === 'BULLISH')                   { score += 2; factors.push('OBV rising — accumulation confirmed'); }
+  else                                          { warnings.push('OBV bearish — smart money not yet buying'); }
+  if (volSurge)                                 { score += 1; factors.push('Volume surge — strong buying interest'); }
 
-  // Patterns (0–2)
+  if (bbNow && bbNow.percentB < 0.3)            { score += 1; factors.push(`BB %B ${(bbNow.percentB * 100).toFixed(0)}% — near lower band`); }
+
   if (bearishPat.length > 0) {
     score -= bearishPat.reduce((s, p) => s + p.strength, 0);
     warnings.push(`Bearish 15M patterns: ${bearishPat.map(p => p.name).join(', ')}`);
@@ -163,11 +221,7 @@ function analyzeNewListing(symbol, ticker, candles1h, candles15m) {
     factors.push(`Bullish 15M patterns: ${bullishPat.map(p => p.name).join(', ')}`);
   }
 
-  // Volatility context
-  if (bbNow && bbNow.percentB < 0.3)        { score += 1; factors.push(`BB %B ${(bbNow.percentB * 100).toFixed(0)}% — near lower band (good entry)`); }
-
-  // ── Build trade plan ──
-  const stopLoss  = calcATRStop({ entryPrice, atrValue: atrNow, multiplier: 2.0 }); // wider stop for new coins (more volatile)
+  const stopLoss  = calcATRStop({ entryPrice, atrValue: atrNow, multiplier: 2.0 });
   const tps       = stopLoss ? calcTakeProfits({ entryPrice, stopLoss }) : null;
   const rr        = tps && stopLoss ? calcRiskReward({ entryPrice, stopLoss, takeProfit: tps.tp1.price }) : null;
 
@@ -175,55 +229,45 @@ function analyzeNewListing(symbol, ticker, candles1h, candles15m) {
   const signal     = score >= 6 && inUptrend && (rr === null || rr >= 1.5) ? 'BUY' : 'WATCH';
 
   return {
-    signal,
-    score,
-    confidence,
-    factors,
-    warnings,
-    patterns,
-    earlyStage: n1 < 50,
-    candleCount: n1,
-    entryPrice,
-    stopLoss,
-    takeProfits: tps,
-    riskReward:  rr,
+    signal, score, confidence, factors, warnings, patterns,
+    earlyStage: n1 < 50, candleCount: n1,
+    entryPrice, stopLoss, takeProfits: tps, riskReward: rr,
     indicators: {
-      rsi:       rsiNow ? parseFloat(rsiNow.toFixed(2)) : null,
-      stochRsiK: srsi.k ? parseFloat(srsi.k.toFixed(2)) : null,
-      emaFast:   emaFast ? parseFloat(emaFast.toFixed(6)) : null,
-      emaSlow:   emaSlow ? parseFloat(emaSlow.toFixed(6)) : null,
-      atr:       atrNow  ? parseFloat(atrNow.toFixed(6)) : null,
-      vwap:      vwapNow ? parseFloat(vwapNow.toFixed(6)) : null,
+      rsi:        rsiNow  ? parseFloat(rsiNow.toFixed(2))  : null,
+      stochRsiK:  srsi.k  ? parseFloat(srsi.k.toFixed(2))  : null,
+      emaFast:    emaFast ? parseFloat(emaFast.toFixed(6))  : null,
+      emaSlow:    emaSlow ? parseFloat(emaSlow.toFixed(6))  : null,
+      atr:        atrNow  ? parseFloat(atrNow.toFixed(6))   : null,
+      vwap:       vwapNow ? parseFloat(vwapNow.toFixed(6))  : null,
       obvTrend,
-      bbPercentB: bbNow ? parseFloat(bbNow.percentB.toFixed(3)) : null,
+      bbPercentB: bbNow   ? parseFloat(bbNow.percentB.toFixed(3)) : null,
     },
   };
 }
 
-// ─── Risk Flag Detector ───────────────────────────────────────────────────────
+// ─── Risk Flags ───────────────────────────────────────────────────────────────
 function assessRisk(t) {
-  const flags    = [];
-  const vol      = parseFloat(t.quoteVolume);
-  const change   = parseFloat(t.priceChangePercent);
-  const count    = parseInt(t.count, 10);
-  const price    = parseFloat(t.lastPrice);
-  const high     = parseFloat(t.highPrice);
-  const low      = parseFloat(t.lowPrice);
+  const flags = [];
+  const vol    = parseFloat(t.quoteVolume);
+  const change = parseFloat(t.priceChangePercent);
+  const count  = parseInt(t.count, 10);
+  const price  = parseFloat(t.lastPrice);
+  const high   = parseFloat(t.highPrice);
+  const low    = parseFloat(t.lowPrice);
 
-  if (vol < 500_000)              flags.push('LOW_LIQUIDITY');
-  if (change < -40)               flags.push('POSSIBLE_DUMP');
-  if (count < 500)                flags.push('VERY_LOW_ACTIVITY');
-  if (price < 0.0001)             flags.push('MICRO_CAP_EXTREME');
-  if (high > 0 && low > 0 && high / low > 5) flags.push('EXTREME_VOLATILITY');
-  if (change > 100 && count < 2000) flags.push('POSSIBLE_WASH_TRADE');
+  if (vol < 500_000)                      flags.push('LOW_LIQUIDITY');
+  if (change < -40)                       flags.push('POSSIBLE_DUMP');
+  if (count < 500)                        flags.push('VERY_LOW_ACTIVITY');
+  if (price < 0.0001)                     flags.push('MICRO_CAP_EXTREME');
+  if (high > 0 && low > 0 && high/low > 5) flags.push('EXTREME_VOLATILITY');
+  if (change > 100 && count < 2000)       flags.push('POSSIBLE_WASH_TRADE');
   return flags;
 }
 
-// ─── Pump Scorer (first pass — no OHLC needed) ───────────────────────────────
+// ─── First-pass pump scorer ───────────────────────────────────────────────────
 function scoreTicker(t) {
   let score = 0;
   const factors = [];
-
   const priceChange = parseFloat(t.priceChangePercent);
   const volume      = parseFloat(t.quoteVolume);
   const count       = parseInt(t.count, 10);
@@ -232,38 +276,36 @@ function scoreTicker(t) {
   const low24h      = parseFloat(t.lowPrice);
   const rangePos    = high24h > low24h ? (lastPrice - low24h) / (high24h - low24h) : 0.5;
 
-  if (priceChange > 150)      { score += 5; factors.push(`+${priceChange.toFixed(0)}% — parabolic`); }
-  else if (priceChange > 80)  { score += 4; factors.push(`+${priceChange.toFixed(0)}% — explosive`); }
-  else if (priceChange > 40)  { score += 3; factors.push(`+${priceChange.toFixed(0)}% — strong pump`); }
-  else if (priceChange > 15)  { score += 2; factors.push(`+${priceChange.toFixed(0)}% — notable move`); }
-  else if (priceChange > 5)   { score += 1; factors.push(`+${priceChange.toFixed(0)}% — early move`); }
+  if (priceChange > 150)       { score += 5; factors.push(`+${priceChange.toFixed(0)}% parabolic`); }
+  else if (priceChange > 80)   { score += 4; factors.push(`+${priceChange.toFixed(0)}% explosive`); }
+  else if (priceChange > 40)   { score += 3; factors.push(`+${priceChange.toFixed(0)}% strong pump`); }
+  else if (priceChange > 15)   { score += 2; factors.push(`+${priceChange.toFixed(0)}% notable`); }
+  else if (priceChange > 5)    { score += 1; factors.push(`+${priceChange.toFixed(0)}% early move`); }
 
-  if (volume > 50_000_000)    { score += 4; factors.push(`$${(volume/1e6).toFixed(0)}M vol`); }
+  if (volume > 50_000_000)     { score += 4; factors.push(`$${(volume/1e6).toFixed(0)}M vol`); }
   else if (volume > 10_000_000){ score += 3; factors.push(`$${(volume/1e6).toFixed(1)}M vol`); }
   else if (volume > 2_000_000) { score += 2; factors.push(`$${(volume/1e6).toFixed(1)}M vol`); }
   else if (volume > 500_000)   { score += 1; factors.push(`$${(volume/1e3).toFixed(0)}K vol`); }
 
-  if (count > 200_000)        { score += 2; factors.push(`${count.toLocaleString()} trades — viral`); }
-  else if (count > 50_000)    { score += 1; factors.push(`${count.toLocaleString()} trades`); }
+  if (count > 200_000)         { score += 2; factors.push(`${count.toLocaleString()} trades`); }
+  else if (count > 50_000)     { score += 1; factors.push(`${count.toLocaleString()} trades`); }
 
-  if (rangePos > 0.80)        { score += 1; factors.push('Near 24H high'); }
+  if (rangePos > 0.80)         { score += 1; factors.push('Near 24H high'); }
 
   return { score, factors, priceChange, volume, count, lastPrice, high24h, low24h, rangePos };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
-
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // 1. Fetch all Binance tickers
     const [tickerResp, exchangeResp, krakenResp] = await Promise.allSettled([
       axios.get(`${BINANCE_BASE}/ticker/24hr`, { timeout: 15000 }),
       axios.get(`${BINANCE_BASE}/exchangeInfo`, { timeout: 15000 }),
-      axios.get(`${KRAKEN_BASE}/AssetPairs`, { timeout: 10000 }),
+      axios.get(`${KRAKEN_BASE}/AssetPairs`,    { timeout: 10000 }),
     ]);
 
     if (tickerResp.status === 'rejected') {
@@ -271,9 +313,18 @@ module.exports = async (req, res) => {
     }
 
     const allTickers = tickerResp.value.data;
-    const allSymbols = exchangeResp.status === 'fulfilled'
-      ? new Set(exchangeResp.value.data.symbols.map(s => s.symbol))
-      : new Set(allTickers.map(t => t.symbol));
+
+    // Build baseAsset map from exchangeInfo (symbol → full base asset name)
+    const baseAssetMap = {};
+    if (exchangeResp.status === 'fulfilled') {
+      exchangeResp.value.data.symbols.forEach(s => {
+        baseAssetMap[s.symbol] = s.baseAsset;
+      });
+    }
+
+    const allSymbols = new Set(Object.keys(baseAssetMap).length > 0
+      ? Object.keys(baseAssetMap)
+      : allTickers.map(t => t.symbol));
 
     const krakenSymbols = new Set();
     if (krakenResp.status === 'fulfilled') {
@@ -283,7 +334,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 2. Filter to new USDT candidates with minimum liquidity
+    // Filter candidates
     const candidates = allTickers.filter(t =>
       t.symbol.endsWith('USDT') &&
       !ESTABLISHED.has(t.symbol) &&
@@ -292,47 +343,62 @@ module.exports = async (req, res) => {
       !assessRisk(t).includes('POSSIBLE_DUMP')
     );
 
-    // 3. First-pass scoring (no OHLC — fast)
+    // First pass — score by pump signals
     const firstPass = candidates
       .map(t => {
         const riskFlags = assessRisk(t);
-        const { score, factors, priceChange, volume, count, lastPrice, high24h, low24h, rangePos } = scoreTicker(t);
-        const onKraken  = krakenSymbols.has(t.symbol.replace('USDT', ''));
-        if (onKraken) score + 1;
+        const scored    = scoreTicker(t);
         return {
-          symbol: t.symbol,
-          price: lastPrice, priceChange, volume, tradeCount: count,
-          high24h, low24h, rangePos,
-          pumpScore: score,
-          pumpFactors: factors,
-          pumpRating: score >= 9 ? 'HOT' : score >= 6 ? 'WARM' : score >= 3 ? 'WATCH' : 'COLD',
+          symbol:     t.symbol,
+          baseAsset:  baseAssetMap[t.symbol] || t.symbol.replace('USDT', ''),
+          price:      scored.lastPrice,
+          priceChange: scored.priceChange,
+          volume:     scored.volume,
+          tradeCount: scored.count,
+          high24h:    scored.high24h,
+          low24h:     scored.low24h,
+          pumpScore:  scored.score,
+          pumpFactors: scored.factors,
+          pumpRating: scored.score >= 9 ? 'HOT' : scored.score >= 6 ? 'WARM' : 'COLD',
           riskFlags,
-          onKraken,
+          onKraken:   krakenSymbols.has(t.symbol.replace('USDT', '')),
         };
       })
       .filter(c => c.pumpRating === 'HOT' || c.pumpRating === 'WARM')
       .sort((a, b) => b.pumpScore - a.pumpScore)
-      .slice(0, 15); // Only run deep analysis on top 15
+      .slice(0, 15);
 
-    // 4. Deep analysis — fetch OHLC and generate BUY signals
+    // Deep analysis — OHLC + technical + metadata
     const results = [];
 
     for (const coin of firstPass) {
-      const ohlc = await fetchCoinCandles(coin.symbol);
+      // Fetch candles and coin metadata in parallel
+      const [ohlc, metadata] = await Promise.all([
+        fetchCoinCandles(coin.symbol),
+        fetchCoinMetadata(coin.baseAsset),   // ← name + contract address
+      ]);
 
       if (!ohlc) {
-        results.push({ ...coin, signal: 'WATCH', reason: 'Could not fetch candle data' });
+        results.push({ ...coin, signal: 'WATCH', reason: 'Could not fetch candle data', metadata });
         continue;
       }
 
-      const analysis = analyzeNewListing(
-        coin.symbol, coin,
-        ohlc.candles1h, ohlc.candles15m
-      );
+      const analysis = analyzeNewListing(ohlc.candles1h, ohlc.candles15m);
 
       const result = {
         symbol:      coin.symbol,
+        baseAsset:   coin.baseAsset,
         exchange:    'Binance',
+
+        // ── Coin identity ──────────────────────────────────────────────
+        coinName:    metadata?.name        || coin.baseAsset,
+        coinId:      metadata?.id          || null,
+        description: metadata?.description || null,
+        contracts:   metadata?.contracts   || [],
+        isNativeAsset: metadata?.isNativeAsset || false,
+        coingeckoUrl: metadata?.coingeckoUrl  || null,
+
+        // ── Market data ────────────────────────────────────────────────
         price:       coin.price,
         priceChange: coin.priceChange,
         volume:      coin.volume,
@@ -342,13 +408,14 @@ module.exports = async (req, res) => {
         pumpFactors: coin.pumpFactors,
         riskFlags:   coin.riskFlags,
         onKraken:    coin.onKraken,
+
         ...analysis,
-        scannedAt:   new Date().toISOString(),
+        scannedAt: new Date().toISOString(),
       };
 
       results.push(result);
 
-      // 5. Send Telegram alert for BUY signals only
+      // Telegram alert for BUY signals
       if (analysis.signal === 'BUY' && !isDuplicateSignal(coin.symbol, 'LISTING_BUY')) {
         setImmediate(() => {
           try {
@@ -363,7 +430,6 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Sort: BUY first, then WATCH, by confidence
     results.sort((a, b) => {
       if (a.signal === 'BUY' && b.signal !== 'BUY') return -1;
       if (b.signal === 'BUY' && a.signal !== 'BUY') return  1;
@@ -374,10 +440,8 @@ module.exports = async (req, res) => {
       success:      true,
       totalScanned: candidates.length,
       buySignals:   results.filter(r => r.signal === 'BUY').length,
-      watchList:    results.filter(r => r.signal === 'WATCH').length,
       results,
       scannedAt:    new Date().toISOString(),
-      note: 'BUY signals include exact Entry, Stop Loss, TP1/TP2/TP3. New listings use 2x ATR stop (wider — more volatile). Max risk 1-2% of account.',
     });
 
   } catch (err) {
