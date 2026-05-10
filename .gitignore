@@ -2,3 +2,5 @@ node_modules/
 .env
 .DS_Store
 signals.json
+.vercel
+.env*.local

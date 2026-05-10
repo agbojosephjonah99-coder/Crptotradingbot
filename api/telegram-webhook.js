@@ -51,100 +51,12 @@ function normaliseSymbol(raw) {
   return u.endsWith('USDT') ? u : `${u}USDT`;
 }
 
-// ─── Fetch newly listed coins with pump potential + contract addresses ─────────
+// ─── Fetch newly listed coins (uses KuCoin — no geo-restrictions) ────────────
 async function fetchNewListings() {
-  const BINANCE_BASE   = 'https://api.binance.com/api/v3';
-  const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
-
-  const ESTABLISHED = new Set([
-    'BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','ADAUSDT','SOLUSDT','DOGEUSDT',
-    'DOTUSDT','MATICUSDT','LTCUSDT','LINKUSDT','AVAXUSDT','UNIUSDT','ATOMUSDT',
-    'ETCUSDT','XLMUSDT','ALGOUSDT','VETUSDT','TRXUSDT','FILUSDT','AAVEUSDT',
-    'MKRUSDT','COMPUSDT','YFIUSDT','SUSHIUSDT','CRVUSDT','SNXUSDT','RUNEUSDT',
-    'ICPUSDT','NEARUSDT','FTMUSDT','SANDUSDT','MANAUSDT','AXSUSDT','GALAUSDT',
-    'ENJUSDT','CHZUSDT','BATUSDT','GRTUSDT','INJUSDT','APTUSDT','GMTUSDT',
-    'LDOUSDT','APEUSDT','OPUSDT','ARBUSDT','SUIUSDT','PEPEUSDT','WLDUSDT',
-    'SEIUSDT','TIAUSDT','KASUSDT','ORDIUSDT','WIFUSDT','JUPUSDT','BONKUSDT',
-    'PYTHUSDT','BOMEUSDT','MEMEUSDT','NOTUSDT','ZKUSDT','TURBOUSDT','DOGSUSDT',
-    'GOATUSDT','POPCATUSDT','MEUSDT','MOVEUSDT','VIRTUALUSDT','TRUMPUSDT',
-    'EIGENUSDT','CATIUSDT','STRKUSDT','PIXELUSDT','PORTALUSDT','AEVOUSDT',
-  ]);
-
-  // 1. Fetch all tickers + exchange info
-  const [tickerResp, infoResp] = await Promise.all([
-    axios.get(`${BINANCE_BASE}/ticker/24hr`, { timeout: 15000 }),
-    axios.get(`${BINANCE_BASE}/exchangeInfo`, { timeout: 15000 }),
-  ]);
-
-  const allTickers  = tickerResp.data;
-  const baseAssetMap = {};
-  infoResp.data.symbols.forEach(s => { baseAssetMap[s.symbol] = s.baseAsset; });
-
-  // 2. Filter to new coins with good volume
-  const candidates = allTickers
-    .filter(t =>
-      t.symbol.endsWith('USDT') &&
-      !ESTABLISHED.has(t.symbol) &&
-      parseFloat(t.quoteVolume) >= 500_000 &&
-      parseFloat(t.priceChangePercent) > 5 &&
-      parseFloat(t.priceChangePercent) < 200 // exclude obvious dumps/scams
-    )
-    .map(t => ({
-      symbol:      t.symbol,
-      baseAsset:   baseAssetMap[t.symbol] || t.symbol.replace('USDT', ''),
-      price:       parseFloat(t.lastPrice),
-      change24h:   parseFloat(t.priceChangePercent),
-      volume:      parseFloat(t.quoteVolume),
-      tradeCount:  parseInt(t.count, 10),
-      high24h:     parseFloat(t.highPrice),
-      low24h:      parseFloat(t.lowPrice),
-    }))
-    .sort((a, b) => {
-      // Score: weighted mix of volume + momentum + activity
-      const scoreA = (a.volume / 1e6) * 0.4 + a.change24h * 0.4 + (a.tradeCount / 10000) * 0.2;
-      const scoreB = (b.volume / 1e6) * 0.4 + b.change24h * 0.4 + (b.tradeCount / 10000) * 0.2;
-      return scoreB - scoreA;
-    })
-    .slice(0, 5); // Top 5 only to avoid Telegram spam
-
-  if (candidates.length === 0) return [];
-
-  // 3. Fetch contract addresses from CoinGecko for each
-  const results = [];
-  for (const coin of candidates) {
-    let contractInfo = null;
-    try {
-      const searchResp = await axios.get(`${COINGECKO_BASE}/search`, {
-        params: { query: coin.baseAsset },
-        timeout: 6000,
-      });
-      const match = (searchResp.data.coins || [])
-        .find(c => c.symbol.toUpperCase() === coin.baseAsset.toUpperCase());
-
-      if (match) {
-        const detailResp = await axios.get(`${COINGECKO_BASE}/coins/${match.id}`, {
-          params: { localization: false, tickers: false, market_data: false,
-                    community_data: false, developer_data: false },
-          timeout: 6000,
-        });
-        const platforms  = detailResp.data.platforms || {};
-        const contracts  = Object.entries(platforms)
-          .filter(([, addr]) => addr && addr.length > 5)
-          .map(([chain, addr]) => ({ chain, addr }));
-
-        contractInfo = {
-          name:      detailResp.data.name,
-          contracts,
-          cgUrl:     `https://coingecko.com/en/coins/${match.id}`,
-        };
-      }
-    } catch {}
-
-    results.push({ ...coin, contractInfo });
-  }
-
-  return results;
+  const { getNewListingsWithMetadata } = require('../src/services/listingsService');
+  return await getNewListingsWithMetadata();
 }
+
 
 // ─── Command Handler ──────────────────────────────────────────────────────────
 async function handleMessage(chatId, text) {
@@ -193,64 +105,73 @@ async function handleMessage(chatId, text) {
     await reply(chatId, `🔍 Scanning for hot new listings... give me 20 seconds.`);
 
     try {
-      const listings = await fetchNewListings();
+      const { hotCoins, trending } = await fetchNewListings();
 
-      if (listings.length === 0) {
+      if (hotCoins.length === 0 && trending.length === 0) {
         await reply(chatId, `😴 No strong new listing signals right now. Check back in 30 minutes.`);
         return;
       }
 
-      for (const coin of listings) {
-        const ci = coin.contractInfo;
-        const rangePos = coin.high24h > coin.low24h
-          ? ((coin.price - coin.low24h) / (coin.high24h - coin.low24h) * 100).toFixed(0)
-          : 50;
+      // Send hot coins from KuCoin
+      if (hotCoins.length > 0) {
+        await reply(chatId, `🔥 *Top New Listings with Pump Potential*\n_Sourced from KuCoin — verified on CoinGecko_`);
 
-        const lines = [
-          `🔥 *${ci?.name || coin.baseAsset} (${coin.symbol})*`,
-          ``,
-          `💰 *Price:* \`$${coin.price < 0.01 ? coin.price.toFixed(8) : coin.price.toFixed(4)}\``,
-          `📈 *24H Change:* +${coin.change24h.toFixed(2)}%`,
-          `💵 *Volume:* $${(coin.volume / 1e6).toFixed(2)}M`,
-          `🔢 *Trades:* ${coin.tradeCount.toLocaleString()}`,
-          `📊 *Position in range:* ${rangePos}% of 24H range`,
-          ``,
-        ];
+        for (const coin of hotCoins.slice(0, 5)) {
+          const meta     = coin.meta;
+          const rangePos = coin.high24h > coin.low24h
+            ? ((coin.price - coin.low24h) / (coin.high24h - coin.low24h) * 100).toFixed(0)
+            : 50;
+          const priceStr = coin.price < 0.01 ? coin.price.toFixed(8) : coin.price.toFixed(4);
 
-        if (ci?.contracts?.length > 0) {
-          lines.push(`📋 *Contract Addresses:*`);
-          ci.contracts.slice(0, 3).forEach(c => {
-            const chainLabel = {
-              'ethereum': 'Ethereum (ERC-20)',
-              'binance-smart-chain': 'BNB Chain (BEP-20)',
-              'solana': 'Solana (SPL)',
-              'arbitrum-one': 'Arbitrum',
-              'base': 'Base',
-              'polygon-pos': 'Polygon',
-              'avalanche': 'Avalanche',
-              'sui': 'Sui',
-              'tron': 'Tron (TRC-20)',
-              'ton': 'TON',
-            }[c.chain] || c.chain;
-            lines.push(`  *${chainLabel}:*`);
-            lines.push(`  \`${c.addr}\``);
-          });
-          lines.push(`⚠️ _Verify address on CoinGecko before buying_`);
-          if (ci.cgUrl) lines.push(`🔗 ${ci.cgUrl}`);
-        } else {
-          lines.push(`⚠️ *Contract address not found — verify manually*`);
-          if (ci?.cgUrl) lines.push(`🔗 ${ci.cgUrl}`);
+          const lines = [
+            `🚀 *${meta?.name || coin.base} (${coin.base}/USDT)*`,
+            ``,
+            `💰 *Price:* \`$${priceStr}\``,
+            `📈 *24H Change:* +${coin.change24h.toFixed(2)}%`,
+            `💵 *Volume:* $${(coin.volume / 1e6).toFixed(2)}M`,
+            `📊 *In 24H range:* ${rangePos}%`,
+            meta?.description ? `📄 _${meta.description.slice(0, 100)}..._` : '',
+            ``,
+          ];
+
+          if (meta?.contracts?.length > 0) {
+            lines.push(`📋 *Contract Addresses:*`);
+            meta.contracts.slice(0, 3).forEach(c => {
+              lines.push(`  *${c.chainLabel}:*`);
+              lines.push(`  \`${c.address}\``);
+            });
+            lines.push(`⚠️ _Always verify on CoinGecko before buying_`);
+            if (meta.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+          } else if (meta?.isNativeAsset) {
+            lines.push(`ℹ️ _Native chain asset — no contract address_`);
+            if (meta.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+          } else {
+            lines.push(`⚠️ _Contract not found — verify manually before buying_`);
+            if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+          }
+
+          lines.push(``);
+          lines.push(`📝 *Track this:* \`buy ${coin.base} ${priceStr}\``);
+          lines.push(`⚠️ _HIGH RISK — max 1-2% of account_`);
+
+          await replyChunked(chatId, lines.filter(Boolean).join('\n'));
         }
-
-        lines.push(``);
-        lines.push(`📝 *To track this coin:*`);
-        lines.push(`\`buy ${coin.symbol} ${coin.price < 0.01 ? coin.price.toFixed(8) : coin.price.toFixed(4)}\``);
-        lines.push(`⚠️ _New listings = HIGH RISK. Max 1-2% of account_`);
-
-        await replyChunked(chatId, lines.join('\n'));
       }
 
-      await reply(chatId, `✅ Scan complete. Type \`buy SYMBOL PRICE\` to track any of these.`);
+      // Send CoinGecko trending coins
+      if (trending.length > 0) {
+        const tLines = [`🌊 *CoinGecko Trending (often pump 24-72h)*`, ``];
+        trending.slice(0, 5).forEach((c, i) => {
+          tLines.push(`${i + 1}. *${c.name}* (${c.symbol.toUpperCase()})`);
+          tLines.push(`   Rank: #${c.rank || 'N/A'} | 🔗 ${c.cgUrl}`);
+          tLines.push(`   \`buy ${c.symbol.toUpperCase()} CURRENT_PRICE\``);
+          tLines.push(``);
+        });
+        tLines.push(`_Check CoinGecko links for current price and contract address_`);
+        await reply(chatId, tLines.join('\n'));
+      }
+
+      await reply(chatId, `✅ Done. Use \`buy SYMBOL PRICE\` to track any coin.`);
 
     } catch (err) {
       await reply(chatId, `❌ Error fetching listings: ${err.message}`);
