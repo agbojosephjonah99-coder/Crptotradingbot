@@ -1,125 +1,147 @@
 /**
- * ─── Telegram Webhook Handler ─────────────────────────────────────────────────
+ * ─── Telegram Webhook Handler (Fixed) ────────────────────────────────────────
  * POST /api/telegram-webhook
  *
- * SETUP (one time after deploying):
- *  Register your webhook URL with Telegram by visiting this in your browser:
- *  https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://YOUR-VERCEL-URL.vercel.app/api/telegram-webhook
- *
- * COMMANDS:
- *  buy SOLUSDT 92.50          → Register a buy at $92.50
- *  buy SOL 92.50              → Same (auto-adds USDT)
- *  buy SOL 92.50 10           → Buy 10 units at $92.50
- *  sell SOLUSDT               → Remove position (you sold manually)
- *  positions                  → List all open positions
- *  check SOLUSDT              → Get instant advice on one coin
- *  help                       → Show all commands
+ * FIX: Process message and send reply BEFORE calling res.end()
+ * Previous version killed the function before reply could complete.
  */
 
-const { addPosition, removePosition, getAllPositions } = require('../src/services/positionStore');
-const { buildAdvice, fetchCurrentData }                = require('./v2advice');
+const axios  = require('axios');
+const { addPosition, removePosition, getAllPositions, getPosition } = require('../src/services/positionStore');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// ─── Send reply back to Telegram ─────────────────────────────────────────────
-const axios = require('axios');
-
+// ─── Send reply ───────────────────────────────────────────────────────────────
 async function reply(chatId, text) {
-  if (!BOT_TOKEN) return;
-  await axios.post(
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-    { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-    { timeout: 10000 }
-  ).catch(e => console.error('[Webhook reply]', e.message));
+  if (!BOT_TOKEN) {
+    console.error('[Webhook] BOT_TOKEN not set');
+    return;
+  }
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      {
+        chat_id:    chatId,
+        text,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      },
+      { timeout: 8000 }
+    );
+    console.log(`[Webhook] Reply sent to ${chatId}`);
+  } catch (e) {
+    console.error('[Webhook] Reply failed:', e.message);
+  }
 }
 
 // ─── Normalise symbol ─────────────────────────────────────────────────────────
 function normaliseSymbol(raw) {
   const u = raw.toUpperCase().trim();
-  if (u.endsWith('USDT')) return u;
-  return `${u}USDT`;
+  return u.endsWith('USDT') ? u : `${u}USDT`;
 }
 
-// ─── Command Parser ───────────────────────────────────────────────────────────
+// ─── Command Handler ──────────────────────────────────────────────────────────
 async function handleMessage(chatId, text) {
   const parts = text.trim().split(/\s+/);
   const cmd   = parts[0]?.toLowerCase();
 
-  // ── BUY ──────────────────────────────────────────────────────────────────
+  // ── HELP ──────────────────────────────────────────────────────────────────
+  if (cmd === 'help' || cmd === '/start' || cmd === '/help') {
+    await reply(chatId, [
+      `🤖 *CryptoBot V2 Commands*`,
+      ``,
+      `*Register a buy:*`,
+      `\`buy SOLUSDT 92.50\``,
+      `\`buy SOL 92.50\``,
+      `\`buy SOL 92.50 10\` _(with quantity)_`,
+      ``,
+      `*Remove after you sell:*`,
+      `\`sell SOLUSDT\``,
+      ``,
+      `*View all open positions:*`,
+      `\`positions\``,
+      ``,
+      `*Get instant advice:*`,
+      `\`check SOLUSDT\``,
+      ``,
+      `*Automatic alerts every hour:*`,
+      `🔴 Stop Loss hit → exit now`,
+      `🎯 Take Profit → sell partial`,
+      `🟡 Trail stop → protect gains`,
+      `⚪ Hold → stay in trade`,
+    ].join('\n'));
+    return;
+  }
+
+  // ── BUY ───────────────────────────────────────────────────────────────────
   if (cmd === 'buy') {
     const rawSymbol = parts[1];
     const buyPrice  = parseFloat(parts[2]);
     const quantity  = parts[3] ? parseFloat(parts[3]) : null;
 
     if (!rawSymbol || isNaN(buyPrice) || buyPrice <= 0) {
-      return reply(chatId, [
-        `❌ *Invalid buy command*`,
+      await reply(chatId, [
+        `❌ *Invalid format*`,
         ``,
-        `Correct format:`,
-        `\`buy SOLUSDT 92.50\``,
+        `Correct usage:`,
         `\`buy SOL 92.50\``,
-        `\`buy SOL 92.50 10\` _(with quantity)_`,
+        `\`buy SOLUSDT 92.50\``,
+        `\`buy SOL 92.50 10\` _(10 units)_`,
       ].join('\n'));
+      return;
     }
 
-    const symbol = normaliseSymbol(rawSymbol);
-
-    // Fetch current price to confirm entry
-    let currentPrice = null;
-    try {
-      const data  = await fetchCurrentData(symbol);
-      currentPrice = data.currentPrice;
-    } catch {}
-
+    const symbol   = normaliseSymbol(rawSymbol);
     const position = await addPosition({ symbol, buyPrice, quantity });
 
-    const lines = [
+    await reply(chatId, [
       `✅ *Position Registered — ${symbol}*`,
       ``,
-      `💰 *Your Buy Price:* \`$${buyPrice}\``,
-      currentPrice ? `📊 *Current Price:* \`$${currentPrice.toFixed(4)}\`` : '',
-      quantity     ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
+      `💰 *Buy Price:* \`$${buyPrice}\``,
+      quantity ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
       ``,
-      `The bot will now monitor this position every hour and alert you when to:`,
+      `The bot will monitor this every hour and alert you when to:`,
       `  • 🔴 Exit (stop loss hit)`,
       `  • 🎯 Take profit (TP1 / TP2 / TP3)`,
       `  • 🟡 Tighten stop (overbought)`,
       `  • ⚪ Hold (trend still healthy)`,
       ``,
-      `_To remove this position when you sell: type_ \`sell ${symbol}\``,
-    ].filter(Boolean).join('\n');
-
-    return reply(chatId, lines);
+      `To remove when you exit: \`sell ${symbol}\``,
+      `For instant check: \`check ${symbol}\``,
+    ].filter(Boolean).join('\n'));
+    return;
   }
 
-  // ── SELL / REMOVE ─────────────────────────────────────────────────────────
+  // ── SELL ──────────────────────────────────────────────────────────────────
   if (cmd === 'sell' || cmd === 'remove' || cmd === 'sold') {
     const rawSymbol = parts[1];
     if (!rawSymbol) {
-      return reply(chatId, `❌ Specify a coin: \`sell SOLUSDT\``);
+      await reply(chatId, `❌ Specify a coin: \`sell SOLUSDT\``);
+      return;
     }
     const symbol  = normaliseSymbol(rawSymbol);
     const removed = await removePosition(symbol);
 
-    if (removed) {
-      return reply(chatId, `✅ *${symbol}* removed from your positions. Good trade! 💸`);
-    } else {
-      return reply(chatId, `⚠️ *${symbol}* not found in your open positions.`);
-    }
+    await reply(chatId, removed
+      ? `✅ *${symbol}* removed from positions. Good trade! 💸`
+      : `⚠️ *${symbol}* not found in your open positions.`
+    );
+    return;
   }
 
   // ── POSITIONS ─────────────────────────────────────────────────────────────
   if (cmd === 'positions' || cmd === 'pos' || cmd === 'portfolio') {
-    const all = await getAllPositions();
+    const all     = await getAllPositions();
     const entries = Object.values(all);
 
     if (entries.length === 0) {
-      return reply(chatId, [
+      await reply(chatId, [
         `📭 *No open positions*`,
         ``,
-        `To add one: \`buy SOLUSDT 92.50\``,
+        `To add one: \`buy SOL 92.50\``,
       ].join('\n'));
+      return;
     }
 
     const lines = [`📊 *Your Open Positions*`, ``];
@@ -127,113 +149,118 @@ async function handleMessage(chatId, text) {
       lines.push(`*${pos.symbol}*`);
       lines.push(`  Entry: \`$${pos.buyPrice}\``);
       if (pos.quantity) lines.push(`  Qty: ${pos.quantity}`);
-      lines.push(`  Last check: ${pos.lastChecked ? new Date(pos.lastChecked).toUTCString() : 'Not yet checked'}`);
       lines.push(`  Status: ${pos.lastRecommendation || 'Pending first check'}`);
+      lines.push(`  Last checked: ${pos.lastChecked ? new Date(pos.lastChecked).toUTCString() : 'Not yet'}`);
       lines.push(``);
     }
-    lines.push(`_Positions checked every hour automatically._`);
-
-    return reply(chatId, lines.join('\n'));
+    lines.push(`_Monitored every hour automatically_`);
+    await reply(chatId, lines.join('\n'));
+    return;
   }
 
-  // ── CHECK (instant advice on demand) ─────────────────────────────────────
+  // ── CHECK ─────────────────────────────────────────────────────────────────
   if (cmd === 'check') {
     const rawSymbol = parts[1];
     if (!rawSymbol) {
-      return reply(chatId, `❌ Specify a coin: \`check SOLUSDT\``);
+      await reply(chatId, `❌ Specify a coin: \`check SOLUSDT\``);
+      return;
     }
     const symbol = normaliseSymbol(rawSymbol);
-
-    // Get from store if exists
-    const { getPosition } = require('../src/services/positionStore');
-    const pos = await getPosition(symbol);
+    const pos    = await getPosition(symbol);
 
     if (!pos) {
-      return reply(chatId, [
+      await reply(chatId, [
         `⚠️ *${symbol}* not in your positions.`,
         ``,
         `Add it first: \`buy ${symbol} YOUR_BUY_PRICE\``,
       ].join('\n'));
+      return;
     }
 
-    await reply(chatId, `🔍 Checking ${symbol}... one moment.`);
+    await reply(chatId, `🔍 Checking *${symbol}*... give me a moment.`);
 
     try {
-      const { candles1h, candles4h, currentPrice, exchange } = await fetchCurrentData(symbol);
-      const advice = buildAdvice({
+      const adviceModule   = require('./v2advice');
+      const { candles1h, candles4h, currentPrice, exchange } = await adviceModule.fetchCurrentData(symbol);
+      const advice         = adviceModule.buildAdvice({
         symbol,
-        buyPrice:   pos.buyPrice,
+        buyPrice:    pos.buyPrice,
         currentPrice,
         candles1h,
         candles4h,
         accountSize: pos.accountSize,
         riskPct:     pos.riskPct,
       });
-      advice.exchange = exchange;
 
-      const { sendPositionAlert } = require('../src/services/telegramService');
-      await sendPositionAlert(pos, advice, chatId);
+      const tp1 = advice.tradePlan?.takeProfits?.tp1;
+      const tp2 = advice.tradePlan?.takeProfits?.tp2;
+      const tp3 = advice.tradePlan?.takeProfits?.tp3;
+      const sl  = advice.tradePlan?.stopLoss;
+
+      const emoji = {
+        STOP_LOSS: '🔴', TAKE_PROFIT: '🟢',
+        TRAIL_STOP: '🟡', CLOSE_PARTIAL: '🟠', HOLD: '⚪',
+      }[advice.recommendation] || '⚪';
+
+      const lines = [
+        `${emoji} *${advice.recommendation} — ${symbol}*`,
+        ``,
+        `💰 *Bought at:* \`$${pos.buyPrice}\``,
+        `📊 *Now:*       \`$${Number(advice.currentPrice).toFixed(4)}\``,
+        `📈 *P&L:*       ${advice.pnlDisplay}`,
+        ``,
+        `── *What to do* ──`,
+        ...(advice.reasons || []).map(r => `  ${r}`),
+        ``,
+        ...(advice.actions || []).map(a => `  👉 ${a}`),
+        ``,
+        sl  ? `🛡 *Stop Loss:* \`$${Number(sl).toFixed(4)}\`` : '',
+        tp1 ? `🎯 *TP1 (40%):* \`$${Number(tp1.price).toFixed(4)}\`` : '',
+        tp2 ? `🎯 *TP2 (35%):* \`$${Number(tp2.price).toFixed(4)}\`` : '',
+        tp3 ? `🎯 *TP3 (25%):* \`$${Number(tp3.price).toFixed(4)}\`` : '',
+        ``,
+        `📐 RSI: ${advice.indicators?.rsi || 'N/A'} | Trend: ${advice.indicators?.macroTrend || 'N/A'}`,
+        `⏰ ${new Date().toUTCString()}`,
+      ].filter(Boolean).join('\n');
+
+      await reply(chatId, lines);
+
     } catch (err) {
-      return reply(chatId, `❌ Could not fetch data for ${symbol}: ${err.message}`);
+      await reply(chatId, `❌ Could not fetch data for ${symbol}: ${err.message}`);
     }
-
     return;
   }
 
-  // ── HELP ─────────────────────────────────────────────────────────────────
-  if (cmd === 'help' || cmd === '/start' || cmd === '/help') {
-    return reply(chatId, [
-      `🤖 *CryptoBot V2 Commands*`,
-      ``,
-      `*Register a buy:*`,
-      `\`buy SOLUSDT 92.50\``,
-      `\`buy SOL 92.50 10\` _(with quantity)_`,
-      ``,
-      `*Remove a position (after you sell):*`,
-      `\`sell SOLUSDT\``,
-      ``,
-      `*View all open positions:*`,
-      `\`positions\``,
-      ``,
-      `*Get instant advice on a position:*`,
-      `\`check SOLUSDT\``,
-      ``,
-      `*Automatic alerts every hour:*`,
-      `🔴 Stop Loss hit → exit now`,
-      `🎯 Take Profit → sell partial`,
-      `🟡 Trail stop → protect gains`,
-      `⚪ Hold → all good, stay in`,
-    ].join('\n'));
-  }
-
-  // ── Unknown command ───────────────────────────────────────────────────────
-  return reply(chatId, `❓ Unknown command. Type \`help\` to see all commands.`);
+  // ── Unknown ───────────────────────────────────────────────────────────────
+  await reply(chatId, `❓ Unknown command. Type \`help\` to see all commands.`);
 }
 
-// ─── Webhook Handler ──────────────────────────────────────────────────────────
+// ─── Main Handler ─────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  // Telegram sends POST requests
-  if (req.method !== 'POST') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(200).json({ ok: true });
 
   try {
     const { message } = req.body || {};
-    if (!message || !message.text) return res.status(200).end();
+    if (!message || !message.text) return res.status(200).json({ ok: true });
 
     const chatId = message.chat?.id?.toString();
     const text   = message.text;
 
-    // Security — only respond to your own chat ID
+    console.log(`[Webhook] Message from ${chatId}: ${text}`);
+
+    // Security check
     if (CHAT_ID && chatId !== CHAT_ID.toString()) {
       console.warn(`[Webhook] Rejected message from unknown chatId: ${chatId}`);
-      return res.status(200).end();
+      return res.status(200).json({ ok: true });
     }
 
-    // Handle async — Telegram expects 200 quickly
-    res.status(200).end();
+    // FIX: Process message FIRST, then end response
+    // Do NOT call res.end() before handleMessage completes
     await handleMessage(chatId, text);
+    return res.status(200).json({ ok: true });
 
   } catch (err) {
     console.error('[Webhook] Error:', err.message);
-    res.status(200).end(); // Always 200 to Telegram
+    return res.status(200).json({ ok: true });
   }
 };
