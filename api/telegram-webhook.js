@@ -699,10 +699,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ ok: true });
       }
 
-      // Acknowledge the button tap first
-      res.status(200).json({ ok: true });
-      await answerCallback(cq.id);
-
       // Map button data to command text
       const commandMap = {
         scan:        'scan',
@@ -714,9 +710,13 @@ module.exports = async (req, res) => {
         sell_help:   'sell_guide',
       };
 
-      const cmd = commandMap[data] || data;
-      await handleMessage(chatId, cmd);
-      return;
+      const mappedCmd = commandMap[data] || data;
+
+      // FIX: Process message FIRST, then respond
+      // Calling res.json() before handleMessage kills the function
+      await answerCallback(cq.id);
+      await handleMessage(chatId, mappedCmd);
+      return res.status(200).json({ ok: true });
     }
 
     // ── Handle regular text messages ─────────────────────────────────────────
