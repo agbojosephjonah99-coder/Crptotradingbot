@@ -15,13 +15,40 @@ const { addPosition, removePosition, getAllPositions, getPosition } = require('.
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// ─── Send reply ───────────────────────────────────────────────────────────────
-async function reply(chatId, text) {
+// ─── Main menu buttons (shown after every response) ──────────────────────────
+const MAIN_MENU = {
+  inline_keyboard: [
+    [
+      { text: '🔍 Scan Now',      callback_data: 'scan'        },
+      { text: '🌕 Moonshots',     callback_data: 'moonshots'   },
+    ],
+    [
+      { text: '🚀 New Listings',  callback_data: 'newlistings' },
+      { text: '📊 My Positions',  callback_data: 'positions'   },
+    ],
+    [
+      { text: '💰 Buy a Coin',    callback_data: 'buy_help'    },
+      { text: '💸 Sell a Coin',   callback_data: 'sell_help'   },
+    ],
+    [
+      { text: '📖 Help',          callback_data: 'help'        },
+    ],
+  ],
+};
+
+// ─── Send reply with menu buttons ─────────────────────────────────────────────
+async function reply(chatId, text, showMenu = true) {
   if (!BOT_TOKEN) { console.error('[Webhook] BOT_TOKEN not set'); return; }
   try {
     await axios.post(
       `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
+      {
+        chat_id:      chatId,
+        text,
+        parse_mode:   'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: showMenu ? MAIN_MENU : undefined,
+      },
       { timeout: 8000 }
     );
   } catch (e) {
@@ -29,10 +56,13 @@ async function reply(chatId, text) {
   }
 }
 
-// ─── Send long message in chunks (Telegram has 4096 char limit) ───────────────
-async function replyChunked(chatId, text) {
+// ─── Send long message in chunks ──────────────────────────────────────────────
+async function replyChunked(chatId, text, showMenu = false) {
   const MAX = 4000;
-  if (text.length <= MAX) { await reply(chatId, text); return; }
+  if (text.length <= MAX) {
+    await reply(chatId, text, showMenu);
+    return;
+  }
   const chunks = [];
   let current = '';
   for (const line of text.split('\n')) {
@@ -43,7 +73,24 @@ async function replyChunked(chatId, text) {
     current += line + '\n';
   }
   if (current) chunks.push(current);
-  for (const chunk of chunks) await reply(chatId, chunk);
+  for (let i = 0; i < chunks.length; i++) {
+    // Only show menu on last chunk
+    await reply(chatId, chunks[i], i === chunks.length - 1 ? showMenu : false);
+  }
+}
+
+// ─── Answer callback query (when button is tapped) ────────────────────────────
+async function answerCallback(callbackQueryId) {
+  if (!BOT_TOKEN) return;
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`,
+      { callback_query_id: callbackQueryId },
+      { timeout: 5000 }
+    );
+  } catch (e) {
+    console.error('[Webhook] answerCallback failed:', e.message);
+  }
 }
 
 function normaliseSymbol(raw) {
@@ -550,8 +597,51 @@ async function handleMessage(chatId, text) {
     return;
   }
 
+  // ── BUY GUIDE (from button) ──────────────────────────────────────────────
+  if (cmd === 'buy_guide') {
+    await reply(chatId, [
+      `💰 *How to Register a Buy*`,
+      ``,
+      `*Basic — just track the coin:*`,
+      `\`buy SOL 92.50\``,
+      `\`buy BTC 80000\``,
+      `\`buy ETH 2300\``,
+      ``,
+      `*With a 2X target alert:*`,
+      `\`buy SOL 92.50 2x\``,
+      ``,
+      `*With a 5X target alert:*`,
+      `\`buy SOL 92.50 5x\``,
+      ``,
+      `*With quantity + target:*`,
+      `\`buy SOL 92.50 10 5x\``,
+      ``,
+      `_Type your buy command now ↓_`,
+    ].join('\n'), true);
+    return;
+  }
+
+  // ── SELL GUIDE (from button) ──────────────────────────────────────────────
+  if (cmd === 'sell_guide') {
+    await reply(chatId, [
+      `💸 *How to Remove a Position*`,
+      ``,
+      `After you sell on the exchange, tell the bot:`,
+      ``,
+      `\`sell SOL\``,
+      `\`sell BTC\``,
+      `\`sell ETH\``,
+      ``,
+      `_This removes it from monitoring._`,
+      ``,
+      `To see all positions first:`,
+      `\`positions\``,
+    ].join('\n'), true);
+    return;
+  }
+
   // ── Unknown ───────────────────────────────────────────────────────────────
-  await reply(chatId, `❓ Unknown command.\n\nType \`help\` to see all commands.`);
+  await reply(chatId, `❓ Unknown command.\n\nUse the menu buttons below or type \`help\`.`);
 }
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
@@ -559,7 +649,40 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
 
   try {
-    const { message } = req.body || {};
+    const body = req.body || {};
+
+    // ── Handle button taps (callback_query) ──────────────────────────────────
+    if (body.callback_query) {
+      const cq     = body.callback_query;
+      const chatId = cq.message?.chat?.id?.toString();
+      const data   = cq.data;
+
+      if (CHAT_ID && chatId !== CHAT_ID.toString()) {
+        return res.status(200).json({ ok: true });
+      }
+
+      // Acknowledge the button tap first
+      res.status(200).json({ ok: true });
+      await answerCallback(cq.id);
+
+      // Map button data to command text
+      const commandMap = {
+        scan:        'scan',
+        moonshots:   'moonshots',
+        newlistings: 'newlistings',
+        positions:   'positions',
+        help:        'help',
+        buy_help:    'buy_guide',
+        sell_help:   'sell_guide',
+      };
+
+      const cmd = commandMap[data] || data;
+      await handleMessage(chatId, cmd);
+      return;
+    }
+
+    // ── Handle regular text messages ─────────────────────────────────────────
+    const { message } = body;
     if (!message || !message.text) return res.status(200).json({ ok: true });
 
     const chatId = message.chat?.id?.toString();
