@@ -7,8 +7,13 @@
  */
 
 const axios = require('axios');
-const { getAllUsersPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
-const { getApprovedUsers } = require('../src/services/userStore');
+const { getAllPositions, getAllUsersPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
+const { getUsersByStatus } = require('../src/services/userService');
+
+// Wrapper so the rest of the file reads clearly
+async function getApprovedUsers() {
+  return getUsersByStatus('approved');
+}
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -30,15 +35,10 @@ async function checkPosition(pos, userId) {
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
 
   const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
-
-  // Store calculated stop loss price so v2quickcheck can use it
-  // without needing to fetch candles (much faster)
-  if (sl && !pos.stopLossPrice) {
-    await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
-  }
   const currentMultiple = currentPrice / pos.buyPrice;
   const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
 
+  // BUG 1 FIX: buildAdvice + sl/tp declarations moved ABOVE any reference to sl/tp
   const advice = buildAdvice({
     symbol: pos.symbol, buyPrice: pos.buyPrice,
     currentPrice, candles1h, candles4h,
@@ -49,6 +49,12 @@ async function checkPosition(pos, userId) {
   const tp1 = advice.tradePlan?.takeProfits?.tp1;
   const tp2 = advice.tradePlan?.takeProfits?.tp2;
   const tp3 = advice.tradePlan?.takeProfits?.tp3;
+
+  // Store calculated stop loss price so v2quickcheck can use it
+  // without needing to fetch candles (much faster)
+  if (sl && !pos.stopLossPrice) {
+    await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
+  }
 
   // Track highest price seen
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
@@ -106,7 +112,8 @@ async function checkPosition(pos, userId) {
   }
 
   // ── TP3 HIT ───────────────────────────────────────────────────────────────
-  if (tp3 && currentPrice >= tp3.price) {
+  if (tp3 && currentPrice >= tp3.price && !pos.tp3Hit) {
+    await updatePosition(pos.chatId, pos.positionId, { tp3Hit: true });
     await sendAlert(targetChatId, [
       `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`,
       ``,
@@ -124,7 +131,8 @@ async function checkPosition(pos, userId) {
   }
 
   // ── TP2 HIT ───────────────────────────────────────────────────────────────
-  if (tp2 && currentPrice >= tp2.price && pnlPct > 0) {
+  if (tp2 && currentPrice >= tp2.price && pnlPct > 0 && !pos.tp2Hit) {
+    await updatePosition(pos.chatId, pos.positionId, { tp2Hit: true });
     await sendAlert(targetChatId, [
       `🟢🟢 *TP2 HIT — ${pos.symbol}*`,
       ``,
@@ -143,7 +151,8 @@ async function checkPosition(pos, userId) {
   }
 
   // ── TP1 HIT ───────────────────────────────────────────────────────────────
-  if (tp1 && currentPrice >= tp1.price && pnlPct > 0) {
+  if (tp1 && currentPrice >= tp1.price && pnlPct > 0 && !pos.tp1Hit) {
+    await updatePosition(pos.chatId, pos.positionId, { tp1Hit: true });
     await sendAlert(targetChatId, [
       `🟢 *TP1 HIT — ${pos.symbol}*`,
       ``,
@@ -214,7 +223,7 @@ module.exports = async (req, res) => {
       for (const pos of entries) {
         try {
           const result = await checkPosition(pos, userId);
-          await updateLastChecked(userId, pos.symbol, result.recommendation);
+          await updateLastChecked(userId, pos.positionId, result.recommendation);
           results.push({ userId, symbol: pos.symbol, ...result });
         } catch (err) {
           console.error(`[Monitor] ${userId}/${pos.symbol}:`, err.message);
