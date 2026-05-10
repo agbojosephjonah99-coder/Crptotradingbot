@@ -53,6 +53,7 @@ const INLINE_MENU = {
     ],
     [
       { text: '📖 Help',         callback_data: 'help'        },
+      { text: '📚 User Manual',  callback_data: 'manual'      },
     ],
   ],
 };
@@ -691,6 +692,193 @@ async function handleMessage(chatId, text, from) {
     return;
   }
 
+  // ── MANUAL ───────────────────────────────────────────────────────────────
+  if (cmd === 'manual' || cmd === 'guide') {
+    // Send manual in chunks — it is long
+    const sections = [
+
+      // ── Section 1 ──
+      [`📚 *CryptoBot V2 — User Manual*`,
+      ``,
+      `━━━ *WHAT IS CRYPTOBOT V2?* ━━━`,
+      ``,
+      `CryptoBot V2 is a private crypto intelligence bot that runs inside Telegram. It scans the market 24/7, finds high-probability trading setups, and sends you precise alerts telling you exactly when to buy, when to take profit, and when to cut losses.`,
+      ``,
+      `It connects to live market data, runs professional-grade technical analysis across multiple timeframes, and delivers the results straight to your Telegram. No charts. No guesswork.`,
+      ].join('\n'),
+
+      // ── Section 2 ──
+      [`💎 *WHAT YOU STAND TO GAIN*`,
+      ``,
+      `✅ *Never miss a profitable entry*`,
+      `The bot scans every 30 minutes. When a high-confidence setup appears you get an instant alert with entry price, stop loss and 3 take-profit targets.`,
+      ``,
+      `✅ *Know exactly when to sell*`,
+      `The bot monitors your positions and alerts you at TP1, TP2, TP3 and your custom target (2X, 3X, 5X).`,
+      ``,
+      `✅ *Losses stay small*`,
+      `Every trade comes with an ATR-based stop loss. If price hits it you get an immediate exit alert before the loss gets worse.`,
+      ``,
+      `✅ *Institutional-grade analysis*`,
+      `ADX, Stochastic RSI, Bollinger Bands, OBV, VWAP, ATR — the same tools professional traders use.`,
+      ``,
+      `✅ *New coin opportunities*`,
+      `Get newly listed coins with contract addresses, probability scores and trade plans delivered to you.`,
+      ``,
+      `✅ *You stay in control*`,
+      `The bot never touches your money. It is read-only intelligence. You decide every trade.`,
+      ].join('\n'),
+
+      // ── Section 3 ──
+      [`📋 *THE MENU — ALL COMMANDS*`,
+      ``,
+      `🔍 *Scan Now*`,
+      `Scans the entire market immediately for high-probability pump coins. Returns probability score, factor breakdown, contract address and suggested buy commands.`,
+      ``,
+      `🌕 *Moonshots*`,
+      `Same as Scan — finds coins with the best chance of 2X-5X within 3 days using 7-factor analysis.`,
+      ``,
+      `🚀 *New Listings*`,
+      `Hot newly listed coins with their contract address on every blockchain, current price, 24H stats and a CoinGecko verification link.`,
+      ``,
+      `📊 *My Positions*`,
+      `All your registered trades, entry prices, targets and current monitoring status.`,
+      ``,
+      `💰 *Buy a Coin*`,
+      `Register a trade so the bot monitors it for you.`,
+      ``,
+      `💸 *Sell a Coin*`,
+      `Remove a position after you exit on your exchange.`,
+      ].join('\n'),
+
+      // ── Section 4 ──
+      [`💰 *HOW TO REGISTER A BUY*`,
+      ``,
+      `After buying on your exchange, tell the bot:`,
+      ``,
+      `Track only:`,
+      `\`buy SOL 92.50\``,
+      ``,
+      `With 2X target alert:`,
+      `\`buy SOL 92.50 2x\``,
+      ``,
+      `With 5X target alert:`,
+      `\`buy SOL 92.50 5x\``,
+      ``,
+      `With quantity + target:`,
+      `\`buy SOL 92.50 10 5x\``,
+      ``,
+      `Any coin works:`,
+      `\`buy BTC 80000 2x\``,
+      `\`buy ETH 2300 3x\``,
+      `\`buy BILL 0.107893 2x\``,
+      ``,
+      `After TP1 hits → move stop to your entry price.`,
+      `You now cannot lose money on that trade.`,
+      ].join('\n'),
+
+      // ── Section 5 ──
+      [`🔔 *YOUR ALERTS EXPLAINED*`,
+      ``,
+      `⚪ *HOLD* — every 4 hours`,
+      `Trade is progressing normally. Stay in. No action needed.`,
+      ``,
+      `🟢 *TP1 HIT* — first target`,
+      `Sell 40% of position. Move stop to entry price.`,
+      ``,
+      `🟢🟢 *TP2 HIT* — second target`,
+      `Sell 35% of remaining position.`,
+      ``,
+      `🟢🟢🟢 *TP3 HIT* — third target`,
+      `Sell remaining 25%.`,
+      ``,
+      `🚨🎯 *2X/5X TARGET HIT*`,
+      `SELL NOW. Open exchange immediately. Sell 60% at market. Move stop on remaining 40% to entry.`,
+      ``,
+      `🔴 *STOP LOSS HIT*`,
+      `EXIT 100% IMMEDIATELY. No hesitation. Small loss now prevents catastrophic loss later.`,
+      ].join('\n'),
+
+      // ── Section 6 ──
+      [`📊 *THE PROBABILITY SCORE*`,
+      ``,
+      `Every scan result shows a probability score built from 7 factors:`,
+      ``,
+      `  Volume Quality — real or fake trading?`,
+      `  Price Structure — early move or already topped?`,
+      `  Market Cap Risk — too small to be safe?`,
+      `  Liquidity Health — can you exit safely?`,
+      `  Momentum Trend — buying accelerating or fading?`,
+      `  Social Signal — real interest on CoinGecko?`,
+      `  Red Flag Detector — signs of manipulation?`,
+      ``,
+      `🟢 80%+ = VERY HIGH — all signals aligned`,
+      `🟡 65-79% = HIGH — most signals positive`,
+      `🟠 50-64% = MODERATE — size down`,
+      `🔴 Below 50% = Skip`,
+      ``,
+      `⚠️ Even 80% does not guarantee profit. Markets can change due to news or whale activity. Always manage risk.`,
+      ].join('\n'),
+
+      // ── Section 7 ──
+      [`🛡 *RISK MANAGEMENT RULES*`,
+      ``,
+      `These rules protect your account:`,
+      ``,
+      `1️⃣ Never risk more than 2% per trade`,
+      `   $1,000 account = max $20 at risk per trade`,
+      ``,
+      `2️⃣ Always honour the stop loss`,
+      `   If price hits stop → exit immediately`,
+      ``,
+      `3️⃣ Take partial profits`,
+      `   Sell at TP1, TP2, TP3 — don't hold for all or nothing`,
+      ``,
+      `4️⃣ New listings = 1% max`,
+      `   Higher risk coins get smaller positions`,
+      ``,
+      `5️⃣ Never average down`,
+      `   If price drops to stop loss — exit, don't buy more`,
+      ``,
+      `6️⃣ Only trade money you can afford to lose`,
+      `   Crypto is volatile. Never risk essential funds.`,
+      ].join('\n'),
+
+      // ── Section 8 ──
+      [`❓ *COMMON QUESTIONS*`,
+      ``,
+      `*Does the bot buy/sell for me?*`,
+      `No. It is read-only. You execute all trades on your exchange.`,
+      ``,
+      `*How often does it check my positions?*`,
+      `Every 30 minutes.`,
+      ``,
+      `*What is a contract address?*`,
+      `The unique identifier of a token on the blockchain. Always verify it on CoinGecko before buying a new coin to avoid fake tokens.`,
+      ``,
+      `*Can the bot guarantee profits?*`,
+      `No tool can guarantee profits in crypto. The bot improves your odds with quality setups and systematic exits. Losses are normal — the goal is winning trades to outperform losing ones over time.`,
+      ``,
+      `*How do I check my positions?*`,
+      `Tap 📊 My Positions or type \`positions\``,
+      ``,
+      `*How do I remove a position after selling?*`,
+      `Type \`sell COIN\` e.g. \`sell SOL\``,
+      ``,
+      `_CryptoBot V2 — Built for serious traders_`,
+      `_Nothing here is financial advice. Trade responsibly._`,
+      ].join('\n'),
+
+    ];
+
+    for (const section of sections) {
+      await reply(chatId, section, false);
+    }
+
+    await reply(chatId, `✅ *End of Manual*\n\nTap *📋 MENU* to start trading.`, true);
+    return;
+  }
+
   // ── BUY / SELL GUIDE ──────────────────────────────────────────────────────
   if (cmd === 'buy_guide') {
     await reply(chatId, [
@@ -752,6 +940,7 @@ module.exports = async (req, res) => {
         help:        'help',
         buy_help:    'buy_guide',
         sell_help:   'sell_guide',
+        manual:      'manual',
       };
 
       const mappedCmd = commandMap[data] || data;
