@@ -158,17 +158,57 @@ async function handleMessage(chatId, text) {
         }
       }
 
-      // Send CoinGecko trending coins
+      // Send CoinGecko trending coins with full details
       if (trending.length > 0) {
-        const tLines = [`🌊 *CoinGecko Trending (often pump 24-72h)*`, ``];
-        trending.slice(0, 5).forEach((c, i) => {
-          tLines.push(`${i + 1}. *${c.name}* (${c.symbol.toUpperCase()})`);
-          tLines.push(`   Rank: #${c.rank || 'N/A'} | 🔗 ${c.cgUrl}`);
-          tLines.push(`   \`buy ${c.symbol.toUpperCase()} CURRENT_PRICE\``);
+        await reply(chatId, `🌊 *CoinGecko Trending Coins*\n_These often pump within 24-72h of trending_`);
+
+        for (const c of trending) {
+          const priceStr = c.currentPrice
+            ? (c.currentPrice < 0.01 ? c.currentPrice.toFixed(8) : c.currentPrice.toFixed(4))
+            : 'N/A';
+          const changeStr = c.priceChange24h
+            ? `${c.priceChange24h >= 0 ? '+' : ''}${c.priceChange24h.toFixed(2)}%`
+            : 'N/A';
+          const volStr = c.volume24h
+            ? `$${(c.volume24h / 1e6).toFixed(2)}M`
+            : 'N/A';
+          const mcapStr = c.marketCap
+            ? `$${(c.marketCap / 1e6).toFixed(1)}M`
+            : 'N/A';
+
+          const tLines = [
+            `🌊 *${c.name} (${c.symbol})*`,
+            ``,
+            `💰 *Price:*      \`$${priceStr}\``,
+            `📈 *24H Change:* ${changeStr}`,
+            `💵 *Volume:*     ${volStr}`,
+            `🏦 *Market Cap:* ${mcapStr}`,
+            c.description ? `📄 _${c.description}_` : '',
+            ``,
+          ];
+
+          if (c.contracts?.length > 0) {
+            tLines.push(`📋 *Contract Addresses:*`);
+            c.contracts.slice(0, 3).forEach(ct => {
+              tLines.push(`  *${ct.chainLabel}:*`);
+              tLines.push(`  \`${ct.address}\``);
+            });
+            tLines.push(`⚠️ _Verify on CoinGecko before buying_`);
+          } else if (c.isNativeAsset) {
+            tLines.push(`ℹ️ _Native asset — no contract address_`);
+          } else {
+            tLines.push(`⚠️ _Contract not found — verify manually_`);
+          }
+
           tLines.push(``);
-        });
-        tLines.push(`_Check CoinGecko links for current price and contract address_`);
-        await reply(chatId, tLines.join('\n'));
+          tLines.push(`🔗 ${c.cgUrl}`);
+          if (c.currentPrice) {
+            tLines.push(`📝 *Track it:* \`buy ${c.symbol} ${priceStr}\``);
+          }
+          tLines.push(`⚠️ _HIGH RISK — max 1-2% of account_`);
+
+          await replyChunked(chatId, tLines.filter(Boolean).join('\n'));
+        }
       }
 
       await reply(chatId, `✅ Done. Use \`buy SYMBOL PRICE\` to track any coin.`);
