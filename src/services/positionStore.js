@@ -1,22 +1,16 @@
 /**
- * ─── Position Store ───────────────────────────────────────────────────────────
- * Stores open trades with optional target (e.g. 5X)
- * Uses Upstash Redis if configured, otherwise in-memory fallback.
- *
- * SETUP (free):
- *  1. https://upstash.com → create free Redis DB
- *  2. Add to Vercel env vars:
- *     UPSTASH_REDIS_REST_URL
- *     UPSTASH_REDIS_REST_TOKEN
+ * ─── Position Store (Multi-User) ─────────────────────────────────────────────
+ * Positions stored per user chat ID.
+ * Key format: cryptobot:positions:{chatId}
  */
 
 const axios = require('axios');
 
 const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const POSITIONS_KEY = 'cryptobot:positions';
-const memoryStore   = new Map();
 const useUpstash    = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+const memoryStore = {};
 
 async function upstashGet(key) {
   const r = await axios.get(`${UPSTASH_URL}/get/${key}`, {
@@ -28,80 +22,127 @@ async function upstashGet(key) {
 
 async function upstashSet(key, value) {
   await axios.post(`${UPSTASH_URL}/set/${key}`, JSON.stringify(value), {
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization:  `Bearer ${UPSTASH_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
     timeout: 5000,
   });
 }
 
-async function getAllPositions() {
+function posKey(chatId) {
+  return `cryptobot:positions:${chatId}`;
+}
+
+// ─── Get all positions for a user ─────────────────────────────────────────────
+async function getAllPositions(chatId) {
   try {
-    if (useUpstash) return (await upstashGet(POSITIONS_KEY)) || {};
-    return Object.fromEntries(memoryStore);
+    if (useUpstash) return (await upstashGet(posKey(chatId))) || {};
+    return memoryStore[chatId] || {};
   } catch { return {}; }
 }
 
-async function getPosition(symbol) {
-  const all = await getAllPositions();
+async function getPosition(chatId, symbol) {
+  const all = await getAllPositions(chatId);
   return all[symbol.toUpperCase()] || null;
 }
 
-async function addPosition({ symbol, buyPrice, quantity, accountSize, riskPct, targetMultiple }) {
-  const sym = symbol.toUpperCase();
-  const all = await getAllPositions();
-
-  // targetMultiple: e.g. 5 means alert at 5X, 2 means alert at 2X
+async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, riskPct, targetMultiple }) {
+  const sym  = symbol.toUpperCase();
+  const all  = await getAllPositions(chatId);
   const target = targetMultiple ? parseFloat(targetMultiple) : null;
 
   all[sym] = {
     symbol:             sym,
+    chatId:             chatId.toString(),
     buyPrice:           parseFloat(buyPrice),
     quantity:           quantity    ? parseFloat(quantity)    : null,
     accountSize:        accountSize ? parseFloat(accountSize) : null,
     riskPct:            riskPct     ? parseFloat(riskPct)     : 1,
     targetMultiple:     target,
     targetPrice:        target ? parseFloat(buyPrice) * target : null,
-    targetHit:          false,   // flag so we only alert once
+    targetHit:          false,
     stopLossHit:        false,
     addedAt:            new Date().toISOString(),
     lastChecked:        null,
     lastRecommendation: null,
-    highestPrice:       parseFloat(buyPrice), // track ATH for trailing stop
+    highestPrice:       parseFloat(buyPrice),
   };
 
-  if (useUpstash) await upstashSet(POSITIONS_KEY, all);
-  else memoryStore.set(sym, all[sym]);
+  if (useUpstash) await upstashSet(posKey(chatId), all);
+  else { memoryStore[chatId] = memoryStore[chatId] || {}; memoryStore[chatId][sym] = all[sym]; }
 
   return all[sym];
 }
 
-async function updatePosition(symbol, updates) {
+async function updatePosition(chatId, symbol, updates) {
   const sym = symbol.toUpperCase();
-  const all = await getAllPositions();
+  const all = await getAllPositions(chatId);
   if (!all[sym]) return;
   all[sym] = { ...all[sym], ...updates };
-  if (useUpstash) await upstashSet(POSITIONS_KEY, all);
-  else memoryStore.set(sym, all[sym]);
+  if (useUpstash) await upstashSet(posKey(chatId), all);
+  else memoryStore[chatId][sym] = all[sym];
 }
 
-async function removePosition(symbol) {
+async function removePosition(chatId, symbol) {
   const sym = symbol.toUpperCase();
-  const all = await getAllPositions();
+  const all = await getAllPositions(chatId);
   if (!all[sym]) return false;
   delete all[sym];
-  if (useUpstash) await upstashSet(POSITIONS_KEY, all);
-  else memoryStore.delete(sym);
+  if (useUpstash) await upstashSet(posKey(chatId), all);
+  else delete memoryStore[chatId]?.[sym];
   return true;
 }
 
-async function updateLastChecked(symbol, recommendation) {
-  await updatePosition(symbol, {
+async function updateLastChecked(chatId, symbol, recommendation) {
+  await updatePosition(chatId, symbol, {
     lastChecked:        new Date().toISOString(),
     lastRecommendation: recommendation,
   });
 }
 
+// ─── Get ALL positions across ALL users (for monitor) ─────────────────────────
+async function getAllUsersPositions() {
+  try {
+    if (!useUpstash) {
+      const all = [];
+      for (const [chatId, positions] of Object.entries(memoryStore)) {
+        for (const pos of Object.values(positions)) {
+          all.push({ ...pos, chatId });
+        }
+      }
+      return all;
+    }
+
+    // List all position keys from Upstash
+    const r = await axios.get(`${UPSTASH_URL}/keys/cryptobot:positions:*`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+      timeout: 8000,
+    });
+
+    const keys = r.data.result || [];
+    const all  = [];
+
+    for (const key of keys) {
+      const chatId    = key.replace('cryptobot:positions:', '');
+      const positions = await upstashGet(key);
+      if (positions) {
+        for (const pos of Object.values(positions)) {
+          all.push({ ...pos, chatId });
+        }
+      }
+    }
+
+    return all;
+  } catch (err) {
+    console.error('[PositionStore] getAllUsersPositions error:', err.message);
+    return [];
+  }
+}
+
 module.exports = {
   getAllPositions, getPosition, addPosition,
   updatePosition, removePosition, updateLastChecked,
+  getAllUsersPositions,
   isUsingUpstash: useUpstash,
 };

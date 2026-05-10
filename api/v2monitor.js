@@ -7,24 +7,26 @@
  */
 
 const axios = require('axios');
-const { getAllPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
+const { getAllUsersPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
+const { getApprovedUsers } = require('../src/services/userStore');
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-async function sendAlert(text) {
-  if (!BOT_TOKEN || !CHAT_ID) return;
+async function sendAlert(chatId, text) {
+  if (!BOT_TOKEN || !chatId) return;
   try {
     await axios.post(
       `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true },
+      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
       { timeout: 8000 }
     );
   } catch (e) { console.error('[Monitor Alert]', e.message); }
 }
 
-async function checkPosition(pos) {
+async function checkPosition(pos, userId) {
+  const targetChatId = userId || pos.chatId || process.env.TELEGRAM_CHAT_ID;
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
 
   const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
@@ -44,12 +46,12 @@ async function checkPosition(pos) {
 
   // Track highest price seen
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
-    await updatePosition(pos.symbol, { highestPrice: currentPrice });
+    await updatePosition(pos.chatId, pos.symbol, { highestPrice: currentPrice });
   }
 
   // ── TARGET HIT (2x / 3x / 4x / 5x) ──────────────────────────────────────
   if (pos.targetMultiple && pos.targetPrice && !pos.targetHit && currentPrice >= pos.targetPrice) {
-    await sendAlert([
+    await sendAlert(targetChatId, [
       ``,
       `🚨🎯🚨 *${pos.targetMultiple}X TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
       ``,
@@ -73,13 +75,13 @@ async function checkPosition(pos) {
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
 
-    await updatePosition(pos.symbol, { targetHit: true });
+    await updatePosition(pos.chatId, pos.symbol, { targetHit: true });
     return { recommendation: `${pos.targetMultiple}X_TARGET_HIT`, alerted: true };
   }
 
   // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
   if (sl && currentPrice <= sl && !pos.stopLossHit) {
-    await sendAlert([
+    await sendAlert(targetChatId, [
       `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -93,13 +95,13 @@ async function checkPosition(pos) {
       `⏰ ${new Date().toUTCString()}`,
     ].join('\n'));
 
-    await updatePosition(pos.symbol, { stopLossHit: true });
+    await updatePosition(pos.chatId, pos.symbol, { stopLossHit: true });
     return { recommendation: 'STOP_LOSS', alerted: true };
   }
 
   // ── TP3 HIT ───────────────────────────────────────────────────────────────
   if (tp3 && currentPrice >= tp3.price) {
-    await sendAlert([
+    await sendAlert(targetChatId, [
       `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -117,7 +119,7 @@ async function checkPosition(pos) {
 
   // ── TP2 HIT ───────────────────────────────────────────────────────────────
   if (tp2 && currentPrice >= tp2.price && pnlPct > 0) {
-    await sendAlert([
+    await sendAlert(targetChatId, [
       `🟢🟢 *TP2 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -136,7 +138,7 @@ async function checkPosition(pos) {
 
   // ── TP1 HIT ───────────────────────────────────────────────────────────────
   if (tp1 && currentPrice >= tp1.price && pnlPct > 0) {
-    await sendAlert([
+    await sendAlert(targetChatId, [
       `🟢 *TP1 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -162,7 +164,7 @@ async function checkPosition(pos) {
       ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away`
       : null;
 
-    await sendAlert([
+    await sendAlert(targetChatId, [
       `⚪ *HOLD — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -190,23 +192,33 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    const positions = await getAllPositions();
-    const entries   = Object.values(positions);
-
-    if (entries.length === 0) {
-      return res.status(200).json({ success: true, message: 'No open positions' });
-    }
+    // Get all approved users and check each user's positions
+    const adminId      = process.env.TELEGRAM_CHAT_ID;
+    const approvedUsers = await getApprovedUsers();
+    const allUserIds   = [...new Set([adminId, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
 
     const results = [];
-    for (const pos of entries) {
-      try {
-        const result = await checkPosition(pos);
-        await updateLastChecked(pos.symbol, result.recommendation);
-        results.push({ symbol: pos.symbol, ...result });
-      } catch (err) {
-        console.error(`[Monitor] ${pos.symbol}:`, err.message);
-        results.push({ symbol: pos.symbol, error: err.message });
+    let totalPositions = 0;
+
+    for (const userId of allUserIds) {
+      const positions = await getAllPositions(userId);
+      const entries   = Object.values(positions);
+      totalPositions += entries.length;
+
+      for (const pos of entries) {
+        try {
+          const result = await checkPosition(pos, userId);
+          await updateLastChecked(userId, pos.symbol, result.recommendation);
+          results.push({ userId, symbol: pos.symbol, ...result });
+        } catch (err) {
+          console.error(`[Monitor] ${userId}/${pos.symbol}:`, err.message);
+          results.push({ userId, symbol: pos.symbol, error: err.message });
+        }
       }
+    }
+
+    if (totalPositions === 0) {
+      return res.status(200).json({ success: true, message: 'No open positions across any users' });
     }
 
     return res.status(200).json({
