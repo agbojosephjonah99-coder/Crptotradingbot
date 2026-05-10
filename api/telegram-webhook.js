@@ -345,6 +345,108 @@ async function handleMessage(chatId, text) {
     return;
   }
 
+  // ── SCAN (manual moonshot trigger) ──────────────────────────────────────
+  if (cmd === 'scan' || cmd === 'search' || cmd === 'find') {
+    await reply(chatId, [
+      `🔍 *Scanning entire market for 99% pump candidates...*`,
+      ``,
+      `Checking volume, momentum, social trending,`,
+      `whale activity and price structure.`,
+      `Give me 30 seconds...`,
+    ].join('\n'));
+
+    try {
+      const { getMoonshots } = require('../src/services/listingsService');
+      const moonshots = await getMoonshots();
+
+      if (moonshots.length === 0) {
+        await reply(chatId, [
+          `😴 *No high-confidence picks right now*`,
+          ``,
+          `The scanner checked the entire market and nothing`,
+          `is meeting the 99% confidence threshold at this moment.`,
+          ``,
+          `Try again in 30-60 minutes. Markets change fast.`,
+        ].join('\n'));
+        return;
+      }
+
+      await reply(chatId, `✅ *Found ${moonshots.length} high-confidence pick${moonshots.length > 1 ? 's' : ''} — ${new Date().toUTCString()}*`);
+
+      for (const coin of moonshots) {
+        const meta     = coin.meta;
+        const priceStr = coin.price < 0.001
+          ? coin.price.toFixed(8)
+          : coin.price < 0.01
+            ? coin.price.toFixed(6)
+            : coin.price.toFixed(4);
+
+        const cgPrice = meta?.currentPrice
+          ? (meta.currentPrice < 0.001
+              ? meta.currentPrice.toFixed(8)
+              : meta.currentPrice.toFixed(4))
+          : priceStr;
+
+        const t2x = (parseFloat(cgPrice) * 2).toFixed(6);
+        const t3x = (parseFloat(cgPrice) * 3).toFixed(6);
+        const t4x = (parseFloat(cgPrice) * 4).toFixed(6);
+        const t5x = (parseFloat(cgPrice) * 5).toFixed(6);
+
+        const lines = [
+          `🌕 *${meta?.name || coin.base} (${coin.base}/USDT)*`,
+          ``,
+          `⚡ *${coin.probability}% chance of major pump within 3 days*`,
+          ``,
+          `💰 *Current Price:* \`$${cgPrice}\``,
+          `📈 *24H Change:*    +${coin.change24h.toFixed(2)}%`,
+          `💵 *24H Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
+          meta?.marketCap ? `🏦 *Market Cap:*    $${(meta.marketCap / 1e6).toFixed(1)}M` : '',
+          coin.isTrending ? `🔥 *TRENDING on CoinGecko right now*` : '',
+          `📊 *Confidence:* ${coin.score}/100`,
+          ``,
+          `🎯 *PROFIT TARGETS:*`,
+          `  2X → \`$${t2x}\` (+100%)`,
+          `  3X → \`$${t3x}\` (+200%)`,
+          `  4X → \`$${t4x}\` (+300%)`,
+          `  5X → \`$${t5x}\` (+400%)`,
+          ``,
+          `📋 *Why this coin:*`,
+          ...coin.reasons.map(r => `  ✅ ${r}`),
+          ``,
+        ];
+
+        // Contract addresses
+        if (meta?.contracts?.length > 0) {
+          lines.push(`📋 *Contract Addresses:*`);
+          meta.contracts.slice(0, 3).forEach(ct => {
+            lines.push(`  *${ct.chainLabel}:*`);
+            lines.push(`  \`${ct.address}\``);
+          });
+          lines.push(`⚠️ _Verify on CoinGecko before buying_`);
+        } else if (meta?.isNativeAsset) {
+          lines.push(`ℹ️ _Native asset — no contract address_`);
+        } else {
+          lines.push(`⚠️ _Contract not found — verify on CoinGecko_`);
+        }
+
+        if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+
+        lines.push(``);
+        lines.push(`── *TRACK THIS COIN* ──`);
+        lines.push(`\`buy ${coin.base} ${cgPrice} 2x\` ← alert when 2X`);
+        lines.push(`\`buy ${coin.base} ${cgPrice} 3x\` ← alert when 3X`);
+        lines.push(`\`buy ${coin.base} ${cgPrice} 5x\` ← alert when 5X`);
+        lines.push(`⚠️ _HIGH RISK — max 1-2% of account only_`);
+
+        await replyChunked(chatId, lines.filter(Boolean).join('\n'));
+      }
+
+    } catch (err) {
+      await reply(chatId, `❌ Scan failed: ${err.message}`);
+    }
+    return;
+  }
+
   // ── MOONSHOTS ─────────────────────────────────────────────────────────────
   if (cmd === 'moonshots' || cmd === 'moon' || cmd === '5x') {
     await reply(chatId, `🚀 Scanning for 5X moonshot candidates... give me 30 seconds.`);
