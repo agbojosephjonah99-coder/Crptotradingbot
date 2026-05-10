@@ -21,8 +21,8 @@ const {
   getUsersByStatus, formatName,
 } = require('../src/services/userService');
 const {
-  getAllPositions, getPosition, addPosition,
-  removePosition, updateLastChecked,
+  getAllPositions, getPositionsBySymbol, addPosition,
+  removePositionById, removeAllBySymbol, updateLastChecked,
 } = require('../src/services/positionStore');
 
 const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
@@ -596,8 +596,13 @@ async function handleMessage(chatId, text, from) {
     const targetPrice = targetMultiple ? buyPrice * targetMultiple : null;
     await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple });
 
+    // Check how many entries already exist for this coin
+    const existing = await getPositionsBySymbol(chatId, symbol);
+    const entryNum = existing.length + 1;
+
     await reply(chatId, [
-      `✅ *Position Registered — ${symbol}*`,
+      `✅ *Buy #${entryNum} Registered — ${symbol}*`,
+      existing.length > 0 ? `📌 _You now have ${entryNum} separate entries for ${symbol}_` : '',
       ``,
       `💰 *Buy Price:* \`$${buyPrice}\``,
       quantity      ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
@@ -609,7 +614,8 @@ async function handleMessage(chatId, text, from) {
       `  🟢 TP1 / TP2 / TP3 hit → take partial profit`,
       `  ⚪ Hold update every 4 hours`,
       ``,
-      `\`check ${symbol}\` for instant advice anytime`,
+      `Each entry is monitored independently.`,
+      `\`positions\` to see all your entries`,
     ].filter(Boolean).join('\n'));
     return;
   }
@@ -618,11 +624,60 @@ async function handleMessage(chatId, text, from) {
   if (cmd === 'sell' || cmd === 'remove' || cmd === 'sold') {
     const rawSymbol = parts[1];
     if (!rawSymbol) { await reply(chatId, `❌ Example: \`sell SOL\``); return; }
-    const symbol  = normaliseSymbol(rawSymbol);
-    const removed = await removePosition(chatId, symbol);
+    const symbol   = normaliseSymbol(rawSymbol);
+    const entries  = await getPositionsBySymbol(chatId, symbol);
+
+    if (entries.length === 0) {
+      await reply(chatId, `⚠️ *${symbol}* not in your positions.`);
+      return;
+    }
+
+    // Only one entry — remove it directly
+    if (entries.length === 1) {
+      await removePositionById(chatId, entries[0].positionId);
+      await reply(chatId, `✅ *${symbol}* removed. Good trade! 💸`);
+      return;
+    }
+
+    // Multiple entries — show them and ask which to remove
+    const lines = [
+      `📌 *You have ${entries.length} entries for ${symbol}*`,
+      ``,
+      `Which one did you sell?`,
+      ``,
+    ];
+    entries.forEach((pos, i) => {
+      lines.push(`*Entry ${i + 1}:*`);
+      lines.push(`  Price: \`$${pos.buyPrice}\``);
+      if (pos.quantity) lines.push(`  Qty: ${pos.quantity}`);
+      if (pos.targetMultiple) lines.push(`  Target: ${pos.targetMultiple}X`);
+      lines.push(`  Added: ${new Date(pos.addedAt).toUTCString()}`);
+      lines.push(`  To remove: \`sellentry ${pos.positionId}\``);
+      lines.push(``);
+    });
+    lines.push(`To remove ALL ${symbol} entries: \`sellall ${symbol}\``);
+    await reply(chatId, lines.join('\n'));
+    return;
+  }
+
+  // ── SELLENTRY (remove specific entry by ID) ───────────────────────────────
+  if (cmd === 'sellentry' && parts[1]) {
+    const positionId = parts[1];
+    const removed    = await removePositionById(chatId, positionId);
     await reply(chatId, removed
-      ? `✅ *${symbol}* removed. Good trade! 💸`
-      : `⚠️ *${symbol}* not in your positions.`
+      ? `✅ Entry removed. Good trade! 💸`
+      : `⚠️ Entry not found. Type \`positions\` to see your entries.`
+    );
+    return;
+  }
+
+  // ── SELLALL (remove all entries for a coin) ───────────────────────────────
+  if (cmd === 'sellall' && parts[1]) {
+    const symbol  = normaliseSymbol(parts[1]);
+    const removed = await removeAllBySymbol(chatId, symbol);
+    await reply(chatId, removed > 0
+      ? `✅ All ${removed} ${symbol} entries removed. Great trading! 💸`
+      : `⚠️ No ${symbol} positions found.`
     );
     return;
   }
@@ -635,15 +690,38 @@ async function handleMessage(chatId, text, from) {
       await reply(chatId, `📭 *No open positions*\n\nAdd one: \`buy SOL 92.50\``);
       return;
     }
-    const lines = [`📊 *Your Open Positions*`, ``];
+
+    // Group by symbol
+    const grouped = {};
     for (const pos of entries) {
-      lines.push(`*${pos.symbol}*`);
-      lines.push(`  Entry: \`$${pos.buyPrice}\``);
-      if (pos.quantity) lines.push(`  Qty: ${pos.quantity}`);
-      if (pos.targetMultiple) lines.push(`  Target: ${pos.targetMultiple}X = \`$${pos.targetPrice?.toFixed(6)}\``);
-      lines.push(`  Status: ${pos.lastRecommendation || 'Pending first check'}`);
-      lines.push(``);
+      if (!grouped[pos.symbol]) grouped[pos.symbol] = [];
+      grouped[pos.symbol].push(pos);
     }
+
+    const lines = [`📊 *Your Open Positions (${entries.length} total)*`, ``];
+
+    for (const [symbol, coinEntries] of Object.entries(grouped)) {
+      if (coinEntries.length === 1) {
+        const pos = coinEntries[0];
+        lines.push(`*${symbol}*`);
+        lines.push(`  Entry: \`$${pos.buyPrice}\``);
+        if (pos.quantity)       lines.push(`  Qty: ${pos.quantity}`);
+        if (pos.targetMultiple) lines.push(`  Target: ${pos.targetMultiple}X = \`$${pos.targetPrice?.toFixed(6)}\``);
+        lines.push(`  Status: ${pos.lastRecommendation || 'Pending first check'}`);
+        lines.push(``);
+      } else {
+        // Multiple entries for same coin
+        lines.push(`*${symbol}* — ${coinEntries.length} entries`);
+        coinEntries.forEach((pos, i) => {
+          lines.push(`  *Entry ${i + 1}:* \`$${pos.buyPrice}\`` +
+            (pos.targetMultiple ? ` → ${pos.targetMultiple}X` : '') +
+            (pos.quantity ? ` | Qty: ${pos.quantity}` : ''));
+          lines.push(`    Status: ${pos.lastRecommendation || 'Pending'}`);
+        });
+        lines.push(``);
+      }
+    }
+
     await reply(chatId, lines.join('\n'));
     return;
   }
@@ -652,40 +730,51 @@ async function handleMessage(chatId, text, from) {
   if (cmd === 'check') {
     const rawSymbol = parts[1];
     if (!rawSymbol) { await reply(chatId, `❌ Example: \`check SOL\``); return; }
-    const symbol = normaliseSymbol(rawSymbol);
-    const pos    = await getPosition(chatId, symbol);
-    if (!pos) {
+    const symbol  = normaliseSymbol(rawSymbol);
+    const entries = await getPositionsBySymbol(chatId, symbol);
+
+    if (entries.length === 0) {
       await reply(chatId, `⚠️ *${symbol}* not in positions.\n\nAdd it: \`buy ${symbol} YOUR_PRICE\``);
       return;
     }
-    await reply(chatId, `🔍 Checking *${symbol}*...`);
+
+    await reply(chatId, `🔍 Checking *${symbol}* (${entries.length} entr${entries.length > 1 ? 'ies' : 'y'})...`);
+
     try {
       const adv = require('./v2advice');
       const { candles1h, candles4h, currentPrice } = await adv.fetchCurrentData(symbol);
-      const advice = adv.buildAdvice({ symbol, buyPrice: pos.buyPrice, currentPrice, candles1h, candles4h });
-      const tp1 = advice.tradePlan?.takeProfits?.tp1;
-      const tp2 = advice.tradePlan?.takeProfits?.tp2;
-      const tp3 = advice.tradePlan?.takeProfits?.tp3;
-      const sl  = advice.tradePlan?.stopLoss;
-      const emoji = { STOP_LOSS:'🔴',TAKE_PROFIT:'🟢',TRAIL_STOP:'🟡',CLOSE_PARTIAL:'🟠',HOLD:'⚪' }[advice.recommendation] || '⚪';
-      const lines = [
-        `${emoji} *${advice.recommendation} — ${symbol}*`,
-        ``,
-        `💰 *Bought:* \`$${pos.buyPrice}\``,
-        `📊 *Now:*    \`$${Number(advice.currentPrice).toFixed(4)}\``,
-        `📈 *P&L:*    ${advice.pnlDisplay}`,
-        pos.targetMultiple ? `🎯 *${pos.targetMultiple}X target:* \`$${pos.targetPrice?.toFixed(6)}\`` : '',
-        ``,
-        ...(advice.reasons || []).map(r => `  ${r}`),
-        ``,
-        ...(advice.actions || []).map(a => `  👉 ${a}`),
-        ``,
-        sl  ? `🛡 Stop Loss: \`$${Number(sl).toFixed(4)}\`` : '',
-        tp1 ? `🎯 TP1 (40%): \`$${Number(tp1.price).toFixed(4)}\`` : '',
-        tp2 ? `🎯 TP2 (35%): \`$${Number(tp2.price).toFixed(4)}\`` : '',
-        tp3 ? `🎯 TP3 (25%): \`$${Number(tp3.price).toFixed(4)}\`` : '',
-      ].filter(Boolean).join('\n');
-      await reply(chatId, lines);
+
+      for (let i = 0; i < entries.length; i++) {
+        const pos    = entries[i];
+        const advice = adv.buildAdvice({ symbol, buyPrice: pos.buyPrice, currentPrice, candles1h, candles4h });
+        const tp1    = advice.tradePlan?.takeProfits?.tp1;
+        const tp2    = advice.tradePlan?.takeProfits?.tp2;
+        const tp3    = advice.tradePlan?.takeProfits?.tp3;
+        const sl     = advice.tradePlan?.stopLoss;
+        const emoji  = { STOP_LOSS:'🔴',TAKE_PROFIT:'🟢',TRAIL_STOP:'🟡',CLOSE_PARTIAL:'🟠',HOLD:'⚪' }[advice.recommendation] || '⚪';
+
+        const lines = [
+          entries.length > 1 ? `*Entry ${i + 1} of ${entries.length}*` : '',
+          `${emoji} *${advice.recommendation} — ${symbol}*`,
+          ``,
+          `💰 *Bought:* \`$${pos.buyPrice}\``,
+          pos.quantity ? `📦 *Qty:* ${pos.quantity}` : '',
+          `📊 *Now:*    \`$${Number(advice.currentPrice).toFixed(6)}\``,
+          `📈 *P&L:*    ${advice.pnlDisplay}`,
+          pos.targetMultiple ? `🎯 *${pos.targetMultiple}X:* \`$${pos.targetPrice?.toFixed(6)}\`` : '',
+          ``,
+          ...(advice.reasons || []).map(r => `  ${r}`),
+          ``,
+          ...(advice.actions || []).map(a => `  👉 ${a}`),
+          ``,
+          sl  ? `🛡 Stop: \`$${Number(sl).toFixed(6)}\`` : '',
+          tp1 ? `🎯 TP1:  \`$${Number(tp1.price).toFixed(6)}\`` : '',
+          tp2 ? `🎯 TP2:  \`$${Number(tp2.price).toFixed(6)}\`` : '',
+          tp3 ? `🎯 TP3:  \`$${Number(tp3.price).toFixed(6)}\`` : '',
+        ].filter(Boolean).join('\n');
+
+        await reply(chatId, lines);
+      }
     } catch (err) {
       await reply(chatId, `❌ Error: ${err.message}`);
     }

@@ -46,7 +46,7 @@ async function checkPosition(pos, userId) {
 
   // Track highest price seen
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
-    await updatePosition(pos.chatId, pos.symbol, { highestPrice: currentPrice });
+    await updatePosition(pos.chatId, pos.positionId, { highestPrice: currentPrice });
   }
 
   // ── TARGET HIT (2x / 3x / 4x / 5x) ──────────────────────────────────────
@@ -75,7 +75,7 @@ async function checkPosition(pos, userId) {
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
 
-    await updatePosition(pos.chatId, pos.symbol, { targetHit: true });
+    await updatePosition(pos.chatId, pos.positionId, { targetHit: true });
     return { recommendation: `${pos.targetMultiple}X_TARGET_HIT`, alerted: true };
   }
 
@@ -95,7 +95,7 @@ async function checkPosition(pos, userId) {
       `⏰ ${new Date().toUTCString()}`,
     ].join('\n'));
 
-    await updatePosition(pos.chatId, pos.symbol, { stopLossHit: true });
+    await updatePosition(pos.chatId, pos.positionId, { stopLossHit: true });
     return { recommendation: 'STOP_LOSS', alerted: true };
   }
 

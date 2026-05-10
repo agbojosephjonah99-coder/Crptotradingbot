@@ -1,7 +1,10 @@
 /**
- * ─── Position Store (Multi-User) ─────────────────────────────────────────────
- * Positions stored per user chat ID.
+ * ─── Position Store (Multi-User + Multi-Entry per Coin) ──────────────────────
+ * Each buy is stored as a unique entry using symbol:timestamp as key.
+ * This allows multiple buys of the same coin at different prices.
+ *
  * Key format: cryptobot:positions:{chatId}
+ * Position ID: {SYMBOL}:{timestamp}  e.g. SOLUSDT:1715123456789
  */
 
 const axios = require('axios');
@@ -9,8 +12,7 @@ const axios = require('axios');
 const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const useUpstash    = !!(UPSTASH_URL && UPSTASH_TOKEN);
-
-const memoryStore = {};
+const memoryStore   = {};
 
 async function upstashGet(key) {
   const r = await axios.get(`${UPSTASH_URL}/get/${key}`, {
@@ -42,17 +44,29 @@ async function getAllPositions(chatId) {
   } catch { return {}; }
 }
 
-async function getPosition(chatId, symbol) {
+// ─── Get all positions for a specific symbol (returns array) ──────────────────
+async function getPositionsBySymbol(chatId, symbol) {
   const all = await getAllPositions(chatId);
-  return all[symbol.toUpperCase()] || null;
+  return Object.values(all).filter(p => p.symbol === symbol.toUpperCase());
 }
 
+// ─── Get a single position by its unique ID ───────────────────────────────────
+async function getPositionById(chatId, positionId) {
+  const all = await getAllPositions(chatId);
+  return all[positionId] || null;
+}
+
+// ─── Add a new position (always creates a new entry) ──────────────────────────
 async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, riskPct, targetMultiple }) {
-  const sym  = symbol.toUpperCase();
-  const all  = await getAllPositions(chatId);
+  const sym    = symbol.toUpperCase();
+  const all    = await getAllPositions(chatId);
   const target = targetMultiple ? parseFloat(targetMultiple) : null;
 
-  all[sym] = {
+  // Unique ID = SYMBOL:timestamp — allows multiple buys of same coin
+  const positionId = `${sym}:${Date.now()}`;
+
+  all[positionId] = {
+    positionId,
     symbol:             sym,
     chatId:             chatId.toString(),
     buyPrice:           parseFloat(buyPrice),
@@ -70,32 +84,51 @@ async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, ri
   };
 
   if (useUpstash) await upstashSet(posKey(chatId), all);
-  else { memoryStore[chatId] = memoryStore[chatId] || {}; memoryStore[chatId][sym] = all[sym]; }
+  else {
+    memoryStore[chatId] = memoryStore[chatId] || {};
+    memoryStore[chatId][positionId] = all[positionId];
+  }
 
-  return all[sym];
+  return all[positionId];
 }
 
-async function updatePosition(chatId, symbol, updates) {
-  const sym = symbol.toUpperCase();
+// ─── Update a position by ID ───────────────────────────────────────────────────
+async function updatePosition(chatId, positionId, updates) {
   const all = await getAllPositions(chatId);
-  if (!all[sym]) return;
-  all[sym] = { ...all[sym], ...updates };
+  if (!all[positionId]) return;
+  all[positionId] = { ...all[positionId], ...updates };
   if (useUpstash) await upstashSet(posKey(chatId), all);
-  else memoryStore[chatId][sym] = all[sym];
+  else if (memoryStore[chatId]) memoryStore[chatId][positionId] = all[positionId];
 }
 
-async function removePosition(chatId, symbol) {
-  const sym = symbol.toUpperCase();
+// ─── Remove a position by ID ───────────────────────────────────────────────────
+async function removePositionById(chatId, positionId) {
   const all = await getAllPositions(chatId);
-  if (!all[sym]) return false;
-  delete all[sym];
+  if (!all[positionId]) return false;
+  delete all[positionId];
   if (useUpstash) await upstashSet(posKey(chatId), all);
-  else delete memoryStore[chatId]?.[sym];
+  else delete memoryStore[chatId]?.[positionId];
   return true;
 }
 
-async function updateLastChecked(chatId, symbol, recommendation) {
-  await updatePosition(chatId, symbol, {
+// ─── Remove ALL positions for a symbol ────────────────────────────────────────
+async function removeAllBySymbol(chatId, symbol) {
+  const sym = symbol.toUpperCase();
+  const all = await getAllPositions(chatId);
+  let removed = 0;
+  for (const [id, pos] of Object.entries(all)) {
+    if (pos.symbol === sym) { delete all[id]; removed++; }
+  }
+  if (removed > 0) {
+    if (useUpstash) await upstashSet(posKey(chatId), all);
+    else memoryStore[chatId] = all;
+  }
+  return removed;
+}
+
+// ─── Update lastChecked on a position ─────────────────────────────────────────
+async function updateLastChecked(chatId, positionId, recommendation) {
+  await updatePosition(chatId, positionId, {
     lastChecked:        new Date().toISOString(),
     lastRecommendation: recommendation,
   });
@@ -106,15 +139,12 @@ async function getAllUsersPositions() {
   try {
     if (!useUpstash) {
       const all = [];
-      for (const [chatId, positions] of Object.entries(memoryStore)) {
-        for (const pos of Object.values(positions)) {
-          all.push({ ...pos, chatId });
-        }
+      for (const positions of Object.values(memoryStore)) {
+        for (const pos of Object.values(positions)) all.push(pos);
       }
       return all;
     }
 
-    // List all position keys from Upstash
     const r = await axios.get(`${UPSTASH_URL}/keys/cryptobot:positions:*`, {
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
       timeout: 8000,
@@ -124,12 +154,9 @@ async function getAllUsersPositions() {
     const all  = [];
 
     for (const key of keys) {
-      const chatId    = key.replace('cryptobot:positions:', '');
       const positions = await upstashGet(key);
       if (positions) {
-        for (const pos of Object.values(positions)) {
-          all.push({ ...pos, chatId });
-        }
+        for (const pos of Object.values(positions)) all.push(pos);
       }
     }
 
@@ -141,8 +168,14 @@ async function getAllUsersPositions() {
 }
 
 module.exports = {
-  getAllPositions, getPosition, addPosition,
-  updatePosition, removePosition, updateLastChecked,
+  getAllPositions,
+  getPositionsBySymbol,
+  getPositionById,
+  addPosition,
+  updatePosition,
+  removePositionById,
+  removeAllBySymbol,
+  updateLastChecked,
   getAllUsersPositions,
   isUsingUpstash: useUpstash,
 };
