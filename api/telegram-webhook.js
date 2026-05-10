@@ -134,8 +134,24 @@ async function handleMessage(chatId, text) {
     return;
   }
 
+  // ── START (first time / re-trigger menu) ────────────────────────────────
+  if (cmd === 'start') {
+    // Send persistent keyboard first
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      {
+        chat_id:    chatId,
+        text:       '👋 *Welcome to CryptoBot V2!*\n\nTap the *📋 MENU* button below to get started.',
+        parse_mode: 'Markdown',
+        reply_markup: PERSISTENT_MENU,
+      },
+      { timeout: 8000 }
+    ).catch(e => console.error('[Webhook] Start failed:', e.message));
+    return;
+  }
+
   // ── HELP ─────────────────────────────────────────────────────────────────
-  if (cmd === 'help' || cmd === '/start' || cmd === '/help') {
+  if (cmd === 'help') {
     await reply(chatId, [
       `🤖 *CryptoBot V2 — Command Guide*`,
       ``,
