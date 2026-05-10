@@ -60,7 +60,9 @@ async function fetchNewListings() {
 
 // ─── Command Handler ──────────────────────────────────────────────────────────
 async function handleMessage(chatId, text) {
-  const parts = text.trim().split(/\s+/);
+  // Strip leading slash so /buy works same as buy
+  const cleanText = text.trim().startsWith('/') ? text.trim().slice(1) : text.trim();
+  const parts = cleanText.split(/\s+/);
   const cmd   = parts[0]?.toLowerCase();
 
   // ── HELP ─────────────────────────────────────────────────────────────────
