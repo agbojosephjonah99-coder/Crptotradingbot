@@ -15,8 +15,16 @@ const { addPosition, removePosition, getAllPositions, getPosition } = require('.
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// ─── Main menu buttons (shown after every response) ──────────────────────────
-const MAIN_MENU = {
+// ─── Persistent MENU button (always visible at bottom of chat) ───────────────
+const PERSISTENT_MENU = {
+  keyboard: [[{ text: '📋 MENU' }]],
+  resize_keyboard:   true,
+  persistent:        true,
+  input_field_placeholder: 'Tap MENU or type a command...',
+};
+
+// ─── Inline command buttons (shown when MENU is tapped) ───────────────────────
+const INLINE_MENU = {
   inline_keyboard: [
     [
       { text: '🔍 Scan Now',      callback_data: 'scan'        },
@@ -36,8 +44,8 @@ const MAIN_MENU = {
   ],
 };
 
-// ─── Send reply with menu buttons ─────────────────────────────────────────────
-async function reply(chatId, text, showMenu = true) {
+// ─── Send reply (always sets persistent MENU button) ─────────────────────────
+async function reply(chatId, text, showInlineMenu = false) {
   if (!BOT_TOKEN) { console.error('[Webhook] BOT_TOKEN not set'); return; }
   try {
     await axios.post(
@@ -47,7 +55,7 @@ async function reply(chatId, text, showMenu = true) {
         text,
         parse_mode:   'Markdown',
         disable_web_page_preview: true,
-        reply_markup: showMenu ? MAIN_MENU : undefined,
+        reply_markup: showInlineMenu ? INLINE_MENU : PERSISTENT_MENU,
       },
       { timeout: 8000 }
     );
@@ -57,10 +65,10 @@ async function reply(chatId, text, showMenu = true) {
 }
 
 // ─── Send long message in chunks ──────────────────────────────────────────────
-async function replyChunked(chatId, text, showMenu = false) {
+async function replyChunked(chatId, text, showInlineMenu = false) {
   const MAX = 4000;
   if (text.length <= MAX) {
-    await reply(chatId, text, showMenu);
+    await reply(chatId, text, showInlineMenu);
     return;
   }
   const chunks = [];
@@ -74,8 +82,7 @@ async function replyChunked(chatId, text, showMenu = false) {
   }
   if (current) chunks.push(current);
   for (let i = 0; i < chunks.length; i++) {
-    // Only show menu on last chunk
-    await reply(chatId, chunks[i], i === chunks.length - 1 ? showMenu : false);
+    await reply(chatId, chunks[i], i === chunks.length - 1 ? showInlineMenu : false);
   }
 }
 
@@ -111,6 +118,21 @@ async function handleMessage(chatId, text) {
   const cleanText = text.trim().startsWith('/') ? text.trim().slice(1) : text.trim();
   const parts = cleanText.split(/\s+/);
   const cmd   = parts[0]?.toLowerCase();
+
+  // ── MENU (tapping the MENU button) ──────────────────────────────────────
+  if (cmd === 'menu' || cmd === '📋 menu' || text.trim() === '📋 MENU') {
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      {
+        chat_id:    chatId,
+        text:       '*What would you like to do?*\n\nTap a button below:',
+        parse_mode: 'Markdown',
+        reply_markup: INLINE_MENU,
+      },
+      { timeout: 8000 }
+    ).catch(e => console.error('[Webhook] Menu reply failed:', e.message));
+    return;
+  }
 
   // ── HELP ─────────────────────────────────────────────────────────────────
   if (cmd === 'help' || cmd === '/start' || cmd === '/help') {
