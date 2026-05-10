@@ -1,20 +1,13 @@
 /**
  * ─── Position Monitor ─────────────────────────────────────────────────────────
  * GET /api/v2monitor
- * Called by cron-job.org every hour.
  *
- * Checks every open position and fires Telegram alerts for:
- *  🎯 Target hit (5X or custom multiplier)
- *  🔴 Stop loss hit
- *  🟢 Take profit levels (TP1/TP2/TP3)
- *  🟡 Trailing stop needed
- *  ⚪ HOLD (every 4 hours)
+ * Hit every 30 mins via cron-job.org for fast target detection.
+ * Fires Telegram alerts the moment a target is hit.
  */
 
 const axios = require('axios');
-const {
-  getAllPositions, updateLastChecked, updatePosition,
-} = require('../src/services/positionStore');
+const { getAllPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -28,79 +21,75 @@ async function sendAlert(text) {
       { chat_id: CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true },
       { timeout: 8000 }
     );
-  } catch (e) {
-    console.error('[Monitor] Alert failed:', e.message);
-  }
+  } catch (e) { console.error('[Monitor Alert]', e.message); }
 }
 
 async function checkPosition(pos) {
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
+
+  const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
+  const currentMultiple = currentPrice / pos.buyPrice;
+  const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
+
   const advice = buildAdvice({
-    symbol:      pos.symbol,
-    buyPrice:    pos.buyPrice,
-    currentPrice,
-    candles1h,
-    candles4h,
-    accountSize: pos.accountSize,
-    riskPct:     pos.riskPct,
+    symbol: pos.symbol, buyPrice: pos.buyPrice,
+    currentPrice, candles1h, candles4h,
+    accountSize: pos.accountSize, riskPct: pos.riskPct,
   });
 
-  const pnlPct     = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
-  const currentMultiple = currentPrice / pos.buyPrice;
+  const sl  = advice.tradePlan?.stopLoss;
+  const tp1 = advice.tradePlan?.takeProfits?.tp1;
+  const tp2 = advice.tradePlan?.takeProfits?.tp2;
+  const tp3 = advice.tradePlan?.takeProfits?.tp3;
 
-  // Track highest price (for trailing stop awareness)
+  // Track highest price seen
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
     await updatePosition(pos.symbol, { highestPrice: currentPrice });
   }
 
-  const tp1 = advice.tradePlan?.takeProfits?.tp1;
-  const tp2 = advice.tradePlan?.takeProfits?.tp2;
-  const tp3 = advice.tradePlan?.takeProfits?.tp3;
-  const sl  = advice.tradePlan?.stopLoss;
-
-  // ── 1. TARGET HIT (5X or custom) ────────────────────────────────────────
-  if (pos.targetMultiple && !pos.targetHit && currentPrice >= pos.targetPrice) {
+  // ── TARGET HIT (2x / 3x / 4x / 5x) ──────────────────────────────────────
+  if (pos.targetMultiple && pos.targetPrice && !pos.targetHit && currentPrice >= pos.targetPrice) {
     await sendAlert([
-      `🎯🎯🎯 *TARGET HIT — ${pos.symbol}* 🎯🎯🎯`,
       ``,
-      `🌕 *${pos.targetMultiple}X TARGET REACHED!*`,
+      `🚨🎯🚨 *${pos.targetMultiple}X TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
       ``,
-      `💰 *You bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Current price:* \`$${currentPrice.toFixed(6)}\``,
-      `📈 *Gain:*          +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      pos.quantity ? `💵 *Profit:*         $${((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2)}` : '',
+      `🌕 *SELL NOW — YOUR TARGET HAS BEEN REACHED*`,
       ``,
-      `🔴 *SELL NOW — TAKE YOUR PROFIT*`,
+      `💰 *You bought at:*   \`$${pos.buyPrice}\``,
+      `📊 *Current price:*   \`$${currentPrice.toFixed(8)}\``,
+      `📈 *Your gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+      profitDollar ? `💵 *Estimated profit:* $${profitDollar}` : '',
       ``,
-      `📋 *How to exit:*`,
-      `  • Sell 50% immediately at market price`,
-      `  • Set trailing stop on remaining 50%`,
-      `  • If it keeps rising — let it run`,
-      `  • If it drops 20% from here → sell everything`,
+      `🔴 *DO THIS RIGHT NOW:*`,
+      `  1. Open your exchange immediately`,
+      `  2. Sell 60% of your position at market price`,
+      `  3. Move stop on remaining 40% to your buy price ($${pos.buyPrice})`,
+      `  4. If price drops back to buy price → sell the rest`,
+      `  5. If price keeps rising → enjoy the ride 🚀`,
+      ``,
+      `⚠️ _Do not be greedy. Secure your profit now._`,
       ``,
       `Type \`sell ${pos.symbol}\` after you exit to remove this position.`,
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
 
     await updatePosition(pos.symbol, { targetHit: true });
-    return { recommendation: 'TARGET_HIT', alerted: true };
+    return { recommendation: `${pos.targetMultiple}X_TARGET_HIT`, alerted: true };
   }
 
-  // ── 2. STOP LOSS HIT ─────────────────────────────────────────────────────
+  // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
   if (sl && currentPrice <= sl && !pos.stopLossHit) {
     await sendAlert([
-      `🔴 *STOP LOSS HIT — ${pos.symbol}*`,
+      `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(6)}\``,
+      `📊 *Now:*       \`$${currentPrice.toFixed(8)}\``,
       `📉 *Loss:*      ${pnlPct.toFixed(2)}%`,
       ``,
-      `🔴 *EXIT NOW — DO NOT HOLD THROUGH THE STOP*`,
+      `🔴 *Sell 100% immediately. No hesitation.*`,
+      `A small loss now prevents a wipeout later.`,
       ``,
-      `👉 Sell 100% at market price immediately.`,
-      `👉 A small loss now prevents a catastrophic loss later.`,
-      ``,
-      `Type \`sell ${pos.symbol}\` after you exit.`,
+      `Type \`sell ${pos.symbol}\` to remove this position.`,
       `⏰ ${new Date().toUTCString()}`,
     ].join('\n'));
 
@@ -108,77 +97,91 @@ async function checkPosition(pos) {
     return { recommendation: 'STOP_LOSS', alerted: true };
   }
 
-  // ── 3. TAKE PROFIT LEVELS ────────────────────────────────────────────────
-  if (advice.recommendation === 'TAKE_PROFIT') {
-    const tpHit = tp3 && currentPrice >= tp3.price ? 'TP3'
-      : tp2 && currentPrice >= tp2.price ? 'TP2'
-      : 'TP1';
-
-    const emoji = tpHit === 'TP3' ? '🟢🟢🟢' : tpHit === 'TP2' ? '🟢🟢' : '🟢';
-
+  // ── TP3 HIT ───────────────────────────────────────────────────────────────
+  if (tp3 && currentPrice >= tp3.price) {
     await sendAlert([
-      `${emoji} *${tpHit} HIT — ${pos.symbol}*`,
+      `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
       `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
-      `📈 *P&L:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
       ``,
-      ...(advice.actions || []).map(a => `👉 ${a}`),
-      ``,
+      `🟢 *Sell remaining 25% — TP3 reached. Outstanding trade.*`,
       pos.targetMultiple && !pos.targetHit
-        ? `🎯 *Your ${pos.targetMultiple}X target:* \`$${pos.targetPrice.toFixed(6)}\` — keep holding!`
+        ? `🎯 Your ${pos.targetMultiple}X target is \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
         : '',
-      sl  ? `🛡 Move stop to: \`$${pos.buyPrice.toFixed(4)}\` (breakeven)` : '',
-      tp2 && tpHit === 'TP1' ? `🎯 Next target: \`$${tp2.price.toFixed(4)}\` (TP2)` : '',
-      tp3 && tpHit === 'TP2' ? `🎯 Next target: \`$${tp3.price.toFixed(4)}\` (TP3)` : '',
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
-
-    return { recommendation: advice.recommendation, alerted: true };
+    return { recommendation: 'TP3', alerted: true };
   }
 
-  // ── 4. TRAIL STOP / CLOSE PARTIAL ────────────────────────────────────────
-  if (advice.recommendation === 'TRAIL_STOP' || advice.recommendation === 'CLOSE_PARTIAL') {
-    const emoji = advice.recommendation === 'TRAIL_STOP' ? '🟡' : '🟠';
+  // ── TP2 HIT ───────────────────────────────────────────────────────────────
+  if (tp2 && currentPrice >= tp2.price && pnlPct > 0) {
     await sendAlert([
-      `${emoji} *${advice.recommendation} — ${pos.symbol}*`,
+      `🟢🟢 *TP2 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
       `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
-      `📈 *P&L:*       +${pnlPct.toFixed(2)}%`,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
       ``,
-      ...(advice.reasons || []).map(r => `  ${r}`),
-      ``,
-      ...(advice.actions || []).map(a => `👉 ${a}`),
+      `🟢 *Sell 35% of position now.*`,
+      `🛡 Move stop loss to \`$${tp1?.price.toFixed(4) || pos.buyPrice}\` (lock in profit)`,
+      pos.targetMultiple && !pos.targetHit
+        ? `🎯 ${pos.targetMultiple}X target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
+        : `🎯 Next: TP3 at \`$${tp3?.price.toFixed(4)}\``,
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
-
-    return { recommendation: advice.recommendation, alerted: true };
+    return { recommendation: 'TP2', alerted: true };
   }
 
-  // ── 5. HOLD (send every 4 hours only — not every hour) ───────────────────
-  const lastChecked    = pos.lastChecked ? new Date(pos.lastChecked).getTime() : 0;
+  // ── TP1 HIT ───────────────────────────────────────────────────────────────
+  if (tp1 && currentPrice >= tp1.price && pnlPct > 0) {
+    await sendAlert([
+      `🟢 *TP1 HIT — ${pos.symbol}*`,
+      ``,
+      `💰 *Bought at:* \`$${pos.buyPrice}\``,
+      `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+      ``,
+      `🟢 *Sell 40% of position now.*`,
+      `🛡 Move stop loss to \`$${pos.buyPrice}\` — free trade, can't lose now.`,
+      pos.targetMultiple && !pos.targetHit
+        ? `🎯 ${pos.targetMultiple}X target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
+        : `🎯 Next: TP2 at \`$${tp2?.price.toFixed(4)}\``,
+      `⏰ ${new Date().toUTCString()}`,
+    ].filter(Boolean).join('\n'));
+    return { recommendation: 'TP1', alerted: true };
+  }
+
+  // ── HOLD — send every 4 hours only ───────────────────────────────────────
+  const lastChecked     = pos.lastChecked ? new Date(pos.lastChecked).getTime() : 0;
   const hoursSinceCheck = (Date.now() - lastChecked) / (1000 * 60 * 60);
 
-  if (advice.recommendation === 'HOLD' && hoursSinceCheck >= 4) {
+  if (hoursSinceCheck >= 4) {
+    const distToTarget = pos.targetPrice
+      ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away`
+      : null;
+
     await sendAlert([
       `⚪ *HOLD — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
+      `📊 *Now:*       \`$${currentPrice.toFixed(6)}\``,
       `📈 *P&L:*       ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      pos.targetPrice ? `🎯 *${pos.targetMultiple}X target:* \`$${pos.targetPrice.toFixed(6)}\` — ${((pos.targetPrice - currentPrice) / currentPrice * 100).toFixed(1)}% away` : '',
+      pos.targetMultiple
+        ? `🎯 *${pos.targetMultiple}X target:* \`$${pos.targetPrice.toFixed(6)}\` — ${distToTarget}`
+        : '',
       ``,
-      `✅ Trend intact. Stay in the trade.`,
-      sl  ? `🛡 Stop loss: \`$${sl.toFixed(4)}\`` : '',
-      tp1 ? `🎯 Next target: \`$${tp1.price.toFixed(4)}\` (TP1)` : '',
+      `✅ Stay in the trade. No action needed.`,
+      sl ? `🛡 Stop loss: \`$${sl.toFixed(6)}\`` : '',
+      tp1 ? `🎯 Next TP: \`$${tp1.price.toFixed(4)}\`` : '',
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
 
     return { recommendation: 'HOLD', alerted: true };
   }
 
-  return { recommendation: advice.recommendation, alerted: false };
+  return { recommendation: 'HOLD', alerted: false };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -207,8 +210,8 @@ module.exports = async (req, res) => {
     }
 
     return res.status(200).json({
-      success: true, checked: results.length, results,
-      checkedAt: new Date().toISOString(),
+      success: true, checked: results.length,
+      results, checkedAt: new Date().toISOString(),
     });
 
   } catch (err) {
