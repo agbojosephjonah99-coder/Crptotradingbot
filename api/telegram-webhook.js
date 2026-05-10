@@ -177,6 +177,9 @@ async function handleMessage(chatId, text, from) {
 
   // ── START / New user flow ────────────────────────────────────────────────
   if (cmd === 'start') {
+    // Deep link parameter — e.g. /start welcome or /start ref_john
+    const param = parts[1] || '';
+
     if (isAdmin(chatId)) {
       await send(chatId, [
         `👑 *Welcome back, Admin!*`,
@@ -208,20 +211,30 @@ async function handleMessage(chatId, text, from) {
       return;
     }
 
-    // New user — register and notify admin
+    // New user — show welcome message then request access
     const user = await registerUser({
       chatId,
       firstName: from?.first_name || '',
       lastName:  from?.last_name  || '',
       username:  from?.username   || '',
+      param,    // store how they found the bot
     });
 
     await send(chatId, [
-      `👋 *Welcome to CryptoBot V2!*`,
+      `🤖 *Welcome to CryptoBot V2!*`,
       ``,
-      `This is a private bot. Your request has been sent to the admin for approval.`,
+      `📊 *What this bot does:*`,
+      `  • Scans the market for high-probability pump coins`,
+      `  • Finds newly listed coins with contract addresses`,
+      `  • Alerts you exactly when to buy and sell`,
+      `  • Monitors your positions 24/7`,
+      `  • Sends instant alerts when your 2X or 5X target is hit`,
       ``,
-      `You will receive a message here once approved. Please wait.`,
+      `🔒 *This is a private bot.*`,
+      `Your access request has been sent to the admin.`,
+      `You will be notified here as soon as you are approved.`,
+      ``,
+      `⏳ *Please wait for approval...*`,
     ].join('\n'), { remove_keyboard: true });
 
     await notifyAdminNewRequest(user);
