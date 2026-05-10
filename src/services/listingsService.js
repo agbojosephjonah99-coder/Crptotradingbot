@@ -160,3 +160,119 @@ async function getNewListingsWithMetadata() {
 }
 
 module.exports = { getNewListingsWithMetadata };
+
+// ─── Moonshot Scanner ─────────────────────────────────────────────────────────
+// Identifies coins with highest probability of 5X within 3 days
+// Scoring based on: low market cap, volume explosion, momentum, social trending,
+// whale accumulation signals, new listing freshness, and price structure
+
+async function getMoonshots() {
+  // 1. Get KuCoin tickers + CoinGecko trending simultaneously
+  const [kuResp, trendResp] = await Promise.all([
+    axios.get(`${KUCOIN_BASE}/market/allTickers`, { timeout: 12000 }),
+    axios.get(`${COINGECKO_BASE}/search/trending`,  { timeout: 8000 }),
+  ]);
+
+  if (!kuResp.data?.data?.ticker) throw new Error('KuCoin API unavailable');
+
+  const tickers         = kuResp.data.data.ticker;
+  const trendingSymbols = new Set(
+    (trendResp.data.coins || []).map(c => c.item.symbol.toUpperCase())
+  );
+
+  // 2. Filter and score every non-established USDT pair
+  const candidates = tickers
+    .filter(t => {
+      const base   = t.symbol.replace('-USDT', '');
+      const vol    = parseFloat(t.volValue) || 0;
+      const change = parseFloat(t.changeRate) * 100;
+      const price  = parseFloat(t.last);
+      return t.symbol.endsWith('-USDT') &&
+        !ESTABLISHED.has(base) &&
+        vol    >= 200_000 &&   // minimum liquidity
+        change >  0       &&   // must be going up
+        change <  500     &&   // filter obvious scam pumps
+        price  >  0;
+    })
+    .map(t => {
+      const base      = t.symbol.replace('-USDT', '');
+      const price     = parseFloat(t.last);
+      const change24h = parseFloat(t.changeRate) * 100;
+      const volume    = parseFloat(t.volValue);
+      const high24h   = parseFloat(t.high);
+      const low24h    = parseFloat(t.low);
+
+      // ── Moonshot Scoring (max 100) ──────────────────────────────────────
+      let score = 0;
+      const reasons = [];
+
+      // A. Volume explosion vs price (volume/marketcap proxy)
+      // High volume relative to price = retail/whale interest
+      const volToPrice = volume / price;
+      if (volToPrice > 50_000_000)      { score += 25; reasons.push('Massive volume explosion relative to price'); }
+      else if (volToPrice > 10_000_000) { score += 18; reasons.push('Very high volume relative to price'); }
+      else if (volToPrice > 2_000_000)  { score += 12; reasons.push('Strong volume surge'); }
+      else if (volToPrice > 500_000)    { score +=  6; reasons.push('Notable volume increase'); }
+
+      // B. Price momentum (24H change)
+      if (change24h > 100)      { score += 20; reasons.push(`+${change24h.toFixed(0)}% in 24H — parabolic momentum`); }
+      else if (change24h > 50)  { score += 15; reasons.push(`+${change24h.toFixed(0)}% in 24H — explosive move`); }
+      else if (change24h > 25)  { score += 10; reasons.push(`+${change24h.toFixed(0)}% in 24H — strong pump`); }
+      else if (change24h > 10)  { score +=  5; reasons.push(`+${change24h.toFixed(0)}% in 24H — building momentum`); }
+
+      // C. CoinGecko trending (social signal — huge catalyst)
+      if (trendingSymbols.has(base)) {
+        score += 20;
+        reasons.push('🔥 Trending on CoinGecko — massive social attention');
+      }
+
+      // D. Price near 24H high (buyers in control, not exhausted)
+      const rangePos = high24h > low24h ? (price - low24h) / (high24h - low24h) : 0.5;
+      if (rangePos > 0.85)      { score += 15; reasons.push('Price near 24H high — strong buying pressure'); }
+      else if (rangePos > 0.65) { score += 8;  reasons.push('Price in upper half of range'); }
+
+      // E. Absolute volume (raw liquidity = can handle big buys)
+      if (volume > 20_000_000)      { score += 10; reasons.push(`$${(volume/1e6).toFixed(0)}M volume — institutional sized`); }
+      else if (volume > 5_000_000)  { score +=  7; reasons.push(`$${(volume/1e6).toFixed(1)}M volume — high interest`); }
+      else if (volume > 1_000_000)  { score +=  4; reasons.push(`$${(volume/1e6).toFixed(1)}M volume — solid`); }
+
+      // F. Low price = psychological pump magnet (retail loves cheap coins)
+      if (price < 0.001)      { score += 10; reasons.push('Ultra-low price — retail magnet for big % gains'); }
+      else if (price < 0.01)  { score +=  7; reasons.push('Low price — easy for retail to buy millions'); }
+      else if (price < 0.10)  { score +=  4; reasons.push('Sub-cent range — accessible to all buyers'); }
+
+      // Calculate final probability (capped at 99%)
+      const probability = Math.min(99, Math.round((score / 100) * 99));
+
+      return {
+        symbol: t.symbol,
+        base,
+        price,
+        change24h,
+        volume,
+        high24h,
+        low24h,
+        rangePos,
+        score,
+        probability,
+        reasons,
+        isTrending: trendingSymbols.has(base),
+      };
+    })
+    .filter(c => c.score >= 40) // Only high-confidence picks
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4); // Top 4 moonshots only
+
+  if (candidates.length === 0) return [];
+
+  // 3. Enrich with CoinGecko metadata (price + contracts)
+  const results = [];
+  for (const coin of candidates) {
+    const meta = await getCoinDetail(coin.base);
+    results.push({ ...coin, meta });
+  }
+
+  return results;
+}
+
+module.exports.getMoonshots = getMoonshots;

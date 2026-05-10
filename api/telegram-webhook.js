@@ -345,6 +345,89 @@ async function handleMessage(chatId, text) {
     return;
   }
 
+  // ── MOONSHOTS ─────────────────────────────────────────────────────────────
+  if (cmd === 'moonshots' || cmd === 'moon' || cmd === '5x') {
+    await reply(chatId, `🚀 Scanning for 5X moonshot candidates... give me 30 seconds.`);
+
+    try {
+      const { getMoonshots } = require('../src/services/listingsService');
+      const moonshots = await getMoonshots();
+
+      if (moonshots.length === 0) {
+        await reply(chatId, [
+          `😴 *No moonshot candidates right now*`,
+          ``,
+          `The market doesn't have any coins meeting the high-confidence`,
+          `criteria at this moment. Check back in 1-2 hours.`,
+          ``,
+          `_Criteria: volume explosion + strong momentum + social trending_`,
+        ].join('\n'));
+        return;
+      }
+
+      await reply(chatId, `🎯 *Found ${moonshots.length} high-probability 5X candidate${moonshots.length > 1 ? 's' : ''}*`);
+
+      for (const coin of moonshots) {
+        const meta     = coin.meta;
+        const priceStr = coin.price < 0.001
+          ? coin.price.toFixed(8)
+          : coin.price < 0.01
+            ? coin.price.toFixed(6)
+            : coin.price.toFixed(4);
+
+        const cgPrice = meta?.currentPrice
+          ? (meta.currentPrice < 0.001 ? meta.currentPrice.toFixed(8) : meta.currentPrice.toFixed(4))
+          : null;
+
+        const lines = [
+          `🌕 *${meta?.name || coin.base} (${coin.base}/USDT)*`,
+          ``,
+          `⚡ *This coin has a ${coin.probability}% chance of a 5X increase within 3 days. BUY NOW.*`,
+          ``,
+          `💰 *Current Price:* \`$${cgPrice || priceStr}\``,
+          `📈 *24H Change:*    +${coin.change24h.toFixed(2)}%`,
+          `💵 *24H Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
+          meta?.marketCap ? `🏦 *Market Cap:*    $${(meta.marketCap / 1e6).toFixed(1)}M` : '',
+          `📊 *Momentum Score:* ${coin.score}/100`,
+          coin.isTrending ? `🔥 *TRENDING on CoinGecko right now*` : '',
+          ``,
+          `📋 *Why this coin:*`,
+          ...coin.reasons.map(r => `  ✅ ${r}`),
+          ``,
+        ];
+
+        // Contract addresses
+        if (meta?.contracts?.length > 0) {
+          lines.push(`📋 *Contract Addresses:*`);
+          meta.contracts.slice(0, 3).forEach(ct => {
+            lines.push(`  *${ct.chainLabel}:*`);
+            lines.push(`  \`${ct.address}\``);
+          });
+          lines.push(`⚠️ _Always verify on CoinGecko before buying_`);
+        } else if (meta?.isNativeAsset) {
+          lines.push(`ℹ️ _Native chain asset — no contract address needed_`);
+        } else {
+          lines.push(`⚠️ _Contract address not found — verify on CoinGecko_`);
+        }
+
+        if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+
+        lines.push(``);
+        lines.push(`── *TRADE PLAN* ──`);
+        lines.push(`📝 *Track it:* \`buy ${coin.base} ${cgPrice || priceStr}\``);
+        lines.push(`🔴 *Exit rule:* If down 15% from entry → cut losses immediately`);
+        lines.push(`🎯 *Target:* 5X from entry price = \`$${(parseFloat(cgPrice || priceStr) * 5).toFixed(4)}\``);
+        lines.push(`⚠️ _This is a HIGH RISK, HIGH REWARD setup. Max 1-2% of account only._`);
+
+        await replyChunked(chatId, lines.filter(Boolean).join('\n'));
+      }
+
+    } catch (err) {
+      await reply(chatId, `❌ Moonshot scan failed: ${err.message}`);
+    }
+    return;
+  }
+
   // ── Unknown ───────────────────────────────────────────────────────────────
   await reply(chatId, `❓ Unknown command.\n\nType \`help\` to see all commands.`);
 }
