@@ -30,6 +30,12 @@ async function checkPosition(pos, userId) {
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
 
   const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
+
+  // Store calculated stop loss price so v2quickcheck can use it
+  // without needing to fetch candles (much faster)
+  if (sl && !pos.stopLossPrice) {
+    await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
+  }
   const currentMultiple = currentPrice / pos.buyPrice;
   const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
 
