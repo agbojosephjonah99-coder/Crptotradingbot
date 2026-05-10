@@ -187,11 +187,20 @@ async function handleMessage(chatId, text, from) {
         `Tap *📋 MENU* to access all commands.`,
         ``,
         `*Admin commands:*`,
-        `\`pending\` — view pending requests`,
-        `\`users\`   — view approved users`,
+        `\`pending\`   — view pending requests`,
+        `\`users\`     — view approved users`,
         `\`block ID\`  — block a user`,
         `\`remove ID\` — remove a user`,
-      ].join('\n'), PERSISTENT_MENU);
+        `\`invite\`    — get your invite link`,
+      ].join('\n'), {
+        keyboard: [
+          [{ text: '📋 MENU' }, { text: '🔗 Invite Link' }],
+          [{ text: '⏳ Pending' }, { text: '👥 Users' }],
+        ],
+        resize_keyboard: true,
+        persistent: true,
+        input_field_placeholder: 'Tap a button or type a command...',
+      });
       return;
     }
 
@@ -263,8 +272,46 @@ async function handleMessage(chatId, text, from) {
     }
   }
 
+  // ── ADMIN KEYBOARD BUTTON SHORTCUTS ─────────────────────────────────────
+  if (text.trim() === '🔗 Invite Link') {
+    await handleMessage(chatId, 'invite', from);
+    return;
+  }
+  if (text.trim() === '⏳ Pending') {
+    await handleMessage(chatId, 'pending', from);
+    return;
+  }
+  if (text.trim() === '👥 Users') {
+    await handleMessage(chatId, 'users', from);
+    return;
+  }
+
   // ── ADMIN ONLY COMMANDS ──────────────────────────────────────────────────
   if (isAdmin(chatId)) {
+
+    if (cmd === 'invite') {
+      const BOT_USERNAME = process.env.BOT_USERNAME || 'JijazyBot';
+      await reply(chatId, [
+        `🔗 *Your Bot Invite Links*`,
+        ``,
+        `*General invite:*`,
+        `https://t.me/${BOT_USERNAME}?start=welcome`,
+        ``,
+        `*For WhatsApp:*`,
+        `https://t.me/${BOT_USERNAME}?start=whatsapp`,
+        ``,
+        `*For Twitter/X:*`,
+        `https://t.me/${BOT_USERNAME}?start=twitter`,
+        ``,
+        `_Share any of these links. When someone clicks it,_`,
+        `_they see the welcome message and you get an_`,
+        `_Approve/Reject notification instantly._`,
+        ``,
+        `💡 Add \`BOT_USERNAME\` to your Vercel env vars`,
+        `with your bot's username (without the @)`,
+      ].join('\n'));
+      return;
+    }
 
     if (cmd === 'pending') {
       const pending = await getUsersByStatus('pending');
