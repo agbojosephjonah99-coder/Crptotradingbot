@@ -392,17 +392,21 @@ async function handleMessage(chatId, text) {
         const t4x = (parseFloat(cgPrice) * 4).toFixed(6);
         const t5x = (parseFloat(cgPrice) * 5).toFixed(6);
 
+        const bandEmoji = {
+          'VERY HIGH': '🟢', 'HIGH': '🟡',
+          'MODERATE': '🟠', 'LOW': '🔴', 'VERY LOW': '⛔',
+        }[coin.band] || '⚪';
+
         const lines = [
           `🌕 *${meta?.name || coin.base} (${coin.base}/USDT)*`,
           ``,
-          `⚡ *${coin.probability}% chance of major pump within 3 days*`,
+          `${bandEmoji} *Pump Probability: ${coin.probability}% — ${coin.band} CONFIDENCE*`,
           ``,
           `💰 *Current Price:* \`$${cgPrice}\``,
           `📈 *24H Change:*    +${coin.change24h.toFixed(2)}%`,
           `💵 *24H Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
           meta?.marketCap ? `🏦 *Market Cap:*    $${(meta.marketCap / 1e6).toFixed(1)}M` : '',
           coin.isTrending ? `🔥 *TRENDING on CoinGecko right now*` : '',
-          `📊 *Confidence:* ${coin.score}/100`,
           ``,
           `🎯 *PROFIT TARGETS:*`,
           `  2X → \`$${t2x}\` (+100%)`,
@@ -410,8 +414,22 @@ async function handleMessage(chatId, text) {
           `  4X → \`$${t4x}\` (+300%)`,
           `  5X → \`$${t5x}\` (+400%)`,
           ``,
-          `📋 *Why this coin:*`,
-          ...coin.reasons.map(r => `  ✅ ${r}`),
+          `📊 *Factor Breakdown:*`,
+          `  Volume Quality:   ${coin.factors?.volumeQuality?.score || 0}/${coin.factors?.volumeQuality?.max || 20}`,
+          `  Price Structure:  ${coin.factors?.priceStructure?.score || 0}/${coin.factors?.priceStructure?.max || 20}`,
+          `  Market Cap Risk:  ${coin.factors?.marketCapRisk?.score || 0}/${coin.factors?.marketCapRisk?.max || 15}`,
+          `  Liquidity:        ${coin.factors?.liquidity?.score || 0}/${coin.factors?.liquidity?.max || 15}`,
+          `  Momentum:         ${coin.factors?.momentum?.score || 0}/${coin.factors?.momentum?.max || 15}`,
+          `  Social Signal:    ${coin.factors?.socialSignal?.score || 0}/${coin.factors?.socialSignal?.max || 10}`,
+          coin.factors?.redFlagPenalty < 0 ? `  Red Flag Penalty: ${coin.factors.redFlagPenalty}` : '',
+          ``,
+          coin.greenSignals?.length > 0 ? `✅ *What looks good:*` : '',
+          ...(coin.greenSignals || []).slice(0, 4).map(g => `  • ${g}`),
+          ``,
+          coin.redFlags?.length > 0 ? `⚠️ *Risk warnings:*` : '',
+          ...(coin.redFlags || []).slice(0, 4).map(f => `  • ${f}`),
+          ``,
+          `💼 *Recommended position size:* ${coin.positionAdvice}`,
           ``,
         ];
 
