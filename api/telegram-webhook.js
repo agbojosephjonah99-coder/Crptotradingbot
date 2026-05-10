@@ -24,6 +24,8 @@ const {
   getAllPositions, getPositionsBySymbol, addPosition,
   removePositionById, removeAllBySymbol, updateLastChecked,
 } = require('../src/services/positionStore');
+const { recordTrade, getMonthlyStats } = require('../src/services/profitTracker');
+const { adviseSplit, compoundingAdvice, targetProgress } = require('../src/services/portfolioAdvisor');
 
 const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_ID    = process.env.TELEGRAM_CHAT_ID;
@@ -40,20 +42,24 @@ const PERSISTENT_MENU = {
 const INLINE_MENU = {
   inline_keyboard: [
     [
-      { text: '🔍 Scan Now',     callback_data: 'scan'        },
-      { text: '🌕 Moonshots',    callback_data: 'moonshots'   },
+      { text: '🔍 Scan Now',       callback_data: 'scan'        },
+      { text: '🌕 Moonshots',      callback_data: 'moonshots'   },
     ],
     [
-      { text: '🚀 New Listings', callback_data: 'newlistings' },
-      { text: '📊 My Positions', callback_data: 'positions'   },
+      { text: '🚀 New Listings',   callback_data: 'newlistings' },
+      { text: '📊 My Positions',   callback_data: 'positions'   },
     ],
     [
-      { text: '💰 Buy a Coin',   callback_data: 'buy_help'    },
-      { text: '💸 Sell a Coin',  callback_data: 'sell_help'   },
+      { text: '💰 Buy a Coin',     callback_data: 'buy_help'    },
+      { text: '💸 Record a Sale',  callback_data: 'sold_help'   },
     ],
     [
-      { text: '📖 Help',         callback_data: 'help'        },
-      { text: '📚 User Manual',  callback_data: 'manual'      },
+      { text: '💼 Split Capital',  callback_data: 'split_help'  },
+      { text: '📈 My Profits',     callback_data: 'profit'      },
+    ],
+    [
+      { text: '📖 Help',           callback_data: 'help'        },
+      { text: '📚 User Manual',    callback_data: 'manual'      },
     ],
   ],
 };
@@ -968,6 +974,187 @@ async function handleMessage(chatId, text, from) {
     return;
   }
 
+  // ── PROFIT TRACKER ───────────────────────────────────────────────────────
+  if (cmd === 'profit' || cmd === 'stats' || cmd === 'pnl') {
+    const stats = await getMonthlyStats(chatId);
+
+    if (!stats.allTime) {
+      await reply(chatId, [
+        `📊 *No closed trades yet*`,
+        ``,
+        `When you close a trade, use:`,
+        `\`sold SYMBOL BUYPRICE SELLPRICE\``,
+        `\`sold SOL 92.50 185.00\``,
+        ``,
+        `The bot will record the trade and track your profit.`,
+      ].join('\n'));
+      return;
+    }
+
+    const m  = stats.thisMonth;
+    const at = stats.allTime;
+
+    // Monthly target progress ($50 on $10 capital)
+    const progress = stats.thisMonth
+      ? targetProgress(10, 50, stats.thisMonth.totalPnlDollar)
+      : null;
+
+    const lines = [
+      `📊 *Your Trading Stats*`,
+      ``,
+      `━━━ *THIS MONTH* ━━━`,
+      m ? [
+        `💰 P&L: ${m.totalPnlDollar >= 0 ? '+' : ''}$${m.totalPnlDollar.toFixed(2)}`,
+        `📈 Total % gain: ${m.totalPnlPct >= 0 ? '+' : ''}${m.totalPnlPct}%`,
+        `🎯 Win Rate: ${m.winRate}% (${m.wins}W / ${m.losses}L)`,
+        `🔢 Trades: ${m.totalTrades}`,
+        `📐 Avg multiple: ${m.avgMultiple}X`,
+        m.bestTrade  ? `🏆 Best: ${m.bestTrade.symbol} +${m.bestTrade.pnlPct}%` : '',
+        m.worstTrade ? `💔 Worst: ${m.worstTrade.symbol} ${m.worstTrade.pnlPct}%` : '',
+      ].filter(Boolean).join('\n') : 'No trades this month yet',
+      ``,
+      progress ? [
+        `━━━ *$50 MONTHLY TARGET* ━━━`,
+        `Progress: ${progress.pct}% complete`,
+        `Earned: $${stats.thisMonth.totalPnlDollar.toFixed(2)} of $50`,
+        `Still need: $${progress.remaining.toFixed(2)} more`,
+        progress.remaining > 0
+          ? `Need your capital to ${progress.neededMultiple}X from here`
+          : `🎉 TARGET REACHED!`,
+      ].join('\n') : '',
+      ``,
+      `━━━ *ALL TIME* ━━━`,
+      `💰 Total P&L: ${at.totalPnlDollar >= 0 ? '+' : ''}$${at.totalPnlDollar.toFixed(2)}`,
+      `🎯 Win Rate: ${at.winRate}% (${at.wins}W / ${at.losses}L)`,
+      `🔢 Total Trades: ${at.totalTrades}`,
+      ``,
+      `━━━ *RECENT TRADES* ━━━`,
+      ...(stats.recentTrades || []).map(t =>
+        `${t.outcome === 'WIN' ? '🟢' : '🔴'} ${t.symbol}: ${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct}% (${t.multiple}X)${t.pnlDollar ? ' | $' + t.pnlDollar.toFixed(2) : ''}`
+      ),
+    ].filter(Boolean).join('\n');
+
+    await reply(chatId, lines);
+    return;
+  }
+
+  // ── SOLD (record a closed trade) ─────────────────────────────────────────
+  if (cmd === 'sold' && parts[1] && parts[2] && parts[3]) {
+    const symbol    = normaliseSymbol(parts[1]);
+    const buyPrice  = parseFloat(parts[2]);
+    const sellPrice = parseFloat(parts[3]);
+    const quantity  = parts[4] ? parseFloat(parts[4]) : null;
+
+    if (isNaN(buyPrice) || isNaN(sellPrice)) {
+      await reply(chatId, [
+        `❌ *Invalid format*`,
+        ``,
+        `\`sold SYMBOL BUYPRICE SELLPRICE\``,
+        `\`sold SOL 92.50 185.00\``,
+        `\`sold SOL 92.50 185.00 10\` ← with quantity`,
+      ].join('\n'));
+      return;
+    }
+
+    // Find matching position to get targetMultiple
+    const positions = await getPositionsBySymbol(chatId, symbol);
+    const matchPos  = positions.find(p => Math.abs(p.buyPrice - buyPrice) < buyPrice * 0.01);
+    const targetMultiple = matchPos?.targetMultiple || null;
+
+    const trade  = await recordTrade({ chatId, symbol, buyPrice, sellPrice, quantity, targetMultiple });
+    const pnlSign = trade.pnlPct >= 0 ? '+' : '';
+
+    // Compounding advice
+    const compound = quantity
+      ? compoundingAdvice(buyPrice * quantity, trade.pnlDollar || 0)
+      : null;
+
+    const lines = [
+      `${trade.outcome === 'WIN' ? '🟢' : '🔴'} *Trade Recorded — ${symbol}*`,
+      ``,
+      `💰 *Bought at:* \`$${buyPrice}\``,
+      `💰 *Sold at:*   \`$${sellPrice}\``,
+      `📈 *Result:*    ${pnlSign}${trade.pnlPct}% (${trade.multiple}X)`,
+      quantity ? `💵 *P&L:*       ${pnlSign}$${trade.pnlDollar?.toFixed(2)}` : '',
+      ``,
+      trade.outcome === 'WIN' ? `🎉 Winning trade! Great discipline.` : `📉 Losing trade. The stop loss protected you from worse.`,
+      ``,
+      compound && compound.reinvest > 0 ? [
+        `━━━ *COMPOUNDING ADVICE* ━━━`,
+        `Keep safe (20%):   $${compound.safeProfit} — never risk this again`,
+        `Reinvest (80%):    $${compound.reinvest} — into next trade`,
+        `New capital:       $${compound.newCapital}`,
+      ].join('\n') : '',
+      ``,
+      `Type \`profit\` to see your full stats.`,
+    ].filter(Boolean).join('\n');
+
+    await reply(chatId, lines);
+
+    // Also remove position if it exists
+    if (matchPos) await removePositionById(chatId, matchPos.positionId);
+    return;
+  }
+
+  // ── SPLIT (portfolio allocation advisor) ──────────────────────────────────
+  if (cmd === 'split' || cmd === 'allocate') {
+    const capital = parts[1] ? parseFloat(parts[1]) : 10;
+
+    if (isNaN(capital) || capital <= 0) {
+      await reply(chatId, `❌ Example: \`split 10\` or \`split 50\``);
+      return;
+    }
+
+    await reply(chatId, `🔍 Scanning for best coins to split $${capital} across...`);
+
+    try {
+      const { getMoonshots } = require('../src/services/listingsService');
+      const coins    = await getMoonshots();
+      const filtered = coins.filter(c => c.probability >= 55);
+
+      if (filtered.length === 0) {
+        await reply(chatId, `😴 No high-confidence coins right now. Try again in 30 minutes.`);
+        return;
+      }
+
+      const splits = adviseSplit(filtered, capital);
+      const progress = targetProgress(capital, 50, 0);
+
+      const lines = [
+        `💼 *Portfolio Split for $${capital}*`,
+        ``,
+        `Based on current market scan — here is exactly how to split your capital:`,
+        ``,
+      ];
+
+      splits.forEach((s, i) => {
+        const priceStr = s.entryPrice < 0.01
+          ? s.entryPrice?.toFixed(8)
+          : s.entryPrice?.toFixed(4);
+        lines.push(`*${i + 1}. ${s.symbol}* — ${s.probability}% confidence (${s.band})`);
+        lines.push(`  💰 Allocate: \`$${s.allocation}\` (${s.allocationPct}%)`);
+        lines.push(`  🛡 Max loss: \`$${s.maxLoss}\` (stop loss at -15%)`);
+        lines.push(`  🎯 2X target: \`$${s.target2x}\``);
+        lines.push(`  🎯 3X target: \`$${s.target3x}\``);
+        if (priceStr) lines.push(`  📝 \`buy ${s.symbol} ${priceStr} 2x\``);
+        lines.push(`  _${s.reasoning}_`);
+        lines.push(``);
+      });
+
+      lines.push(`━━━ *RULES FOR $${capital}* ━━━`);
+      lines.push(`  • Max 3 coins open at any time`);
+      lines.push(`  • Never risk more than $${(capital * 0.15).toFixed(2)} per trade`);
+      lines.push(`  • When any trade hits 2X → sell 60% immediately`);
+      lines.push(`  • After a win → reinvest 80%, bank 20%`);
+      lines.push(`  • $50 target needs your $${capital} to ${progress.neededMultiple}X total`);
+
+      await replyChunked(chatId, lines.join('\n'));
+    } catch (err) {
+      await reply(chatId, `❌ Error: ${err.message}`);
+    }
+    return;
+  }
+
   // ── BUY / SELL GUIDE ──────────────────────────────────────────────────────
   if (cmd === 'buy_guide') {
     await reply(chatId, [
@@ -987,9 +1174,45 @@ async function handleMessage(chatId, text, from) {
       ``,
       `\`sell SOL\``,
       `\`sell BTC\``,
-      `\`sell ETH\``,
       ``,
-      `Type \`positions\` to see all open trades first.`,
+      `Type \`positions\` to see your entries first.`,
+    ].join('\n'));
+    return;
+  }
+
+  if (cmd === 'sold_guide') {
+    await reply(chatId, [
+      `💰 *Record a Completed Sale*`,
+      ``,
+      `After selling on your exchange, record it so`,
+      `the bot tracks your profit:`,
+      ``,
+      `\`sold SYMBOL BUYPRICE SELLPRICE\``,
+      ``,
+      `Examples:`,
+      `\`sold SOL 92.50 185.00\``,
+      `\`sold BILL 0.107893 0.215786\``,
+      `\`sold ETH 2300 4600 0.5\` ← with quantity`,
+      ``,
+      `The bot will show your P&L, record the trade`,
+      `and give you compounding advice.`,
+    ].join('\n'));
+    return;
+  }
+
+  if (cmd === 'split_guide') {
+    await reply(chatId, [
+      `💼 *Split Capital Across Best Coins*`,
+      ``,
+      `Scans the market and tells you exactly how to`,
+      `split your money for maximum return:`,
+      ``,
+      `\`split 10\`  ← split $10`,
+      `\`split 50\`  ← split $50`,
+      `\`split 100\` ← split $100`,
+      ``,
+      `Returns the top 3 coins right now with exact`,
+      `allocation amounts, stop loss levels and targets.`,
     ].join('\n'));
     return;
   }
@@ -1029,6 +1252,9 @@ module.exports = async (req, res) => {
         help:        'help',
         buy_help:    'buy_guide',
         sell_help:   'sell_guide',
+        sold_help:   'sold_guide',
+        split_help:  'split_guide',
+        profit:      'profit',
         manual:      'manual',
       };
 
