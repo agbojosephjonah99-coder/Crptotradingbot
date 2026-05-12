@@ -5,12 +5,19 @@
  * Hit every 30 mins via cron-job.org for fast target detection.
  * Fires Telegram alerts the moment a target is hit.
  *
- * MILESTONE ALERTS (added):
- *  Every position automatically fires an alert at every 10% profit milestone:
- *  +10%, +20%, +30%, +40%, +50% ... with no upper limit.
- *  Each milestone fires ONCE and is remembered in `milestoneHits` on the position.
- *  If a custom ceiling target is also set (e.g. 2x or 50%), it fires its own
- *  SELL NOW alert independently — both systems run side by side.
+ * DUAL-CHANNEL ROUTING:
+ *  ACTION channel  (TELEGRAM_CHAT_ID)         — requires immediate action:
+ *    🔴 Stop loss hit
+ *    🎯 Custom target hit
+ *    🚨 Round milestones: 50%, 100%, 150% only
+ *    🟢 TP1 / TP2 / TP3
+ *
+ *  INFO channel    (TELEGRAM_INFO_CHANNEL_ID)  — useful but not urgent:
+ *    📊 Milestones: 10%, 20%, 30%, 40% (and non-round milestones)
+ *    ⚪ HOLD updates
+ *
+ * Set TELEGRAM_INFO_CHANNEL_ID in your .env to a channel/group ID or @username.
+ * If not set, all alerts fall back to the main ACTION channel.
  */
 
 const axios = require('axios');
@@ -22,9 +29,12 @@ async function getApprovedUsers() {
 }
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN;
+const INFO_CHANNEL_ID = process.env.TELEGRAM_INFO_CHANNEL_ID || null;
 
-async function sendAlert(chatId, text) {
+// ─── Send helpers ─────────────────────────────────────────────────────────────
+
+async function sendToChat(chatId, text) {
   if (!BOT_TOKEN || !chatId) return;
   try {
     await axios.post(
@@ -33,6 +43,16 @@ async function sendAlert(chatId, text) {
       { timeout: 8000 }
     );
   } catch (e) { console.error('[Monitor Alert]', e.message); }
+}
+
+// Action alert → user's personal chat (requires immediate action)
+async function sendAlert(chatId, text) {
+  await sendToChat(chatId, text);
+}
+
+// Info alert → info channel if configured, else fall back to user's personal chat
+async function sendInfoAlert(chatId, text) {
+  await sendToChat(INFO_CHANNEL_ID || chatId, text);
 }
 
 // ─── Milestone Helper ─────────────────────────────────────────────────────────
@@ -83,7 +103,9 @@ async function checkPosition(pos, userId) {
     await updatePosition(pos.chatId, pos.positionId, { highestPrice: currentPrice });
   }
 
-  // ── MILESTONE ALERTS (10%, 20%, 30% ... no limit) ────────────────────────
+  // ── MILESTONE ALERTS ──────────────────────────────────────────────────────
+  // ACTION channel: 50%, 100%, 150% (round milestones — consider selling)
+  // INFO channel:   10%, 20%, 30%, 40% (and any other non-round milestones)
   const milestoneHits = pos.milestoneHits || [];
   const nextMilestone = getNextMilestone(pnlPct, milestoneHits);
   let milestoneAlerted = false;
@@ -92,7 +114,7 @@ async function checkPosition(pos, userId) {
     const emoji      = milestoneEmoji(nextMilestone);
     const nextTarget = nextMilestone + 10;
     const nextPrice  = (pos.buyPrice * (1 + nextTarget / 100)).toFixed(6);
-    const isRound    = nextMilestone % 50 === 0; // extra note at 50, 100, 150...
+    const isRound    = nextMilestone % 50 === 0; // 50, 100, 150 …
 
     // Show ceiling target status if one exists and hasn't been hit yet
     const ceilingPct   = pos.targetMultiple ? (pos.targetMultiple - 1) * 100 : null;
@@ -101,7 +123,7 @@ async function checkPosition(pos, userId) {
       ? `🎯 Your target (+${Number.isInteger(ceilingPct) ? ceilingPct : ceilingPct.toFixed(1)}% = \`$${pos.targetPrice.toFixed(6)}\`) is still ahead — hold on.`
       : '';
 
-    await sendAlert(targetChatId, [
+    const milestoneMsg = [
       `${emoji} *+${nextMilestone}% MILESTONE — ${pos.symbol}*`,
       isRound ? `🎉 *Round number — consider taking some profit!*` : '',
       ``,
@@ -116,7 +138,15 @@ async function checkPosition(pos, userId) {
       sl ? `🛡 *Stop loss:* \`$${sl.toFixed(6)}\`` : '',
       `💡 _Consider moving your stop loss up to lock in profit._`,
       `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
+    ].filter(Boolean).join('\n');
+
+    if (isRound) {
+      // 50 / 100 / 150 … → ACTION channel (same as stop loss / TP alerts)
+      await sendAlert(targetChatId, milestoneMsg);
+    } else {
+      // 10 / 20 / 30 / 40 … → INFO channel
+      await sendInfoAlert(targetChatId, milestoneMsg);
+    }
 
     // Record so this milestone never fires again
     await updatePosition(pos.chatId, pos.positionId, {
@@ -239,7 +269,7 @@ async function checkPosition(pos, userId) {
     return { recommendation: 'TP1', alerted: true };
   }
 
-  // ── HOLD — send every 4 hours only ───────────────────────────────────────
+  // ── HOLD — send every 4 hours only → INFO channel ────────────────────────
   const lastChecked     = pos.lastChecked ? new Date(pos.lastChecked).getTime() : 0;
   const hoursSinceCheck = (Date.now() - lastChecked) / (1000 * 60 * 60);
 
@@ -251,7 +281,7 @@ async function checkPosition(pos, userId) {
     const nextMs      = Math.ceil(Math.max(pnlPct, 0) / 10) * 10 || 10;
     const nextMsPrice = (pos.buyPrice * (1 + nextMs / 100)).toFixed(6);
 
-    await sendAlert(targetChatId, [
+    await sendInfoAlert(targetChatId, [
       `⚪ *HOLD — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,

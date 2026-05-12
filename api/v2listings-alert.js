@@ -21,10 +21,11 @@ const axios = require('axios');
 const { getMoonshots, getNewListingsWithMetadata } = require('../src/services/listingsService');
 const { getUsersByStatus } = require('../src/services/userService');
 
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const BOT_TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_ID      = process.env.TELEGRAM_CHAT_ID;
+const UPSTASH_URL     = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN   = process.env.UPSTASH_REDIS_REST_TOKEN;
+const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN;
+const ADMIN_ID        = process.env.TELEGRAM_CHAT_ID;
+const INFO_CHANNEL_ID = process.env.TELEGRAM_INFO_CHANNEL_ID || null;
 
 // ─── Alert cache (24h dedup) ──────────────────────────────────────────────────
 // Key: cryptobot:listed-alerts  Value: { SYMBOL: timestamp }
@@ -86,8 +87,15 @@ async function sendToUser(chatId, text) {
   }
 }
 
-// ─── Broadcast to all approved users + admin ──────────────────────────────────
+// ─── Broadcast listings to the INFO channel (or DM each user as fallback) ────
+// If TELEGRAM_INFO_CHANNEL_ID is set, one post to the channel reaches everyone.
+// If it is not set, we fall back to DMing every approved user individually.
 async function broadcast(text) {
+  if (INFO_CHANNEL_ID) {
+    await sendToUser(INFO_CHANNEL_ID, text);
+    return;
+  }
+  // Fallback: DM every approved user + admin
   const approvedUsers = await getUsersByStatus('approved');
   const allIds = [...new Set([ADMIN_ID, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
   for (const chatId of allIds) {
