@@ -4,20 +4,25 @@
  *
  * Hit every 30 mins via cron-job.org for fast target detection.
  * Fires Telegram alerts the moment a target is hit.
+ *
+ * MILESTONE ALERTS (added):
+ *  Every position automatically fires an alert at every 10% profit milestone:
+ *  +10%, +20%, +30%, +40%, +50% ... with no upper limit.
+ *  Each milestone fires ONCE and is remembered in `milestoneHits` on the position.
+ *  If a custom ceiling target is also set (e.g. 2x or 50%), it fires its own
+ *  SELL NOW alert independently — both systems run side by side.
  */
 
 const axios = require('axios');
-const { getAllPositions, getAllUsersPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
+const { getAllPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
 const { getUsersByStatus } = require('../src/services/userService');
 
-// Wrapper so the rest of the file reads clearly
 async function getApprovedUsers() {
   return getUsersByStatus('approved');
 }
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 async function sendAlert(chatId, text) {
   if (!BOT_TOKEN || !chatId) return;
@@ -30,6 +35,27 @@ async function sendAlert(chatId, text) {
   } catch (e) { console.error('[Monitor Alert]', e.message); }
 }
 
+// ─── Milestone Helper ─────────────────────────────────────────────────────────
+// Returns the highest NEW 10% milestone crossed that hasn't fired yet, or null.
+// e.g. pnlPct=55, milestoneHits=[10,20] → returns 50
+function getNextMilestone(pnlPct, milestoneHits = []) {
+  if (pnlPct < 10) return null;
+  const STEP    = 10;
+  const highest = Math.floor(pnlPct / STEP) * STEP;
+  for (let m = highest; m >= STEP; m -= STEP) {
+    if (!milestoneHits.includes(m)) return m;
+  }
+  return null;
+}
+
+function milestoneEmoji(milestone) {
+  if (milestone >= 100) return '🚀🚀🚀';
+  if (milestone >= 70)  return '🚀🚀';
+  if (milestone >= 40)  return '🚀';
+  if (milestone >= 20)  return '🟢🟢';
+  return '🟢';
+}
+
 async function checkPosition(pos, userId) {
   const targetChatId = userId || pos.chatId || process.env.TELEGRAM_CHAT_ID;
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
@@ -38,7 +64,6 @@ async function checkPosition(pos, userId) {
   const currentMultiple = currentPrice / pos.buyPrice;
   const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
 
-  // BUG 1 FIX: buildAdvice + sl/tp declarations moved ABOVE any reference to sl/tp
   const advice = buildAdvice({
     symbol: pos.symbol, buyPrice: pos.buyPrice,
     currentPrice, candles1h, candles4h,
@@ -50,24 +75,68 @@ async function checkPosition(pos, userId) {
   const tp2 = advice.tradePlan?.takeProfits?.tp2;
   const tp3 = advice.tradePlan?.takeProfits?.tp3;
 
-  // Store calculated stop loss price so v2quickcheck can use it
-  // without needing to fetch candles (much faster)
   if (sl && !pos.stopLossPrice) {
     await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
   }
 
-  // Track highest price seen
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
     await updatePosition(pos.chatId, pos.positionId, { highestPrice: currentPrice });
   }
 
-  // ── TARGET HIT (2x / 3x / 4x / 5x) ──────────────────────────────────────
+  // ── MILESTONE ALERTS (10%, 20%, 30% ... no limit) ────────────────────────
+  const milestoneHits = pos.milestoneHits || [];
+  const nextMilestone = getNextMilestone(pnlPct, milestoneHits);
+  let milestoneAlerted = false;
+
+  if (nextMilestone !== null) {
+    const emoji      = milestoneEmoji(nextMilestone);
+    const nextTarget = nextMilestone + 10;
+    const nextPrice  = (pos.buyPrice * (1 + nextTarget / 100)).toFixed(6);
+    const isRound    = nextMilestone % 50 === 0; // extra note at 50, 100, 150...
+
+    // Show ceiling target status if one exists and hasn't been hit yet
+    const ceilingPct   = pos.targetMultiple ? (pos.targetMultiple - 1) * 100 : null;
+    const ceilingAhead = ceilingPct && ceilingPct > nextMilestone && !pos.targetHit;
+    const ceilingMsg   = ceilingAhead
+      ? `🎯 Your target (+${Number.isInteger(ceilingPct) ? ceilingPct : ceilingPct.toFixed(1)}% = \`$${pos.targetPrice.toFixed(6)}\`) is still ahead — hold on.`
+      : '';
+
+    await sendAlert(targetChatId, [
+      `${emoji} *+${nextMilestone}% MILESTONE — ${pos.symbol}*`,
+      isRound ? `🎉 *Round number — consider taking some profit!*` : '',
+      ``,
+      `💰 *Bought at:*  \`$${pos.buyPrice}\``,
+      `📊 *Now:*        \`$${currentPrice.toFixed(6)}\``,
+      `📈 *Gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+      profitDollar ? `💵 *Profit:*      $${profitDollar}` : '',
+      ``,
+      `📌 *Next milestone:* +${nextTarget}% at \`$${nextPrice}\``,
+      ceilingMsg,
+      ``,
+      sl ? `🛡 *Stop loss:* \`$${sl.toFixed(6)}\`` : '',
+      `💡 _Consider moving your stop loss up to lock in profit._`,
+      `⏰ ${new Date().toUTCString()}`,
+    ].filter(Boolean).join('\n'));
+
+    // Record so this milestone never fires again
+    await updatePosition(pos.chatId, pos.positionId, {
+      milestoneHits: [...milestoneHits, nextMilestone],
+    });
+    milestoneAlerted = true;
+  }
+
+  // ── CUSTOM TARGET HIT (ceiling) ───────────────────────────────────────────
   if (pos.targetMultiple && pos.targetPrice && !pos.targetHit && currentPrice >= pos.targetPrice) {
+    const ceilingPct  = (pos.targetMultiple - 1) * 100;
+    const targetLabel = Number.isInteger(ceilingPct)
+      ? `+${ceilingPct}% (${pos.targetMultiple}X)`
+      : `${pos.targetMultiple}X`;
+
     await sendAlert(targetChatId, [
       ``,
-      `🚨🎯🚨 *${pos.targetMultiple}X TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
+      `🚨🎯🚨 *TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
       ``,
-      `🌕 *SELL NOW — YOUR TARGET HAS BEEN REACHED*`,
+      `🌕 *${targetLabel} REACHED — SELL NOW*`,
       ``,
       `💰 *You bought at:*   \`$${pos.buyPrice}\``,
       `📊 *Current price:*   \`$${currentPrice.toFixed(8)}\``,
@@ -77,7 +146,7 @@ async function checkPosition(pos, userId) {
       `🔴 *DO THIS RIGHT NOW:*`,
       `  1. Open your exchange immediately`,
       `  2. Sell 60% of your position at market price`,
-      `  3. Move stop on remaining 40% to your buy price ($${pos.buyPrice})`,
+      `  3. Move stop on remaining 40% to your buy price (\`$${pos.buyPrice}\`)`,
       `  4. If price drops back to buy price → sell the rest`,
       `  5. If price keeps rising → enjoy the ride 🚀`,
       ``,
@@ -88,7 +157,7 @@ async function checkPosition(pos, userId) {
     ].filter(Boolean).join('\n'));
 
     await updatePosition(pos.chatId, pos.positionId, { targetHit: true });
-    return { recommendation: `${pos.targetMultiple}X_TARGET_HIT`, alerted: true };
+    return { recommendation: `TARGET_HIT_${targetLabel}`, alerted: true };
   }
 
   // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
@@ -123,7 +192,7 @@ async function checkPosition(pos, userId) {
       ``,
       `🟢 *Sell remaining 25% — TP3 reached. Outstanding trade.*`,
       pos.targetMultiple && !pos.targetHit
-        ? `🎯 Your ${pos.targetMultiple}X target is \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
+        ? `🎯 Your target is \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
         : '',
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
@@ -143,7 +212,7 @@ async function checkPosition(pos, userId) {
       `🟢 *Sell 35% of position now.*`,
       `🛡 Move stop loss to \`$${tp1?.price.toFixed(4) || pos.buyPrice}\` (lock in profit)`,
       pos.targetMultiple && !pos.targetHit
-        ? `🎯 ${pos.targetMultiple}X target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
+        ? `🎯 Target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
         : `🎯 Next: TP3 at \`$${tp3?.price.toFixed(4)}\``,
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
@@ -163,7 +232,7 @@ async function checkPosition(pos, userId) {
       `🟢 *Sell 40% of position now.*`,
       `🛡 Move stop loss to \`$${pos.buyPrice}\` — free trade, can't lose now.`,
       pos.targetMultiple && !pos.targetHit
-        ? `🎯 ${pos.targetMultiple}X target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
+        ? `🎯 Target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
         : `🎯 Next: TP2 at \`$${tp2?.price.toFixed(4)}\``,
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
@@ -179,6 +248,9 @@ async function checkPosition(pos, userId) {
       ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away`
       : null;
 
+    const nextMs      = Math.ceil(Math.max(pnlPct, 0) / 10) * 10 || 10;
+    const nextMsPrice = (pos.buyPrice * (1 + nextMs / 100)).toFixed(6);
+
     await sendAlert(targetChatId, [
       `⚪ *HOLD — ${pos.symbol}*`,
       ``,
@@ -186,16 +258,23 @@ async function checkPosition(pos, userId) {
       `📊 *Now:*       \`$${currentPrice.toFixed(6)}\``,
       `📈 *P&L:*       ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
       pos.targetMultiple
-        ? `🎯 *${pos.targetMultiple}X target:* \`$${pos.targetPrice.toFixed(6)}\` — ${distToTarget}`
+        ? `🎯 *Target:* \`$${pos.targetPrice.toFixed(6)}\` — ${distToTarget}`
+        : '',
+      pnlPct < nextMs
+        ? `📌 *Next milestone:* +${nextMs}% at \`$${nextMsPrice}\``
         : '',
       ``,
       `✅ Stay in the trade. No action needed.`,
-      sl ? `🛡 Stop loss: \`$${sl.toFixed(6)}\`` : '',
+      sl  ? `🛡 Stop loss: \`$${sl.toFixed(6)}\`` : '',
       tp1 ? `🎯 Next TP: \`$${tp1.price.toFixed(4)}\`` : '',
       `⏰ ${new Date().toUTCString()}`,
     ].filter(Boolean).join('\n'));
 
     return { recommendation: 'HOLD', alerted: true };
+  }
+
+  if (milestoneAlerted) {
+    return { recommendation: `MILESTONE_${nextMilestone}PCT`, alerted: true };
   }
 
   return { recommendation: 'HOLD', alerted: false };
@@ -207,10 +286,9 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // Get all approved users and check each user's positions
-    const adminId      = process.env.TELEGRAM_CHAT_ID;
+    const adminId       = process.env.TELEGRAM_CHAT_ID;
     const approvedUsers = await getApprovedUsers();
-    const allUserIds   = [...new Set([adminId, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
+    const allUserIds    = [...new Set([adminId, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
 
     const results = [];
     let totalPositions = 0;

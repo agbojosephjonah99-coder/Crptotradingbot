@@ -405,6 +405,7 @@ async function handleMessage(chatId, text, from) {
       ``,
       `━━━ *YOUR TRADES* ━━━`,
       `\`buy SOL 92.50\` — track a buy`,
+      `\`buy SOL 92.50 10%\` — alert at 10% profit`,
       `\`buy SOL 92.50 2x\` — alert at 2X`,
       `\`buy SOL 92.50 5x\` — alert at 5X`,
       `\`sell SOL\` — remove after you exit`,
@@ -575,25 +576,40 @@ async function handleMessage(chatId, text, from) {
   if (cmd === 'buy') {
     const rawSymbol = parts[1];
     const buyPrice  = parseFloat(parts[2]);
-    let quantity = null, targetMultiple = null;
+    let quantity = null, targetMultiple = null, targetPct = null;
+
+    // Helper: parse a target token — supports "2x", "10%", "10.5%"
+    function parseTarget(token) {
+      const t = token.toString().toLowerCase().trim();
+      if (t.endsWith('%')) {
+        const pct = parseFloat(t);
+        if (!isNaN(pct) && pct > 0) {
+          targetPct = pct;
+          targetMultiple = 1 + pct / 100;
+        }
+      } else if (t.endsWith('x')) {
+        const mult = parseFloat(t);
+        if (!isNaN(mult) && mult > 0) targetMultiple = mult;
+      }
+    }
+
     if (parts[3]) {
       const p3 = parts[3].toString().toLowerCase();
-      if (p3.endsWith('x')) targetMultiple = parseFloat(p3);
+      if (p3.endsWith('x') || p3.endsWith('%')) parseTarget(p3);
       else quantity = parseFloat(p3);
     }
-    if (parts[4]) {
-      const p4 = parts[4].toString().toLowerCase();
-      if (p4.endsWith('x')) targetMultiple = parseFloat(p4);
-    }
+    if (parts[4]) parseTarget(parts[4]);
 
     if (!rawSymbol || isNaN(buyPrice) || buyPrice <= 0) {
       await reply(chatId, [
         `❌ *Invalid format*`,
         ``,
         `\`buy SOL 92.50\``,
-        `\`buy SOL 92.50 2x\` ← alert at 2X`,
-        `\`buy SOL 92.50 5x\` ← alert at 5X`,
-        `\`buy SOL 92.50 10 5x\` ← 10 units + 5X`,
+        `\`buy SOL 92.50 10%\`  ← alert at 10% profit`,
+        `\`buy SOL 92.50 2x\`   ← alert at 2X`,
+        `\`buy SOL 92.50 5x\`   ← alert at 5X`,
+        `\`buy SOL 92.50 10 10%\` ← 10 units + 10% target`,
+        `\`buy SOL 92.50 10 5x\` ← 10 units + 5X target`,
       ].join('\n'));
       return;
     }
@@ -606,16 +622,21 @@ async function handleMessage(chatId, text, from) {
     const existing = await getPositionsBySymbol(chatId, symbol);
     const entryNum = existing.length + 1;
 
+    // Build a human-friendly target label e.g. "10% profit" or "2X"
+    const targetLabel = targetPct != null
+      ? `${targetPct}% profit`
+      : targetMultiple ? `${targetMultiple}X` : null;
+
     await reply(chatId, [
       `✅ *Buy #${entryNum} Registered — ${symbol}*`,
       existing.length > 0 ? `📌 _You now have ${entryNum} separate entries for ${symbol}_` : '',
       ``,
       `💰 *Buy Price:* \`$${buyPrice}\``,
-      quantity      ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
-      targetMultiple ? `🎯 *Target:*    ${targetMultiple}X = \`$${targetPrice.toFixed(6)}\`` : '',
+      quantity    ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
+      targetLabel ? `🎯 *Target:*   ${targetLabel} = \`$${targetPrice.toFixed(6)}\`` : '',
       ``,
       `You will be alerted when:`,
-      targetMultiple ? `  🎯 Price hits $${targetPrice.toFixed(6)} (${targetMultiple}X) → SELL NOW` : '',
+      targetLabel ? `  🎯 Price hits \`$${targetPrice.toFixed(6)}\` (${targetLabel}) → SELL NOW` : '',
       `  🔴 Stop loss hit → exit immediately`,
       `  🟢 TP1 / TP2 / TP3 hit → take partial profit`,
       `  ⚪ Hold update every 4 hours`,
@@ -854,14 +875,17 @@ async function handleMessage(chatId, text, from) {
       `Track only:`,
       `\`buy SOL 92.50\``,
       ``,
-      `With 2X target alert:`,
-      `\`buy SOL 92.50 2x\``,
+      `With percentage profit target:`,
+      `\`buy SOL 92.50 10%\` ← alert at 10% profit`,
+      `\`buy SOL 92.50 25%\` ← alert at 25% profit`,
       ``,
-      `With 5X target alert:`,
-      `\`buy SOL 92.50 5x\``,
+      `With multiplier target:`,
+      `\`buy SOL 92.50 2x\` ← alert at 2X`,
+      `\`buy SOL 92.50 5x\` ← alert at 5X`,
       ``,
       `With quantity + target:`,
-      `\`buy SOL 92.50 10 5x\``,
+      `\`buy SOL 92.50 10 10%\` ← 10 units + 10% target`,
+      `\`buy SOL 92.50 10 5x\`  ← 10 units + 5X target`,
       ``,
       `Any coin works:`,
       `\`buy BTC 80000 2x\``,
@@ -1160,10 +1184,18 @@ async function handleMessage(chatId, text, from) {
     await reply(chatId, [
       `💰 *How to Register a Buy*`,
       ``,
-      `\`buy SOL 92.50\`       — track only`,
-      `\`buy BTC 80000 2x\`    — alert at 2X`,
-      `\`buy ETH 2300 5x\`     — alert at 5X`,
-      `\`buy SOL 92.50 10 2x\` — 10 units + 2X`,
+      `*Track only:*`,
+      `\`buy SOL 92.50\``,
+      ``,
+      `*Percentage profit targets:*`,
+      `\`buy SOL 92.50 10%\`    — alert at 10% profit`,
+      `\`buy SOL 92.50 25%\`    — alert at 25% profit`,
+      `\`buy SOL 92.50 10 10%\` — 10 units + 10% target`,
+      ``,
+      `*Multiplier targets:*`,
+      `\`buy BTC 80000 2x\`     — alert at 2X`,
+      `\`buy ETH 2300 5x\`      — alert at 5X`,
+      `\`buy SOL 92.50 10 2x\`  — 10 units + 2X`,
     ].join('\n'));
     return;
   }
