@@ -627,6 +627,7 @@ async function handleMessage(chatId, text, from) {
       ? `${targetPct}% profit`
       : targetMultiple ? `${targetMultiple}X` : null;
 
+    // ── Send immediate confirmation ──────────────────────────────────────
     await reply(chatId, [
       `✅ *Buy #${entryNum} Registered — ${symbol}*`,
       existing.length > 0 ? `📌 _You now have ${entryNum} separate entries for ${symbol}_` : '',
@@ -635,15 +636,71 @@ async function handleMessage(chatId, text, from) {
       quantity    ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
       targetLabel ? `🎯 *Target:*   ${targetLabel} = \`$${targetPrice.toFixed(6)}\`` : '',
       ``,
-      `You will be alerted when:`,
-      targetLabel ? `  🎯 Price hits \`$${targetPrice.toFixed(6)}\` (${targetLabel}) → SELL NOW` : '',
-      `  🔴 Stop loss hit → exit immediately`,
-      `  🟢 TP1 / TP2 / TP3 hit → take partial profit`,
-      `  ⚪ Hold update every 4 hours`,
-      ``,
-      `Each entry is monitored independently.`,
-      `\`positions\` to see all your entries`,
+      `⏳ _Fetching live price and trade plan..._`,
     ].filter(Boolean).join('\n'));
+
+    // ── Immediate first check — runs right now, no waiting for cron ──────
+    // This is what actually starts the alerts. Without this, you'd wait
+    // up to 30 mins for the cron to notice the new position.
+    try {
+      const { fetchCurrentData, buildAdvice } = require('./v2advice');
+      const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol);
+
+      const advice = buildAdvice({
+        symbol, buyPrice, currentPrice, candles1h, candles4h,
+      });
+
+      const sl  = advice.tradePlan?.stopLoss;
+      const tp1 = advice.tradePlan?.takeProfits?.tp1;
+      const tp2 = advice.tradePlan?.takeProfits?.tp2;
+      const tp3 = advice.tradePlan?.takeProfits?.tp3;
+
+      const pnlPct = ((currentPrice - buyPrice) / buyPrice) * 100;
+      const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+
+      const INFO_CHANNEL = process.env.TELEGRAM_INFO_CHANNEL_ID;
+
+      // Send the live trade plan to ACTION channel (main chat)
+      await reply(chatId, [
+        `📡 *Live Check — ${symbol}*`,
+        ``,
+        `💰 *Your entry:*  \`$${buyPrice}\``,
+        `📊 *Live price:*  \`$${currentPrice.toFixed(6)}\``,
+        `📈 *P&L now:*     ${pnlStr}`,
+        ``,
+        `🗺 *Your Trade Plan:*`,
+        sl  ? `  🛡 Stop loss:  \`$${sl.toFixed(6)}\`  ← EXIT if hit` : '',
+        tp1 ? `  🟢 TP1 (40%):  \`$${tp1.price.toFixed(6)}\`` : '',
+        tp2 ? `  🟢 TP2 (35%):  \`$${tp2.price.toFixed(6)}\`` : '',
+        tp3 ? `  🟢 TP3 (25%):  \`$${tp3.price.toFixed(6)}\`` : '',
+        targetLabel ? `  🎯 Your target: \`$${targetPrice.toFixed(6)}\` (${targetLabel})` : '',
+        ``,
+        `📌 *Milestone alerts* (10%, 20%, 30%...) → Info channel`,
+        INFO_CHANNEL
+          ? `   Quiet alerts → ${INFO_CHANNEL}`
+          : `   _(Set TELEGRAM_INFO_CHANNEL_ID to keep main chat clean)_`,
+        ``,
+        `⏰ Next auto-check in ~30 mins via cron.`,
+        `Type \`check ${symbol.replace('USDT','')}\` anytime for an instant update.`,
+      ].filter(Boolean).join('\n'));
+
+    } catch (liveErr) {
+      // Live check failed — still confirmed, cron will pick it up
+      console.error('[Buy live check]', liveErr.message);
+      await reply(chatId, [
+        ``,
+        `⚠️ _Live price fetch failed (${liveErr.message}) — position is saved and will be monitored by cron._`,
+        ``,
+        `You will be alerted when:`,
+        targetLabel ? `  🎯 Price hits \`$${targetPrice.toFixed(6)}\` (${targetLabel}) → SELL NOW` : '',
+        `  🔴 Stop loss hit → exit immediately`,
+        `  🟢 TP1 / TP2 / TP3 hit → take partial profit`,
+        `  📊 Every 10% milestone → info channel`,
+        `  ⚪ Hold update every 4 hours → info channel`,
+        ``,
+        `\`positions\` to see all your entries`,
+      ].filter(Boolean).join('\n'));
+    }
     return;
   }
 
