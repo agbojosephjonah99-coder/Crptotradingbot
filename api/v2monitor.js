@@ -2,22 +2,26 @@
  * ─── Position Monitor ─────────────────────────────────────────────────────────
  * GET /api/v2monitor
  *
- * Hit every 30 mins via cron-job.org for fast target detection.
- * Fires Telegram alerts the moment a target is hit.
+ * TWO-CHANNEL ALERT SYSTEM:
  *
- * DUAL-CHANNEL ROUTING:
- *  ACTION channel  (TELEGRAM_CHAT_ID)         — requires immediate action:
- *    🔴 Stop loss hit
- *    🎯 Custom target hit
- *    🚨 Round milestones: 50%, 100%, 150% only
- *    🟢 TP1 / TP2 / TP3
+ *  ACTION channel (TELEGRAM_CHAT_ID — your main private chat)
+ *  ────────────────────────────────────────────────────────────
+ *  🔴 Stop Loss          → EXIT NOW
+ *  🚨 Custom Target Hit  → SELL NOW
+ *  🟢 TP1 / TP2 / TP3   → Take partial profit
+ *  🚀 50%, 100%, 150%... → Round-number milestone (every 50%)
  *
- *  INFO channel    (TELEGRAM_INFO_CHANNEL_ID)  — useful but not urgent:
- *    📊 Milestones: 10%, 20%, 30%, 40% (and non-round milestones)
- *    ⚪ HOLD updates
+ *  INFO channel (TELEGRAM_INFO_CHANNEL_ID — your Telegram channel)
+ *  ────────────────────────────────────────────────────────────────
+ *  📊 10%, 20%, 30%, 40% milestones (every 10%, skipping 50/100/150)
+ *  ⚪ HOLD updates every 4 hours
  *
- * Set TELEGRAM_INFO_CHANNEL_ID in your .env to a channel/group ID or @username.
- * If not set, all alerts fall back to the main ACTION channel.
+ * Setup:
+ *  1. Create a Telegram Channel (e.g. "CryptoBot Info")
+ *  2. Add your bot as admin of that channel
+ *  3. Add TELEGRAM_INFO_CHANNEL_ID to Vercel env vars
+ *     Value = the channel's chat ID (e.g. -1001234567890)
+ *     or username (e.g. @mycryptobotinfo)
  */
 
 const axios = require('axios');
@@ -29,12 +33,13 @@ async function getApprovedUsers() {
 }
 const { fetchCurrentData, buildAdvice } = require('./v2advice');
 
-const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN;
-const INFO_CHANNEL_ID = process.env.TELEGRAM_INFO_CHANNEL_ID || null;
+const BOT_TOKEN      = process.env.TELEGRAM_BOT_TOKEN;
+const INFO_CHANNEL   = process.env.TELEGRAM_INFO_CHANNEL_ID; // low-priority channel
 
 // ─── Send helpers ─────────────────────────────────────────────────────────────
 
-async function sendToChat(chatId, text) {
+// ACTION: sends to the user's own chat (urgent — requires immediate action)
+async function sendAction(chatId, text) {
   if (!BOT_TOKEN || !chatId) return;
   try {
     await axios.post(
@@ -42,22 +47,24 @@ async function sendToChat(chatId, text) {
       { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
       { timeout: 8000 }
     );
-  } catch (e) { console.error('[Monitor Alert]', e.message); }
+  } catch (e) { console.error('[Monitor ACTION]', e.message); }
 }
 
-// Action alert → user's personal chat (requires immediate action)
-async function sendAlert(chatId, text) {
-  await sendToChat(chatId, text);
-}
-
-// Info alert → info channel if configured, else fall back to user's personal chat
-async function sendInfoAlert(chatId, text) {
-  await sendToChat(INFO_CHANNEL_ID || chatId, text);
+// INFO: sends to the shared info channel (low-priority, no action needed)
+// Falls back to the user's own chat if INFO channel not configured
+async function sendInfo(chatId, text) {
+  const dest = INFO_CHANNEL || chatId;
+  if (!BOT_TOKEN || !dest) return;
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      { chat_id: dest, text, parse_mode: 'Markdown', disable_web_page_preview: true },
+      { timeout: 8000 }
+    );
+  } catch (e) { console.error('[Monitor INFO]', e.message); }
 }
 
 // ─── Milestone Helper ─────────────────────────────────────────────────────────
-// Returns the highest NEW 10% milestone crossed that hasn't fired yet, or null.
-// e.g. pnlPct=55, milestoneHits=[10,20] → returns 50
 function getNextMilestone(pnlPct, milestoneHits = []) {
   if (pnlPct < 10) return null;
   const STEP    = 10;
@@ -68,6 +75,11 @@ function getNextMilestone(pnlPct, milestoneHits = []) {
   return null;
 }
 
+// Round milestones (50, 100, 150...) go to ACTION channel — everything else to INFO
+function isRoundMilestone(m) {
+  return m % 50 === 0;
+}
+
 function milestoneEmoji(milestone) {
   if (milestone >= 100) return '🚀🚀🚀';
   if (milestone >= 70)  return '🚀🚀';
@@ -76,18 +88,25 @@ function milestoneEmoji(milestone) {
   return '🟢';
 }
 
+// ─── Core position checker ────────────────────────────────────────────────────
 async function checkPosition(pos, userId) {
-  const targetChatId = userId || pos.chatId || process.env.TELEGRAM_CHAT_ID;
+  const actionChatId = userId || pos.chatId || process.env.TELEGRAM_CHAT_ID;
   const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
 
   const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
   const currentMultiple = currentPrice / pos.buyPrice;
-  const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
+  const profitDollar    = pos.quantity
+    ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2)
+    : null;
 
   const advice = buildAdvice({
-    symbol: pos.symbol, buyPrice: pos.buyPrice,
-    currentPrice, candles1h, candles4h,
-    accountSize: pos.accountSize, riskPct: pos.riskPct,
+    symbol:      pos.symbol,
+    buyPrice:    pos.buyPrice,
+    currentPrice,
+    candles1h,
+    candles4h,
+    accountSize: pos.accountSize,
+    riskPct:     pos.riskPct,
   });
 
   const sl  = advice.tradePlan?.stopLoss;
@@ -98,14 +117,11 @@ async function checkPosition(pos, userId) {
   if (sl && !pos.stopLossPrice) {
     await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
   }
-
   if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
     await updatePosition(pos.chatId, pos.positionId, { highestPrice: currentPrice });
   }
 
   // ── MILESTONE ALERTS ──────────────────────────────────────────────────────
-  // ACTION channel: 50%, 100%, 150% (round milestones — consider selling)
-  // INFO channel:   10%, 20%, 30%, 40% (and any other non-round milestones)
   const milestoneHits = pos.milestoneHits || [];
   const nextMilestone = getNextMilestone(pnlPct, milestoneHits);
   let milestoneAlerted = false;
@@ -114,9 +130,8 @@ async function checkPosition(pos, userId) {
     const emoji      = milestoneEmoji(nextMilestone);
     const nextTarget = nextMilestone + 10;
     const nextPrice  = (pos.buyPrice * (1 + nextTarget / 100)).toFixed(6);
-    const isRound    = nextMilestone % 50 === 0; // 50, 100, 150 …
+    const isRound    = isRoundMilestone(nextMilestone);
 
-    // Show ceiling target status if one exists and hasn't been hit yet
     const ceilingPct   = pos.targetMultiple ? (pos.targetMultiple - 1) * 100 : null;
     const ceilingAhead = ceilingPct && ceilingPct > nextMilestone && !pos.targetHit;
     const ceilingMsg   = ceilingAhead
@@ -141,28 +156,27 @@ async function checkPosition(pos, userId) {
     ].filter(Boolean).join('\n');
 
     if (isRound) {
-      // 50 / 100 / 150 … → ACTION channel (same as stop loss / TP alerts)
-      await sendAlert(targetChatId, milestoneMsg);
+      // 50%, 100%, 150%... → ACTION channel (phone buzzes)
+      await sendAction(actionChatId, milestoneMsg);
     } else {
-      // 10 / 20 / 30 / 40 … → INFO channel
-      await sendInfoAlert(targetChatId, milestoneMsg);
+      // 10%, 20%, 30%, 40%, 60%... → INFO channel (quiet)
+      await sendInfo(actionChatId, milestoneMsg);
     }
 
-    // Record so this milestone never fires again
     await updatePosition(pos.chatId, pos.positionId, {
       milestoneHits: [...milestoneHits, nextMilestone],
     });
     milestoneAlerted = true;
   }
 
-  // ── CUSTOM TARGET HIT (ceiling) ───────────────────────────────────────────
+  // ── CUSTOM TARGET HIT → ACTION ────────────────────────────────────────────
   if (pos.targetMultiple && pos.targetPrice && !pos.targetHit && currentPrice >= pos.targetPrice) {
     const ceilingPct  = (pos.targetMultiple - 1) * 100;
     const targetLabel = Number.isInteger(ceilingPct)
       ? `+${ceilingPct}% (${pos.targetMultiple}X)`
       : `${pos.targetMultiple}X`;
 
-    await sendAlert(targetChatId, [
+    await sendAction(actionChatId, [
       ``,
       `🚨🎯🚨 *TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
       ``,
@@ -190,9 +204,9 @@ async function checkPosition(pos, userId) {
     return { recommendation: `TARGET_HIT_${targetLabel}`, alerted: true };
   }
 
-  // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
+  // ── STOP LOSS HIT → ACTION ────────────────────────────────────────────────
   if (sl && currentPrice <= sl && !pos.stopLossHit) {
-    await sendAlert(targetChatId, [
+    await sendAction(actionChatId, [
       `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -210,10 +224,10 @@ async function checkPosition(pos, userId) {
     return { recommendation: 'STOP_LOSS', alerted: true };
   }
 
-  // ── TP3 HIT ───────────────────────────────────────────────────────────────
+  // ── TP3 HIT → ACTION ──────────────────────────────────────────────────────
   if (tp3 && currentPrice >= tp3.price && !pos.tp3Hit) {
     await updatePosition(pos.chatId, pos.positionId, { tp3Hit: true });
-    await sendAlert(targetChatId, [
+    await sendAction(actionChatId, [
       `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -229,10 +243,10 @@ async function checkPosition(pos, userId) {
     return { recommendation: 'TP3', alerted: true };
   }
 
-  // ── TP2 HIT ───────────────────────────────────────────────────────────────
+  // ── TP2 HIT → ACTION ──────────────────────────────────────────────────────
   if (tp2 && currentPrice >= tp2.price && pnlPct > 0 && !pos.tp2Hit) {
     await updatePosition(pos.chatId, pos.positionId, { tp2Hit: true });
-    await sendAlert(targetChatId, [
+    await sendAction(actionChatId, [
       `🟢🟢 *TP2 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -249,10 +263,10 @@ async function checkPosition(pos, userId) {
     return { recommendation: 'TP2', alerted: true };
   }
 
-  // ── TP1 HIT ───────────────────────────────────────────────────────────────
+  // ── TP1 HIT → ACTION ──────────────────────────────────────────────────────
   if (tp1 && currentPrice >= tp1.price && pnlPct > 0 && !pos.tp1Hit) {
     await updatePosition(pos.chatId, pos.positionId, { tp1Hit: true });
-    await sendAlert(targetChatId, [
+    await sendAction(actionChatId, [
       `🟢 *TP1 HIT — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -269,7 +283,7 @@ async function checkPosition(pos, userId) {
     return { recommendation: 'TP1', alerted: true };
   }
 
-  // ── HOLD — send every 4 hours only → INFO channel ────────────────────────
+  // ── HOLD → INFO (every 4 hours, quiet channel) ────────────────────────────
   const lastChecked     = pos.lastChecked ? new Date(pos.lastChecked).getTime() : 0;
   const hoursSinceCheck = (Date.now() - lastChecked) / (1000 * 60 * 60);
 
@@ -277,11 +291,10 @@ async function checkPosition(pos, userId) {
     const distToTarget = pos.targetPrice
       ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away`
       : null;
-
     const nextMs      = Math.ceil(Math.max(pnlPct, 0) / 10) * 10 || 10;
     const nextMsPrice = (pos.buyPrice * (1 + nextMs / 100)).toFixed(6);
 
-    await sendInfoAlert(targetChatId, [
+    await sendInfo(actionChatId, [
       `⚪ *HOLD — ${pos.symbol}*`,
       ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -320,7 +333,7 @@ module.exports = async (req, res) => {
     const approvedUsers = await getApprovedUsers();
     const allUserIds    = [...new Set([adminId, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
 
-    const results = [];
+    const results      = [];
     let totalPositions = 0;
 
     for (const userId of allUserIds) {
@@ -345,8 +358,11 @@ module.exports = async (req, res) => {
     }
 
     return res.status(200).json({
-      success: true, checked: results.length,
-      results, checkedAt: new Date().toISOString(),
+      success:   true,
+      checked:   results.length,
+      results,
+      infoChannel: INFO_CHANNEL || 'not configured — falling back to user chat',
+      checkedAt: new Date().toISOString(),
     });
 
   } catch (err) {
