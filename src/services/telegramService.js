@@ -1,28 +1,72 @@
 /**
- * ─── Enhanced Telegram Alert Service ─────────────────────────────────────────
+ * ─── Telegram Alert Service ───────────────────────────────────────────────────
+ *
+ * TWO-CHANNEL SYSTEM:
+ *
+ *  ACTION channel  → TELEGRAM_CHAT_ID (your private bot chat)
+ *    • BUY signals from scanner (v2scan / liveService)
+ *    • New listing BUY signals
+ *    • Bearish alerts
+ *    • Stop loss, TP1/TP2/TP3, custom target hit (from v2monitor)
+ *    • Big milestones: 50%, 100%, 150%...
+ *
+ *  INFO channel    → TELEGRAM_INFO_CHANNEL_ID (quiet Telegram channel)
+ *    • 10%, 20%, 30%, 40% milestones
+ *    • HOLD updates every 4 hours
+ *    • New listing info alerts (v2listings-alert)
+ *
+ *  If TELEGRAM_INFO_CHANNEL_ID is not set, info alerts fall back to main chat.
  */
 
 const axios = require('axios');
 const { isDuplicateSignal, markSignalFired } = require('./riskService');
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
+const BOT_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
+const ACTION_CHAT  = process.env.TELEGRAM_CHAT_ID;          // main private chat
+const INFO_CHANNEL = process.env.TELEGRAM_INFO_CHANNEL_ID;  // quiet info channel
 
-async function _send(text) {
-  if (!BOT_TOKEN || !CHAT_ID) {
-    console.warn('[Telegram] Missing credentials — skipping alert');
+// ─── Core send helpers ────────────────────────────────────────────────────────
+
+// Send to the ACTION channel (main chat) — requires immediate attention
+async function sendAction(text, overrideChatId) {
+  const chatId = overrideChatId || ACTION_CHAT;
+  if (!BOT_TOKEN || !chatId) {
+    console.warn('[Telegram] Missing credentials — skipping action alert');
     return;
   }
   const resp = await axios.post(
     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-    { chat_id: CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true },
+    { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
     { timeout: 10000 }
   );
   if (!resp.data.ok) throw new Error(`Telegram error: ${JSON.stringify(resp.data)}`);
   return resp.data;
 }
 
-// ─── Watchlist BUY Signal (v2scan) ───────────────────────────────────────────
+// Send to the INFO channel — low priority, no action needed
+async function sendInfo(text, overrideChatId) {
+  const chatId = overrideChatId || INFO_CHANNEL || ACTION_CHAT; // fallback to main if not set
+  if (!BOT_TOKEN || !chatId) {
+    console.warn('[Telegram] Missing credentials — skipping info alert');
+    return;
+  }
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
+      { timeout: 10000 }
+    );
+  } catch (e) {
+    console.error('[Telegram] Info send failed:', e.message);
+  }
+}
+
+// Legacy alias — used by old code that calls _send() directly
+async function _send(text) { return sendAction(text); }
+
+// ─── BUY Signal (v2scan / liveService) → CHANNEL ────────────────────────────
+// Scanner signals are market-wide, not personal trades.
+// They go to the channel so your main chat stays focused on your own positions.
 async function sendBuyAlert(result) {
   if (result.signal !== 'BUY') return;
   if (result.score < 7) return;
@@ -31,12 +75,12 @@ async function sendBuyAlert(result) {
     return;
   }
 
-  const tp1  = result.takeProfits?.tp1;
-  const tp2  = result.takeProfits?.tp2;
-  const tp3  = result.takeProfits?.tp3;
-  const sl   = result.stopLoss;
-  const rr   = result.riskReward;
-  const conf = result.confidence;
+  const tp1     = result.takeProfits?.tp1;
+  const tp2     = result.takeProfits?.tp2;
+  const tp3     = result.takeProfits?.tp3;
+  const sl      = result.stopLoss;
+  const rr      = result.riskReward;
+  const conf    = result.confidence;
   const confBar = '█'.repeat(Math.round(conf / 10)) + '░'.repeat(10 - Math.round(conf / 10));
 
   const lines = [
@@ -57,15 +101,17 @@ async function sendBuyAlert(result) {
     ...(result.factors || []).map(f => `  • ${f}`),
     ``,
     `⚠️ *After TP1 → move stop to breakeven*`,
+    `📝 Quick buy: \`buy ${result.symbol} ${Number(result.price).toFixed(4)}\``,
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await _send(lines);
+  await sendInfo(lines);   // → channel (market-wide signal, not a personal trade)
   markSignalFired(result.symbol, 'BUY');
-  console.log(`[Telegram] BUY alert sent — ${result.symbol}`);
+  console.log(`[Telegram] BUY alert sent → CHANNEL — ${result.symbol}`);
 }
 
-// ─── New Listing BUY Signal (v2listings) — includes name + contracts ──────────
+// ─── New Listing BUY Signal → MAIN CHAT ──────────────────────────────────────
+// Listings are personal — you need to act on them immediately.
 async function sendListingBuyAlert(result) {
   if (result.signal !== 'BUY') return;
 
@@ -75,24 +121,24 @@ async function sendListingBuyAlert(result) {
   const sl  = result.stopLoss;
   const rr  = result.riskReward;
 
-  // ── Coin identity section ──────────────────────────────────────────────────
+  // ── Coin identity ──────────────────────────────────────────────────────────
   const identityLines = [];
   identityLines.push(`🪙 *Coin Name:* ${result.coinName || result.baseAsset}`);
   identityLines.push(`🔤 *Ticker:* ${result.baseAsset}`);
-
   if (result.description) {
     identityLines.push(`📄 *What it is:* ${result.description}`);
   }
 
+  // ── Contract addresses ─────────────────────────────────────────────────────
   if (result.contracts && result.contracts.length > 0) {
     identityLines.push(`\n📋 *Contract Addresses:*`);
     result.contracts.forEach(c => {
       identityLines.push(`  *${c.chainLabel}:*`);
       identityLines.push(`  \`${c.address}\``);
     });
-    identityLines.push(`\n⚠️ *Always verify the contract address on the official CoinGecko page before buying*`);
+    identityLines.push(`\n⚠️ *Always verify on CoinGecko before buying*`);
   } else if (result.isNativeAsset) {
-    identityLines.push(`ℹ️ *Native chain asset — no contract address (like BTC, ETH, SOL)*`);
+    identityLines.push(`ℹ️ *Native asset — no contract address (like BTC, ETH, SOL)*`);
   } else {
     identityLines.push(`⚠️ *Contract address not found — verify manually before buying*`);
   }
@@ -101,7 +147,6 @@ async function sendListingBuyAlert(result) {
     identityLines.push(`🔗 *CoinGecko:* ${result.coingeckoUrl}`);
   }
 
-  // ── Risk flags ─────────────────────────────────────────────────────────────
   const riskLine = result.riskFlags?.length > 0
     ? `⚠️ *Risk Flags:* ${result.riskFlags.join(', ')}`
     : `✅ No major risk flags`;
@@ -139,17 +184,18 @@ async function sendListingBuyAlert(result) {
     `  • TP1 hit → sell 40%, move stop to breakeven`,
     `  • TP2 hit → sell 35%, trail stop below TP1`,
     `  • TP3 hit → sell remaining 25%`,
-    `  • Volume drops below $200K → EXIT (liquidity gone)`,
+    `  • Volume drops below $200K → EXIT`,
     ``,
     `⚠️ *New listings = HIGH RISK. Max 1-2% of account.*`,
+    `📝 Quick buy: \`buy ${result.symbol} ${Number(result.entryPrice).toFixed(6)}\``,
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await _send(lines);
-  console.log(`[Telegram] NEW LISTING BUY sent — ${result.symbol}`);
+  await sendAction(lines);  // → main chat (personal trade decision needed)
+  console.log(`[Telegram] NEW LISTING BUY → MAIN CHAT — ${result.symbol}`);
 }
 
-// ─── Bearish Alert ────────────────────────────────────────────────────────────
+// ─── Bearish Alert → ACTION channel ──────────────────────────────────────────
 async function sendBearishAlert(result) {
   if (result.signal !== 'BEARISH_ALERT') return;
   if (result.score < 3) return;
@@ -170,36 +216,34 @@ async function sendBearishAlert(result) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await _send(lines);
+  await sendAction(lines);
   markSignalFired(result.symbol, 'BEARISH_ALERT');
 }
 
 // ─── Connection Test ──────────────────────────────────────────────────────────
 async function sendTestMessage() {
-  if (!BOT_TOKEN || !CHAT_ID) throw new Error('Telegram credentials not set');
-  await _send([
+  if (!BOT_TOKEN || !ACTION_CHAT) throw new Error('Telegram credentials not set');
+  await sendAction([
     `✅ *CryptoBot V2 Connected*`,
     ``,
-    `Watchlist: ${process.env.BINANCE_SYMBOLS || 'SOLUSDT,BTCUSDT,ETHUSDT'}`,
-    ``,
-    `Active alerts:`,
-    `  • 🟢 Watchlist BUY signals`,
-    `  • 🚀 New listing BUY signals (with coin name + contract address)`,
+    `MAIN CHAT (this chat):`,
+    `  • 🚀 New listing BUY signals`,
+    `  • 🔴 Stop loss alerts`,
+    `  • 🟢 TP1 / TP2 / TP3 hit`,
+    `  • 🎯 Target hit (10%–50%+ milestones)`,
+    `  • ⚪ HOLD updates every 4 hours`,
     `  • 🔴 Bearish alerts`,
+    ``,
+    `CHANNEL (${INFO_CHANNEL || '⚠️ not set — add TELEGRAM_INFO_CHANNEL_ID'}):`,
+    `  • 🟢 BUY signals from market scanner`,
   ].join('\n'));
 }
 
-module.exports = {
-  sendBuyAlert,
-  sendBearishAlert,
-  sendListingBuyAlert,
-  sendTestMessage,
-};
-
-// ─── Position Alert (used by v2monitor + check command) ──────────────────────
+// ─── Position Alert (v2monitor / check command) ───────────────────────────────
+// ACTION types: STOP_LOSS, TAKE_PROFIT, TARGET_HIT, big milestones (50%+)
+// INFO types:   HOLD, small milestones (10%-40%)
 async function sendPositionAlert(position, advice, overrideChatId) {
-  const chatId = overrideChatId || CHAT_ID;
-  if (!chatId) return;
+  const actionChatId = overrideChatId || ACTION_CHAT;
 
   const tp1 = advice.tradePlan?.takeProfits?.tp1;
   const tp2 = advice.tradePlan?.takeProfits?.tp2;
@@ -245,11 +289,28 @@ async function sendPositionAlert(position, advice, overrideChatId) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await axios.post(
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-    { chat_id: chatId, text: lines, parse_mode: 'Markdown', disable_web_page_preview: true },
-    { timeout: 10000 }
-  ).catch(e => console.error('[sendPositionAlert]', e.message));
+  // ALL position alerts go to main chat — these are your personal trades.
+  // (stop loss, TP, target hit, milestones, hold — you need to see all of these)
+  await sendAction(lines, actionChatId);
 }
 
-module.exports.sendPositionAlert = sendPositionAlert;
+// ─── sendSignalAlert — used by liveService.js ────────────────────────────────
+// Routes to sendBuyAlert or sendBearishAlert based on signal type
+async function sendSignalAlert(result) {
+  if (!result) return;
+  if (result.signal === 'BUY')            return sendBuyAlert(result);
+  if (result.signal === 'BEARISH_ALERT')  return sendBearishAlert(result);
+  // WAIT / neutral — no alert
+}
+
+module.exports = {
+  sendBuyAlert,
+  sendBearishAlert,
+  sendListingBuyAlert,
+  sendTestMessage,
+  sendPositionAlert,
+  sendSignalAlert,     // used by liveService
+  sendAction,
+  sendInfo,
+  _send,               // legacy alias
+};
