@@ -99,7 +99,7 @@ async function getPositionById(chatId, positionId) {
 }
 
 // ─── Writes (each is a small set of atomic commands) ─────────────────────────
-async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, riskPct, targetMultiple, stopLossPrice = null }) {
+async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, riskPct, targetMultiple, stopLossPrice = null, exchange = null }) {
   const sym    = symbol.toUpperCase();
   const target = targetMultiple ? parseFloat(targetMultiple) : null;
   let positionId = `${sym}:${Date.now()}`;
@@ -110,6 +110,7 @@ async function addPosition({ chatId, symbol, buyPrice, quantity, accountSize, ri
   const pos = {
     positionId,
     symbol:             sym,
+    exchange:           exchange || null,   // where prices come from (null = auto, Binance first)
     chatId:             chatId.toString(),
     buyPrice:           parseFloat(buyPrice),
     quantity:           quantity    ? parseFloat(quantity)    : null,
@@ -156,12 +157,21 @@ async function updatePosition(chatId, positionId, updates) {
   return getPositionById(chatId, positionId);
 }
 
+// Called after every removal (automated exits use it to cancel a stop order)
+const removeHooks = [];
+function onRemove(fn) { removeHooks.push(fn); }
+
 async function removePositionById(chatId, positionId) {
   await migrateLegacy(chatId);
   const [removed] = await store.pipeline([
     ['SREM', idxKey(chatId), positionId],
     ['DEL', posKey(chatId, positionId)],
   ]);
+  if (removed > 0) {
+    for (const fn of removeHooks) {
+      try { await fn(String(chatId), positionId); } catch (err) { console.error('[PositionStore] remove hook:', err.message); }
+    }
+  }
   return removed > 0;
 }
 
@@ -214,6 +224,7 @@ module.exports = {
   getAllUsersPositions,
   getAllChatIdsWithPositions,
   migrateLegacy,
+  onRemove,
   _resetMigrationCache: () => checked.clear(),
   get isUsingUpstash() { return store.isEnabled(); },
 };

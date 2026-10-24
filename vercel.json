@@ -1,7 +1,11 @@
 {
   "version": 2,
-  "cleanUrls": true,
   "regions": ["fra1"],
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/paid", "destination": "/api/app?action=paystack-callback" },
+    { "source": "/paystack-webhook", "destination": "/api/app?action=paystack-webhook" }
+  ],
   "functions": {
     "api/**/*.js": {
       "includeFiles": "data/**",

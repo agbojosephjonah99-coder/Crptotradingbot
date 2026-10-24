@@ -2,7 +2,7 @@
  * ─── Multi-Timeframe Scan Engine ─────────────────────────────────────────────
  * The live strategy (4H trend + 1H momentum + 15M entry). Moved out of
  * api/v2scan.js so the scanner, the local runner (index.js / scheduler.js)
- * and /api/signal all use exactly the same logic.
+ * and the backtest all use exactly the same logic.
  *
  * Logic is unchanged from v2scan (patch v2.1.1): ADX < 20 hard block, bearish
  * divergence blocks BUY, bearish 15M patterns subtract, OBV bearish flagged.

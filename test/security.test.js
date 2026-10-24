@@ -39,26 +39,18 @@ test('v2scan: public calls get data but send no alerts when CRON_SECRET is set',
   assert.equal(net.sent.length, 0);
 });
 
-test('telegram-test requires the key and never returns the bot token', async () => {
-  resetEnv();
-  mockNet({
-    telegram: (method) => method === 'sendMessage'
-      ? { status: 400, data: { ok: false, description: 'Bad Request: chat not found' } }
-      : null,
-  });
-  const handler = require('../api/telegram-test');
-  let res = fakeRes();
-  await handler(fakeReq(), res);
-  assert.equal(res.statusCode, 403); // CRON_SECRET not set → refuse
+test('health check requires the key when CRON_SECRET is set', async () => {
+  resetEnv({ CRON_SECRET: 'k' });
+  mockNet();
+  const res = fakeRes();
+  await require('../api/health')(fakeReq(), res);
+  assert.equal(res.statusCode, 401);
+});
 
-  process.env.CRON_SECRET = 'k';
-  res = fakeRes();
-  await handler(fakeReq({ query: { key: 'k' } }), res);
-  assert.equal(res.statusCode, 200);
-  const body = JSON.stringify(res.body);
-  assert.ok(!body.includes('TEST_TOKEN'), 'token leaked');
-  assert.ok(!body.includes('abcdef'));
-  assert.match(res.body.diagnosis.error, /chat/i);
+test('deployment stays within the Vercel Hobby limit of 12 functions', () => {
+  const fs = require('fs');
+  const count = fs.readdirSync(require('path').join(__dirname, '..', 'api')).filter(f => f.endsWith('.js')).length;
+  assert.ok(count <= 12, `${count} files in api/ — Hobby allows 12`);
 });
 
 test('webhook rejects forged updates when TELEGRAM_WEBHOOK_SECRET is set', async () => {

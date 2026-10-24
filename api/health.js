@@ -15,6 +15,7 @@ const { BINANCE_BASE, BINANCE_DATA_BASE, KRAKEN_BASE, KUCOIN_BASE } = require('.
 const { cors, requireCronKey } = require('../src/lib/auth');
 const { ACTIVE } = require('../src/config/strategy');
 const { loadSavedStats } = require('../src/services/strategyStats');
+const { PROVIDERS, DEFAULT_ORDER } = require('../src/lib/exchanges');
 
 async function timed(fn) {
   const t = Date.now();
@@ -54,6 +55,17 @@ module.exports = async (req, res) => {
     }),
   ]);
 
+  // Real end-to-end check of every exchange adapter: a BTC price + 5 closed hourly candles
+  const exchangeChecks = Object.fromEntries(await Promise.all(DEFAULT_ORDER.map(async (id) => [id, await timed(async () => {
+    const [price, candles] = await Promise.all([PROVIDERS[id].price('BTC'), PROVIDERS[id].klines('BTC', '1h', 5)]);
+    if (!price) throw new Error('no BTC price');
+    if (!candles.length || !(candles[candles.length - 1].close > 0)) throw new Error('no usable candles');
+    const lastClose = candles[candles.length - 1].close;
+    // Sanity: last hourly close within 10% of the live price → columns parsed correctly
+    if (Math.abs(lastClose - price) / price > 0.1) throw new Error(`candle close ${lastClose} doesn't match price ${price}`);
+    return { btc: price, candles: candles.length };
+  })])));
+
   const checks = { binance, binanceMirror, kraken, kucoin, coingecko, redis, telegram };
   // Candles work if ANY of Binance / mirror / Kraken works
   const marketData = binance.ok || binanceMirror.ok || kraken.ok;
@@ -69,8 +81,14 @@ module.exports = async (req, res) => {
       moonshotData: kucoin.ok && coingecko.ok ? 'OK' : 'degraded (KuCoin or CoinGecko unreachable)',
     },
     checks,
+    exchanges: exchangeChecks,
+    exchangesWorking: Object.entries(exchangeChecks).filter(([, c]) => c.ok).map(([id]) => PROVIDERS[id].name),
     strategy: ACTIVE,
     backtestStatsSaved: !!loadSavedStats(),
+    autoExits: {
+      available: require('../src/lib/secretBox').isConfigured(),
+      dryRun: String(process.env.AUTOTRADE_DRY_RUN || '').toLowerCase() === 'true',
+    },
     checkedAt: new Date().toISOString(),
   });
 };

@@ -1,10 +1,10 @@
 {
   "name": "crypto-signal-bot-v2-enhanced",
-  "version": "2.5.0",
-  "description": "CryptoBot V2 — multi-timeframe signals, Telegram bot, position monitoring (advice only, never trades)",
+  "version": "2.9.0",
+  "description": "CryptoBot V2 — multi-timeframe signals, Telegram bot, position monitoring (alerts; optional automated exits on Binance — never buys)",
   "main": "index.js",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node index.js",

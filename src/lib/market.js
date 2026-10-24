@@ -13,6 +13,8 @@
  */
 
 const axios = require('axios');
+const store = require('./redis');
+const { PROVIDERS, DEFAULT_ORDER, normaliseExchange, baseOf } = require('./exchanges');
 
 const BINANCE_BASE = 'https://api.binance.com/api/v3';
 const BINANCE_DATA_BASE = 'https://data-api.binance.vision/api/v3';
@@ -105,23 +107,41 @@ function dropUnclosed(candles, interval, now = Date.now()) {
 /**
  * Candles with automatic fallback.
  * @param {object} [opts]
- * @param {number} [opts.startTime]  ms; for long history requests
+ * @param {number} [opts.startTime]   ms; for long history requests (Binance paging)
  * @param {boolean} [opts.closedOnly] drop the still-forming candle
+ * @param {string} [opts.exchange]    use ONLY this exchange (a position's own exchange).
+ *        No cross-exchange fallback then: the same ticker on another exchange
+ *        can be a different token.
  * @returns {Promise<{candles: Array, exchange: string}>}
  */
-async function fetchKlinesWithSource(symbol, interval, limit, { startTime = null, closedOnly = false } = {}) {
+async function fetchKlinesWithSource(symbol, interval, limit, { startTime = null, closedOnly = false, exchange = null } = {}) {
   const want = closedOnly ? limit + 1 : limit;
-  const finish = (candles, exchange) => ({
+  const finish = (candles, ex) => ({
     candles: (closedOnly ? dropUnclosed(candles, interval) : candles).slice(-limit),
-    exchange,
+    exchange: ex,
   });
+  const pinned = normaliseExchange(exchange);
+  const base = baseOf(symbol);
   const errors = [];
-  try { return finish(await binanceKlines(symbol, interval, want, startTime), 'Binance'); }
-  catch (e) { errors.push(`Binance: ${e.message}`); }
-  try { return finish(await binanceKlines(symbol, interval, want, startTime, BINANCE_DATA_BASE), 'Binance'); }
-  catch (e) { errors.push(`Binance mirror: ${e.message}`); }
-  try { return finish(await krakenKlines(symbol, interval, want), 'Kraken'); }
-  catch (e) { errors.push(`Kraken: ${e.message}`); }
+
+  if (!pinned || pinned === 'binance') {
+    try { return finish(await binanceKlines(symbol, interval, want, startTime), 'Binance'); }
+    catch (e) { errors.push(`Binance: ${e.message}`); }
+    try { return finish(await binanceKlines(symbol, interval, want, startTime, BINANCE_DATA_BASE), 'Binance'); }
+    catch (e) { errors.push(`Binance mirror: ${e.message}`); }
+    if (pinned) throw new Error(`No candle data for ${symbol} ${interval} on Binance (${errors.join('; ')})`);
+  }
+
+  const order = pinned ? [pinned] : DEFAULT_ORDER.filter(id => id !== 'binance');
+  for (const id of order) {
+    const p = PROVIDERS[id];
+    if (id !== 'kraken' && limit > p.maxLimit && !pinned) continue; // not enough history there
+    try {
+      const candles = await p.klines(base, interval, want);
+      if (candles.length) return finish(candles, p.name);
+      errors.push(`${p.name}: no candles`);
+    } catch (e) { errors.push(`${p.name}: ${e.message}`); }
+  }
   throw new Error(`No candle data for ${symbol} ${interval} (${errors.join('; ')})`);
 }
 
@@ -138,29 +158,50 @@ async function binanceGet(pathname, config = {}) {
   }
 }
 
-/** Latest price with fallbacks. Returns null if every source fails. */
-async function fetchPrice(symbol) {
-  for (const base of [BINANCE_BASE, BINANCE_DATA_BASE]) {
+/**
+ * Latest price. With `exchange`, only that exchange is asked (see note on
+ * fetchKlinesWithSource). Without it: Binance, then the other exchanges.
+ * Returns null if every source fails.
+ */
+async function fetchPrice(symbol, { exchange = null } = {}) {
+  const pinned = normaliseExchange(exchange);
+  const order = pinned ? [pinned] : DEFAULT_ORDER;
+  for (const id of order) {
     try {
-      const r = await axios.get(`${base}/ticker/price`, { params: { symbol }, timeout: 6000 });
-      const p = parseFloat(r.data.price);
-      if (p > 0) return p;
-    } catch { /* fall through */ }
+      const p = await PROVIDERS[id].price(baseOf(symbol));
+      if (p) return p;
+    } catch { /* try the next exchange */ }
   }
+  return null;
+}
 
-  try {
-    const r = await axios.get(`${KUCOIN_BASE}/market/orderbook/level1`, { params: { symbol: toKuCoinSymbol(symbol) }, timeout: 6000 });
-    const p = parseFloat(r.data?.data?.price);
-    if (p > 0) return p;
-  } catch { /* fall through */ }
-
-  try {
-    const r = await axios.get(`${KRAKEN_BASE}/Ticker`, { params: { pair: toKrakenPair(symbol) }, timeout: 6000 });
-    const key = Object.keys(r.data?.result || {})[0];
-    const p = key ? parseFloat(r.data.result[key].c[0]) : NaN;
-    if (p > 0) return p;
-  } catch { /* fall through */ }
-
+/**
+ * Which exchange lists this coin? Checks in DEFAULT_ORDER (or just `preferred`)
+ * and remembers the answer for 7 days.
+ * @returns {Promise<{exchange: string, name: string, price: number}|null>}
+ */
+async function resolveExchange(symbol, preferred = null) {
+  const base = baseOf(symbol);
+  const pinned = normaliseExchange(preferred);
+  const cacheKey = `cryptobot:coinex:${base}`;
+  if (!pinned) {
+    try {
+      const cached = await store.cmd('GET', cacheKey);
+      if (cached && PROVIDERS[cached]) {
+        const price = await PROVIDERS[cached].price(base).catch(() => null);
+        if (price) return { exchange: cached, name: PROVIDERS[cached].name, price };
+      }
+    } catch { /* cache unavailable */ }
+  }
+  for (const id of pinned ? [pinned] : DEFAULT_ORDER) {
+    try {
+      const price = await PROVIDERS[id].price(base);
+      if (price) {
+        if (!pinned) await store.cmd('SET', cacheKey, id, 'EX', 7 * 86400).catch(() => {});
+        return { exchange: id, name: PROVIDERS[id].name, price };
+      }
+    } catch { /* not listed / unreachable */ }
+  }
   return null;
 }
 
@@ -179,6 +220,6 @@ function normaliseSymbol(raw) {
 module.exports = {
   INTERVAL_MS, toKrakenPair, toKuCoinSymbol, dropUnclosed, binanceGet,
   BINANCE_BASE, BINANCE_DATA_BASE, KRAKEN_BASE, KUCOIN_BASE,
-  fetchKlines, fetchKlinesWithSource, fetchPrice,
+  fetchKlines, fetchKlinesWithSource, fetchPrice, resolveExchange,
   configuredSymbols, normaliseSymbol,
 };

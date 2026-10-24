@@ -24,9 +24,12 @@
 
 const tg = require('../src/lib/telegram');
 const store = require('../src/lib/redis');
+const { dashboardLink, revokeAll } = require('../src/lib/dashAuth');
 const { deferUntilAfterResponse } = require('../src/lib/background');
 const { verifyTelegramWebhook } = require('../src/lib/auth');
-const { normaliseSymbol, fetchPrice } = require('../src/lib/market');
+const { normaliseSymbol, fetchPrice, resolveExchange } = require('../src/lib/market');
+const { PROVIDERS, normaliseExchange } = require('../src/lib/exchanges');
+const EXCHANGE_LIST = 'Binance, Bybit, OKX, Gate, MEXC, KuCoin, Kraken';
 const { fetchCurrentData, buildAdvice, planFromAdvice } = require('../src/services/adviceService');
 const {
   getUser, isApproved, isBlocked,
@@ -39,6 +42,13 @@ const {
 } = require('../src/services/positionStore');
 const { recordTrade, getMonthlyStats } = require('../src/services/profitTracker');
 const { adviseSplit, compoundingAdvice, targetProgress } = require('../src/services/portfolioAdvisor');
+const accounts = require('../src/services/tradingAccounts');
+const autoTrader = require('../src/services/autoTrader');
+const subs = require('../src/services/subscriptionService');
+const { baseUrl } = require('../src/lib/dashAuth');
+
+// Commands that work while a subscription has ended (paid access only)
+const FREE_COMMANDS = new Set(['subscribe', 'renew', 'pay', 'account', 'subscription', 'plan', 'help', 'menu', 'dashboard', 'autotrade', 'sell', 'sellentry', 'sellall', 'remove']);
 
 const adminId = () => process.env.TELEGRAM_CHAT_ID;
 const esc = tg.escapeMd;
@@ -70,6 +80,9 @@ const INLINE_MENU = {
     [
       { text: '💼 Split Capital',  callback_data: 'split_help'  },
       { text: '📈 My Profits',     callback_data: 'profit'      },
+    ],
+    [
+      { text: '🖥 My Dashboard',   callback_data: 'dashboard'   },
     ],
     [
       { text: '📖 Help',           callback_data: 'help'        },
@@ -154,7 +167,7 @@ async function handleApproval(action, targetId, adminChatId) {
 }
 
 // ─── Main command handler ─────────────────────────────────────────────────────
-async function handleMessage(chatId, text, from) {
+async function handleMessage(chatId, text, from, meta = {}) {
   const cleanText = text.trim().startsWith('/') ? text.trim().slice(1) : text.trim();
   const parts     = cleanText.split(/\s+/);
   // "/buy@MyBot SOL 1" (group chats) → "buy"
@@ -198,6 +211,7 @@ async function handleMessage(chatId, text, from) {
 
     const approved = await isApproved(chatId);
     if (approved) {
+      if (param === 'paid' || param === 'payfailed') { await handleSubscribe(chatId, ['check']); return; }
       await send(chatId, [
         `👋 *Welcome back!*`,
         ``,
@@ -254,6 +268,20 @@ async function handleMessage(chatId, text, from) {
       } else {
         await send(chatId, `⏳ Your request is pending admin approval. Please wait.`);
       }
+      return;
+    }
+
+    // Paid access: an ended subscription only allows paying, help and closing positions
+    const menuText = text.trim() === '📋 MENU' || text.trim() === '🖥 My Dashboard';
+    if (!FREE_COMMANDS.has(cmd) && !menuText && !(await subs.hasAccess(chatId))) {
+      await send(chatId, [
+        `🔒 *Your subscription has ended.*`,
+        ``,
+        `Renew to use the bot again — ${subs.priceLabel()}:`,
+        `\`subscribe you@example.com\` (your email is for the Paystack receipt)`,
+        ``,
+        `\`account\` shows your status.`,
+      ].join('\n'));
       return;
     }
   }
@@ -359,6 +387,32 @@ async function handleMessage(chatId, text, from) {
       return;
     }
 
+    if (cmd === 'grant' && isChatId(parts[1])) {
+      const days = parseInt(parts[2], 10) || subs.plan().days;
+      const until = await subs.extend(parts[1], days, { grantedBy: chatId });
+      await reply(chatId, `🎁 Gave \`${parts[1]}\` ${days} days — active until ${new Date(until).toUTCString()}.`);
+      await send(parts[1], `🎁 *You've been given ${days} days of access* — active until ${new Date(until).toUTCString()}.`).catch(() => {});
+      return;
+    }
+
+    if (cmd === 'revoke' && isChatId(parts[1])) {
+      await subs.revoke(parts[1]);
+      await reply(chatId, `⛔ Subscription for \`${parts[1]}\` ended now.`);
+      return;
+    }
+
+    if (cmd === 'subs' || cmd === 'subscribers') {
+      const list = await subs.listSubscribers();
+      const lines = [`💳 *Subscriptions* — paid access is ${subs.enabled() ? '*ON*' : '*OFF* (set PAID_ACCESS_ENABLED=true)'} · ${subs.priceLabel()}`, ``];
+      for (const { user, sub } of list) {
+        lines.push(`${sub.active ? '🟢' : '⚪'} ${nameOf(user)} — ${sub.active ? `until ${new Date(sub.paidUntil).toUTCString()} (${sub.daysLeft}d)` : sub.paidUntil ? 'ended' : 'never paid'}`);
+      }
+      if (!list.length) lines.push('No approved users yet.');
+      lines.push('', '`grant ID DAYS` · `revoke ID`');
+      await replyChunked(chatId, lines.join('\n'));
+      return;
+    }
+
     // Only treat `remove <numeric chat id>` as user removal; `remove SOL`
     // falls through to the position-removal command below.
     if (cmd === 'remove' && isChatId(parts[1])) {
@@ -371,6 +425,41 @@ async function handleMessage(chatId, text, from) {
   // ── MENU ─────────────────────────────────────────────────────────────────
   if (cmd === 'menu' || text.trim() === '📋 MENU') {
     await send(chatId, `*What would you like to do?*\n\nTap a button below:`, INLINE_MENU);
+    return;
+  }
+
+  // ── DASHBOARD (personal login link) ────────────────────────────────────
+  if (cmd === 'dashboard' || cmd === 'web' || text.trim() === '🖥 My Dashboard') {
+    if ((parts[1] || '').toLowerCase() === 'logout') {
+      await revokeAll(chatId);
+      await reply(chatId, `🔒 All your dashboard links are now signed out. Send /dashboard for a new one.`);
+      return;
+    }
+    const link = await dashboardLink(chatId);
+    await send(chatId, [
+      `🖥 *Your personal dashboard*`,
+      ``,
+      `Live P&L on every position, your stops and targets, trade history, and buttons to add, update or close positions.`,
+      ``,
+      `🔐 This link logs you in — *don't share it*. It works for 30 days.`,
+      `Lost it or shared it by mistake? Send \`dashboard logout\` to sign out everywhere.`,
+    ].join('\n'), { inline_keyboard: [[{ text: '🖥 Open my dashboard', url: link }]] });
+    return;
+  }
+
+  // ── SUBSCRIPTION (paid access) ───────────────────────────────────────────
+  if (cmd === 'subscribe' || cmd === 'renew' || cmd === 'pay') {
+    await handleSubscribe(chatId, parts.slice(1));
+    return;
+  }
+  if (cmd === 'account' || cmd === 'subscription' || cmd === 'plan') {
+    await handleSubscribe(chatId, ['status']);
+    return;
+  }
+
+  // ── AUTOTRADE (automated exits on the user's Binance account) ───────────
+  if (cmd === 'autotrade' || cmd === 'autoexit' || cmd === 'autoexits') {
+    await handleAutotrade(chatId, parts.slice(1), meta);
     return;
   }
 
@@ -391,9 +480,17 @@ async function handleMessage(chatId, text, from) {
       `\`buy SOL 92.50 5x\` — alert at 5X`,
       `\`sell SOL\` — remove after you exit`,
       `\`positions\` — view all open trades`,
+      `\`dashboard\` — open your personal web dashboard`,
       `\`check SOL\` — instant advice`,
       `\`buy SOL 92.50 2x sl 88\` — buy with your own stop`,
+      `\`buy PEPE 0.0000098 ex mexc\` — coin on another exchange`,
+      `   (Binance, Bybit, OKX, Gate, MEXC, KuCoin, Kraken)`,
       `\`setstop SOL 90\` — change your stop`,
+      ``,
+      subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : '',
+      subs.enabled() ? `` : '',
+      `━━━ *AUTOMATED EXITS (optional)* ━━━`,
+      `\`autotrade\` — let the bot place your stops and take-profits on Binance`,
       ``,
       `━━━ *AUTO ALERTS* ━━━`,
       `🔴 Stop Loss | 🟢 TP1/TP2/TP3`,
@@ -562,6 +659,15 @@ async function handleMessage(chatId, text, from) {
     const buyPrice  = parseFloat(parts[2]);
     let quantity = null, targetMultiple = null, targetPct = null;
 
+    // Optional exchange anywhere after the price: "ex mexc", "on mexc", "@mexc" or just "mexc"
+    let wantedExchange = null;
+    for (let k = 3; k < parts.length; k++) {
+      const t = String(parts[k]).toLowerCase();
+      if ((t === 'ex' || t === 'on') && normaliseExchange(parts[k + 1])) { wantedExchange = normaliseExchange(parts[k + 1]); parts.splice(k, 2); k--; continue; }
+      const bare = normaliseExchange(t.replace(/^@/, ''));
+      if (bare) { wantedExchange = bare; parts.splice(k, 1); k--; }
+    }
+
     // Optional custom stop anywhere after the price: "sl 95", "sl95", "stop=95"
     let userStop = null;
     for (let k = 3; k < parts.length; k++) {
@@ -620,7 +726,15 @@ async function handleMessage(chatId, text, from) {
     // Count existing entries BEFORE adding (old code counted after → off by one)
     const existing = await getPositionsBySymbol(chatId, symbol);
     const entryNum = existing.length + 1;
-    const newPos   = await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple, stopLossPrice: userStop });
+    // Find where this coin trades (the exchange you named, or auto-detect)
+    const found = await resolveExchange(symbol, wantedExchange);
+    if (!found) {
+      await reply(chatId, wantedExchange
+        ? `❌ ${symbol.replace('USDT', '')}/USDT isn't available on ${PROVIDERS[wantedExchange].name}. Check the ticker, or try another exchange.`
+        : `❌ Couldn't find ${symbol.replace('USDT', '')}/USDT on ${EXCHANGE_LIST}.\nCheck the ticker. If it trades elsewhere, the bot can't track it yet.`);
+      return;
+    }
+    const newPos   = await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple, stopLossPrice: userStop, exchange: found.exchange });
 
     // Build a human-friendly target label e.g. "10% profit" or "2X"
     const targetLabel = targetPct != null
@@ -633,6 +747,7 @@ async function handleMessage(chatId, text, from) {
       existing.length > 0 ? `📌 _You now have ${entryNum} separate entries for ${symbol}_` : '',
       ``,
       `💰 *Buy Price:* \`$${buyPrice}\``,
+      `📍 *Prices from:* ${found.name}${wantedExchange ? '' : ' (auto-detected; add "ex mexc" etc. to choose)'}`,
       quantity    ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
       targetLabel ? `🎯 *Target:*   ${targetLabel} = \`$${targetPrice.toFixed(6)}\`` : '',
       userStop    ? `🛡 *Your stop:* \`$${userStop}\` (${(((buyPrice - userStop) / buyPrice) * 100).toFixed(2)}% below entry)` : '',
@@ -644,7 +759,7 @@ async function handleMessage(chatId, text, from) {
     // This is what actually starts the alerts. Without this, you'd wait
     // up to 30 mins for the cron to notice the new position.
     try {
-      const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol);
+      const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol, { exchange: found.exchange });
 
       const advice = buildAdvice({
         symbol, buyPrice, currentPrice, candles1h, candles4h,
@@ -660,6 +775,8 @@ async function handleMessage(chatId, text, from) {
           initialStopPrice: plan.stopLossPrice,
           ...(userStop ? { stopSource: 'user', stopStage: 'user' } : { stopSource: 'atr', stopStage: 'initial' }),
         });
+        // Automated exits on → put the stop order on Binance now (sends its own message)
+        await autoTrader.sync(chatId, newPos.positionId, { price: found.exchange === 'binance' ? currentPrice : null }).catch(() => null);
       }
 
       const sl  = advice.tradePlan?.stopLoss;
@@ -791,7 +908,7 @@ async function handleMessage(chatId, text, from) {
     }
 
     const pos = targets[0];
-    const live = await fetchPrice(pos.symbol);
+    const live = await fetchPrice(pos.symbol, { exchange: pos.exchange || null });
     if (live && price >= live) {
       await reply(chatId, `❌ A stop must be below the current price (\`$${live}\`). For an immediate exit, just sell on your exchange.`);
       return;
@@ -807,6 +924,7 @@ async function handleMessage(chatId, text, from) {
       ``,
       `The 10-minute price check will alert you if it's hit.`,
     ].filter(Boolean).join('\n'));
+    await autoTrader.sync(chatId, pos.positionId).catch(() => null); // moves the Binance stop order if auto-exits are on
     return;
   }
 
@@ -853,7 +971,7 @@ async function handleMessage(chatId, text, from) {
     for (const [symbol, coinEntries] of Object.entries(grouped)) {
       if (coinEntries.length === 1) {
         const pos = coinEntries[0];
-        lines.push(`*${symbol}*`);
+        lines.push(`*${symbol}*${pos.exchange ? ` · ${PROVIDERS[pos.exchange]?.name || pos.exchange}` : ''}`);
         lines.push(`  Entry: \`$${pos.buyPrice}\``);
         if (pos.quantity)       lines.push(`  Qty: ${pos.quantity}`);
         if (pos.targetMultiple) lines.push(`  Target: ${pos.targetMultiple}X = \`$${pos.targetPrice?.toFixed(6)}\``);
@@ -891,10 +1009,13 @@ async function handleMessage(chatId, text, from) {
     await reply(chatId, `🔍 Checking *${symbol}* (${entries.length} entr${entries.length > 1 ? 'ies' : 'y'})...`);
 
     try {
-      const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol);
-
+      // Entries can be on different exchanges: fetch each exchange once
+      const marketByEx = {};
       for (let i = 0; i < entries.length; i++) {
         const pos    = entries[i];
+        const exKey  = pos.exchange || '';
+        marketByEx[exKey] = marketByEx[exKey] || await fetchCurrentData(symbol, { exchange: pos.exchange || null });
+        const { candles1h, candles4h, currentPrice } = marketByEx[exKey];
         const lockedPlan = pos.stopLossPrice ? { stopLoss: pos.stopLossPrice, takeProfits: pos.takeProfits || null } : null;
         const advice = buildAdvice({ symbol, buyPrice: pos.buyPrice, currentPrice, candles1h, candles4h, lockedPlan });
         if (!lockedPlan) {
@@ -1386,6 +1507,165 @@ async function handleMessage(chatId, text, from) {
   await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.`);
 }
 
+// ─── Paid access: subscribe / check / status ─────────────────────────────────
+async function handleSubscribe(chatId, args) {
+  const sub = (args[0] || '').toLowerCase();
+  const fmtDate = (iso) => new Date(iso).toUTCString();
+
+  if (sub === 'check') {
+    const s = await subs.getSub(chatId);
+    if (s.lastRef) {
+      try {
+        const r = await subs.confirmPayment(s.lastRef);
+        if (r.credited) { await subs.notifyCredited(r); return; }
+        if (!r.already && !s.active) {
+          await reply(chatId, `⏳ Paystack hasn't confirmed your payment yet (${esc(r.reason || 'pending')}). If you've paid, send \`subscribe check\` again in a minute.`);
+          return;
+        }
+      } catch (err) {
+        await reply(chatId, `⚠️ Couldn't check with Paystack right now: ${esc(err.message)}`);
+        return;
+      }
+    }
+    return handleSubscribe(chatId, ['status']);
+  }
+
+  if (sub === 'status' || (!sub && !subs.enabled())) {
+    const st = await subs.status(chatId);
+    await reply(chatId, [
+      `💳 *Your account*`,
+      ``,
+      !st.required ? (st.isAdmin ? `👑 Admin — free access.` : `✅ Access is free on this bot right now.`)
+        : st.active ? `🟢 Active until *${fmtDate(st.paidUntil)}* (${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left)`
+        : st.paidUntil ? `🔒 Ended on ${fmtDate(st.paidUntil)}` : `🔒 No subscription yet`,
+      st.required ? `` : '',
+      st.required ? `Price: ${st.price}` : '',
+      st.required ? `Renew any time with \`subscribe\` — time is added to what you have left.` : '',
+    ].filter(x => x !== '').join('\n'));
+    return;
+  }
+
+  if (!subs.enabled()) { await reply(chatId, `✅ Access is free on this bot right now — nothing to pay.`); return; }
+  if (isAdmin(chatId)) { await reply(chatId, `👑 You're the admin — you never pay.`); return; }
+
+  try {
+    const link = await subs.startCheckout(chatId, { email: args[0], callbackUrl: `${baseUrl()}/paid` });
+    await send(chatId, [
+      `💳 *Subscribe — ${link.price}*`,
+      ``,
+      `Tap the button to pay securely with Paystack (card, bank transfer or USSD).`,
+      `When it's done you'll be brought back here and your access starts straight away.`,
+      ``,
+      `_Paid but nothing happened? Send_ \`subscribe check\`.`,
+    ].join('\n'), { inline_keyboard: [[{ text: `💳 Pay ${link.price}`, url: link.url }]] });
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof subs.PaymentError ? err.message : `Couldn't start the payment: ${esc(err.message)}`}`);
+  }
+}
+
+// ─── Automated exits: connect / on / off / status ────────────────────────────
+async function handleAutotrade(chatId, args, meta = {}) {
+  const sub = (args[0] || '').toLowerCase();
+
+  if (sub === 'connect') {
+    // The message holds an API secret: delete it from the chat first
+    if (meta.messageId) await tg.call('deleteMessage', { chat_id: chatId, message_id: meta.messageId }).catch(() => {});
+    const live = (args[1] || '').toLowerCase() === 'live';
+    const [apiKey, apiSecret] = live ? args.slice(2) : args.slice(1);
+    if (!apiKey || !apiSecret) {
+      await reply(chatId, [
+        `❌ *Format:* \`autotrade connect API_KEY API_SECRET\` (test mode)`,
+        `or \`autotrade connect live API_KEY API_SECRET\` (real money)`,
+        ``,
+        `_I deleted your message so the keys don't stay in this chat._`,
+      ].join('\n'));
+      return;
+    }
+    try {
+      const s = await accounts.connect(chatId, { apiKey, apiSecret, live });
+      await reply(chatId, [
+        `🔐 *Binance ${s.testnet ? 'TESTNET (fake money)' : 'LIVE (real money)'} connected* — key ${s.keyHint}`,
+        `_I deleted your message; the keys are stored encrypted._`,
+        ``,
+        `Auto-exits are still *OFF*. Turn them on with:`,
+        s.testnet ? `\`autotrade on\`` : `\`autotrade on ${accounts.LIVE_CONFIRM}\``,
+      ].join('\n'));
+    } catch (err) {
+      await reply(chatId, `❌ ${err instanceof accounts.TradingError ? err.message : `Couldn't connect: ${err.message}`}\n\n_I deleted your message so the keys don't stay in this chat._`);
+    }
+    return;
+  }
+
+  try {
+    if (sub === 'on') {
+      const s = await accounts.setEnabled(chatId, true, { confirmLive: args.slice(1).join(' ') });
+      await reply(chatId, [
+        `🤖 *Auto-exits ON* — Binance ${s.testnet ? 'testnet (fake money)' : '*LIVE (real money)*'}${s.dryRun ? ' — DRY RUN, no real orders' : ''}`,
+        ``,
+        `For each Binance position that has a quantity, the bot now:`,
+        `  🛡 keeps a stop order on Binance at your saved stop`,
+        `  🟢 sells 40% at TP1, 35% at TP2 and the rest at TP3`,
+        `  🎯 sells 60% at your own target`,
+        `  🔴 sells the rest if the stop is hit`,
+        `It never buys. \`sell SOL\` or Remove cancels the stop order without selling.`,
+        ``,
+        `⏳ Placing your stop orders now…`,
+      ].join('\n'));
+      const results = await autoTrader.syncUser(chatId);
+      if (!results.length) await reply(chatId, `ℹ️ No eligible positions yet. Add one with a quantity on Binance, e.g. \`buy SOL 92.50 2\`.`);
+      return;
+    }
+
+    if (sub === 'off') {
+      await accounts.setEnabled(chatId, false);
+      const n = await autoTrader.cancelAll(chatId);
+      await reply(chatId, `⏸ *Auto-exits OFF.* ${n ? `Cancelled ${n} stop order${n === 1 ? '' : 's'} on Binance.` : ''} Your alerts carry on as before — you sell by hand.`);
+      return;
+    }
+
+    if (sub === 'disconnect') {
+      const n = await autoTrader.cancelAll(chatId);
+      await accounts.removeKeys(chatId);
+      await reply(chatId, `🔓 *Binance disconnected.* Keys deleted${n ? `, ${n} stop order${n === 1 ? '' : 's'} cancelled` : ''}. You can also delete the API key on Binance.`);
+      return;
+    }
+
+    if (sub === 'resume' && args[1]) {
+      const entries = await getPositionsBySymbol(chatId, normaliseSymbol(args[1]));
+      for (const p of entries) await autoTrader.resume(chatId, p.positionId);
+      await reply(chatId, entries.length ? `▶️ Auto-exits resumed for ${entries[0].symbol}.` : `⚠️ No ${normaliseSymbol(args[1])} positions.`);
+      return;
+    }
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof accounts.TradingError ? err.message : err.message}`);
+    return;
+  }
+
+  // Status + how-to
+  const s = await accounts.getStatus(chatId);
+  await reply(chatId, [
+    `🤖 *Automated exits*`,
+    ``,
+    !s.encryptionReady ? `⚠️ Not set up on this bot yet (admin: add TRADING_ENCRYPTION_KEY in Vercel).` : '',
+    s.connected
+      ? `Account: Binance ${s.testnet ? 'testnet (fake money)' : '*LIVE (real money)*'} · key ${s.keyHint}\nStatus: ${s.enabled ? '🟢 ON' : '⚪ OFF'}${s.dryRun ? ' · DRY RUN' : ''}`
+      : `Status: not connected`,
+    s.lastError ? `Last problem: _${esc(s.lastError)}_` : '',
+    ``,
+    `*What it does:* sells for you on Binance at your stop and take-profits. It *never buys* and can't withdraw.`,
+    ``,
+    `*Set up (test mode first):*`,
+    `1. Get free testnet keys at https://testnet.binance.vision (log in with GitHub → Generate HMAC key)`,
+    `2. Send \`autotrade connect API_KEY API_SECRET\``,
+    `3. Send \`autotrade on\``,
+    ``,
+    `*Real money:* create a Binance API key with *Spot trading ON and withdrawals OFF* (keys that can withdraw are refused), then \`autotrade connect live KEY SECRET\` and \`autotrade on ${accounts.LIVE_CONFIRM}\`.`,
+    ``,
+    `\`autotrade off\` — stop (cancels the bot's stop orders)`,
+    `\`autotrade disconnect\` — delete your keys`,
+  ].filter(Boolean).join('\n'));
+}
+
 // ─── Process one Telegram update ─────────────────────────────────────────────
 async function handleUpdate(body) {
   // ── Button taps ─────────────────────────────────────────────────────────
@@ -1424,8 +1704,10 @@ async function handleUpdate(body) {
   const { message } = body;
   if (!message || !message.text) return;
   const chatId = message.chat?.id?.toString();
-  console.log(`[Webhook] From ${chatId}: ${message.text.slice(0, 80)}`);
-  await handleMessage(chatId, message.text, message.from);
+  // Never log API keys sent with `autotrade connect`
+  const logText = /^\/?auto(trade|exits?)(@\w+)?\s+connect/i.test(message.text.trim()) ? 'autotrade connect [redacted]' : message.text.slice(0, 80);
+  console.log(`[Webhook] From ${chatId}: ${logText}`);
+  await handleMessage(chatId, message.text, message.from, { messageId: message.message_id });
 }
 
 /** Telegram re-sends an update if we're slow; process each update_id once. */

@@ -8,13 +8,13 @@ It **only gives advice and never places trades**.
 - **Moonshots / listings:** small-cap gainers from KuCoin and Binance, with CoinGecko data and a 7-factor heuristic score.
 - **Telegram bot:** new users wait for admin approval. Users log trades (`buy SOL 92.5 2x`) and the bot monitors them.
 - **Monitors:** stop-loss, take-profit, target and milestone alerts, sent to each user's own chat.
-- **Dashboard:** `/dashboard`.
+- **Dashboard:** `/dashboard`. Send `/dashboard` to the bot for a private login link; you'll see your real positions with live P&L, and can add, update or close them.
 
 ## Setup
 
 1. Deploy to Vercel. Add the variables from `.env.example`, at least `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CRON_SECRET`, `TELEGRAM_WEBHOOK_SECRET` and the two `UPSTASH_*` values.
 2. Open `https://crptotradingbot.vercel.app/api/set-commands?key=YOUR_CRON_SECRET` once. This registers the command menu **and** the webhook with its secret token.
-3. Optionally, open `/api/telegram-test?key=YOUR_CRON_SECRET` to check the setup.
+3. Optionally, open `/api/health?key=YOUR_CRON_SECRET` to check the setup.
 4. Point your cron jobs (for example cron-job.org) at the endpoints below and **add `?key=YOUR_CRON_SECRET`** to each URL.
 
 ## Endpoints
@@ -29,9 +29,8 @@ It **only gives advice and never places trades**.
 | `/api/v2moonshot` | every 30 min | yes | Sends high-score moonshots to the admin |
 | `/api/v2advice?symbol=SOLUSDT&buyPrice=150&account=1000&risk=1` | – | no | Exit advice for one position (read-only) |
 | `/api/backtest` | – | no | Saved backtest results of the live strategy (`data/strategy-stats.json`) |
-| `/api/signal` | – | for alerts | Legacy endpoint (same output as v2scan) |
 | `/api/health` | optional (uptime monitor) | yes | Checks every data source, Upstash and Telegram from Vercel |
-| `/api/set-commands`, `/api/telegram-test` | once | always | Admin setup and diagnostics |
+| `/api/set-commands` | once | always | Registers the bot menu and webhook |
 | `/api/telegram-webhook` | – | Telegram secret header | Bot updates |
 
 "Key" means `?key=CRON_SECRET` or the header `Authorization: Bearer CRON_SECRET`.
@@ -39,9 +38,13 @@ If `CRON_SECRET` is not set, endpoints stay open (with a warning in the logs) so
 
 ## Telegram commands
 
-`buy SOL 92.50 [qty] [2x|10%] [sl 88]` · `setstop SOL 90` · `sell SOL` · `sold SOL 92.50 110 [qty]` (records the trade for `profit`) · `positions` · `check SOL` · `profit` · `split 50` · `scan` · `newlistings` · `menu` · `help`
+`buy SOL 92.50 [qty] [2x|10%] [sl 88] [ex mexc]` · `setstop SOL 90` · `sell SOL` · `sold SOL 92.50 110 [qty]` (records the trade for `profit`) · `positions` · `check SOL` · `profit` · `split 50` · `scan` · `newlistings` · `menu` · `help`
 
-Admin: `pending` · `users` · `approve ID` · `block ID` · `remove ID` · `invite`
+Automated exits (optional, Binance): `autotrade` · `autotrade connect KEY SECRET` · `autotrade on` · `autotrade off` · `autotrade disconnect` · `autotrade resume SOL`
+
+Paid access (when PAID_ACCESS_ENABLED=true): `account` · `subscribe you@example.com` · `subscribe check`
+
+Admin: `pending` · `users` · `approve ID` · `block ID` · `remove ID` · `invite` · `subs` · `grant ID DAYS` · `revoke ID`
 
 ## Local use
 
@@ -62,11 +65,17 @@ api/                  Vercel functions (one per endpoint)
 src/lib/              Shared building blocks: telegram, redis, market data, auth
 src/services/         scanEngine (live strategy), strategyBacktest + strategyStats,
                       adviceService, positionStore, userService, profitTracker,
-                      listings/probability, risk
+                      listings/probability, risk, portfolioService (dashboard),
+                      tradingAccounts + autoTrader (automated exits),
+                      subscriptionService (paid access, Paystack)
 data/                 strategy-stats.json (saved backtest summary, shown in alerts)
 public/               Landing page + dashboard
 test/                 node:test suite (no network)
 ```
+
+## Vercel Hobby limit
+
+The free Hobby plan allows **12 functions** per deployment, and each file in `api/` counts as one. There are 12 now (the maximum); new features are added as actions in `api/app.js`. Before adding a new endpoint, merge or remove one, or the deployment will fail.
 
 ## Known limitations (not changed in this upgrade)
 

@@ -29,13 +29,17 @@
  */
 
 const { getAllPositions, updatePosition } = require('../src/services/positionStore');
-const { getAllActiveChatIds } = require('../src/services/userService');
+const subs = require('../src/services/subscriptionService');
 const { fetchCurrentData, buildAdvice } = require('../src/services/adviceService');
 const tg = require('../src/lib/telegram');
 const store = require('../src/lib/redis');
 const { mapLimit } = require('../src/lib/concurrency');
 const { stopAfterTakeProfit, stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
+const autoTrader = require('../src/services/autoTrader');
+
+const AUTO_NOTE = `🤖 _Auto-exits are on — the bot places this on Binance for you. Don't also sell by hand._`;
+const SELL_EVENTS = /^(TP[123]|STOP_LOSS|TARGET_HIT)/;
 
 const HOLD_INTERVAL_HOURS = 4;
 const MILESTONE_STEP = 10;
@@ -272,12 +276,13 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
   return { recommendation: 'HOLD', alerted: false, updates, messages };
 }
 
-async function checkPosition(pos, ownerChatId, market) {
+async function checkPosition(pos, ownerChatId, market, { auto = false } = {}) {
   const result = evaluatePosition(pos, market);
   const chatId = ownerChatId || pos.chatId;
+  const autoNote = auto && autoTrader.eligible(pos) && SELL_EVENTS.test(result.recommendation);
 
   for (const m of result.messages) {
-    await tg.send(chatId, m.text, { silent: m.silent });
+    await tg.send(chatId, autoNote ? `${m.text}\n\n${AUTO_NOTE}` : m.text, { silent: m.silent });
   }
 
   // Field-level write: can't overwrite flags set at the same time by quickcheck
@@ -287,7 +292,11 @@ async function checkPosition(pos, ownerChatId, market) {
     lastRecommendation: result.recommendation,
   });
 
-  return { recommendation: result.recommendation, alerted: result.alerted };
+  // Automated exits: make Binance match the (possibly just updated) plan
+  let autoResult = null;
+  if (auto) autoResult = await autoTrader.sync(chatId, pos.positionId, { price: market.currentPrice });
+
+  return { recommendation: result.recommendation, alerted: result.alerted, ...(autoResult ? { auto: autoResult.actions, autoError: autoResult.error } : {}) };
 }
 
 const SYMBOL_CONCURRENCY = 4;
@@ -304,31 +313,43 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const userIds = await getAllActiveChatIds();
+    // Paid access: renewal reminders, and only users with access are monitored
+    const reminders = await subs.sendReminders((id, text) => tg.send(id, text)).catch(err => ({ error: err.message }));
+    const userIds = await subs.getChatIdsWithAccess();
     const jobs = [];
+    const autoOn = new Map();
     for (const userId of userIds) {
-      for (const pos of Object.values(await getAllPositions(userId))) jobs.push({ userId, pos });
+      const positions = Object.values(await getAllPositions(userId));
+      for (const pos of positions) jobs.push({ userId, pos });
+      const on = await autoTrader.isOn(userId);
+      autoOn.set(String(userId), on);
+      // Stop orders whose position was removed → cancel them
+      await autoTrader.sweepOrphans(userId, positions.map(p => p.positionId)).catch(() => 0);
     }
     if (jobs.length === 0) {
-      return res.status(200).json({ success: true, message: 'No open positions across any users' });
+      return res.status(200).json({ success: true, message: 'No open positions across any users', reminders });
     }
 
-    // Fetch market data ONCE per coin (not once per position), a few coins in parallel
+    // Fetch market data ONCE per coin+exchange (not once per position), a few in parallel
     const bySymbol = new Map();
-    for (const j of jobs) (bySymbol.get(j.pos.symbol) || bySymbol.set(j.pos.symbol, []).get(j.pos.symbol)).push(j);
+    for (const j of jobs) {
+      const key = `${j.pos.symbol}|${j.pos.exchange || ''}`;
+      (bySymbol.get(key) || bySymbol.set(key, []).get(key)).push(j);
+    }
 
     const results = [];
-    await mapLimit([...bySymbol.entries()], SYMBOL_CONCURRENCY, async ([symbol, list]) => {
+    await mapLimit([...bySymbol.entries()], SYMBOL_CONCURRENCY, async ([key, list]) => {
+      const [symbol, exchange] = key.split('|');
       let market;
       try {
-        market = await fetchCurrentData(symbol);
+        market = await fetchCurrentData(symbol, { exchange: exchange || null });
       } catch (err) {
         for (const { userId } of list) results.push({ userId, symbol, error: `market data: ${err.message}` });
         return;
       }
       for (const { userId, pos } of list) {
         try {
-          results.push({ userId, symbol, ...(await checkPosition(pos, userId, market)) });
+          results.push({ userId, symbol, ...(await checkPosition(pos, userId, market, { auto: autoOn.get(String(userId)) })) });
         } catch (err) {
           console.error(`[Monitor] ${userId}/${symbol}:`, err.message);
           results.push({ userId, symbol, error: err.message });
@@ -341,6 +362,7 @@ module.exports = async (req, res) => {
       checked:   results.length,
       symbols:   bySymbol.size,
       results,
+      reminders,
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {

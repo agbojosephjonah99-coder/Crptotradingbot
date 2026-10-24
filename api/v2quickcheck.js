@@ -19,6 +19,8 @@ const store = require('../src/lib/redis');
 const { mapLimit } = require('../src/lib/concurrency');
 const { stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
+const autoTrader = require('../src/services/autoTrader');
+const { getChatIdsWithAccess } = require('../src/services/subscriptionService');
 
 const APPROACH_PCT = 5;
 
@@ -116,25 +118,34 @@ module.exports = async (req, res) => {
 
   try {
     const positions = await getAllUsersPositions();
+    // Only approved users (and paying ones, when paid access is on)
+    const allowed = new Set(await getChatIdsWithAccess());
     const active = positions.filter(p =>
-      !p.targetHit && !p.stopLossHit && (p.targetPrice || p.stopLossPrice)
+      allowed.has(String(p.chatId)) && !p.targetHit && !p.stopLossHit && (p.targetPrice || p.stopLossPrice)
     );
 
     if (active.length === 0) {
       return res.status(200).json({ success: true, message: 'No active targets to check', checkedAt: new Date().toISOString() });
     }
 
-    // Group by symbol to avoid duplicate price fetches
+    // Group by coin + exchange to avoid duplicate price fetches
     const symbolMap = {};
-    for (const pos of active) (symbolMap[pos.symbol] = symbolMap[pos.symbol] || []).push(pos);
+    for (const pos of active) {
+      const key = `${pos.symbol}|${pos.exchange || ''}`;
+      (symbolMap[key] = symbolMap[key] || []).push(pos);
+    }
 
-    // Prices for all coins, 6 at a time
-    const symbols = Object.keys(symbolMap);
-    const prices = await mapLimit(symbols, 6, (sym) => fetchPrice(sym));
+    // Prices for all coins, 6 at a time, each from its position's own exchange
+    const keys = Object.keys(symbolMap);
+    const prices = await mapLimit(keys, 6, (key) => {
+      const [sym, exchange] = key.split('|');
+      return fetchPrice(sym, { exchange: exchange || null });
+    });
 
     const results = [];
-    for (const [k, symbol] of symbols.entries()) {
-      const list = symbolMap[symbol];
+    for (const [k, key] of keys.entries()) {
+      const list = symbolMap[key];
+      const symbol = key.split('|')[0];
       const currentPrice = prices[k];
       if (!currentPrice) { results.push({ symbol, error: 'Could not fetch price' }); continue; }
 
@@ -143,14 +154,17 @@ module.exports = async (req, res) => {
         if (!outcome) continue;
         await tg.send(pos.chatId, outcome.text);
         await updatePosition(pos.chatId, pos.positionId, outcome.updates);
-        results.push({ symbol, positionId: pos.positionId, event: outcome.event, price: currentPrice });
+        // Automated exits act straight away on a stop or target hit
+        const auto = outcome.event === 'APPROACHING_TARGET' ? null
+          : await autoTrader.sync(pos.chatId, pos.positionId, { price: currentPrice }).catch(err => ({ error: err.message }));
+        results.push({ symbol, positionId: pos.positionId, event: outcome.event, price: currentPrice, ...(auto ? { auto: auto.actions, autoError: auto.error } : {}) });
       }
     }
 
     return res.status(200).json({
       success:   true,
       checked:   active.length,
-      symbols:   Object.keys(symbolMap).length,
+      symbols:   keys.length,
       alerts:    results.filter(r => r.event),
       errors:    results.filter(r => r.error),
       checkedAt: new Date().toISOString(),

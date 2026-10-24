@@ -258,7 +258,7 @@ async function sendPositionAlert(position, advice, overrideChatId) {
   await sendAction(lines, chatId);
 }
 
-// ─── sendSignalAlert — used by liveService / api/signal ──────────────────────
+// ─── sendSignalAlert — used by liveService (local runner) ──────────────────────
 async function sendSignalAlert(result) {
   if (!result) return;
   if (result.signal === 'BUY')           return sendBuyAlert(result);

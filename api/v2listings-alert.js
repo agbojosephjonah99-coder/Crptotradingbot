@@ -18,7 +18,7 @@
  */
 
 const { getMoonshots, getNewListingsWithMetadata } = require('../src/services/listingsService');
-const { getAllActiveChatIds } = require('../src/services/userService');
+const { getChatIdsWithAccess } = require('../src/services/subscriptionService');
 const store = require('../src/lib/redis');
 const tg = require('../src/lib/telegram');
 const { cors, requireCronKey } = require('../src/lib/auth');
@@ -51,7 +51,7 @@ async function broadcastListing(text) {
     return;
   }
   // Fallback: no info channel configured → send silently to every user
-  for (const chatId of await getAllActiveChatIds()) {
+  for (const chatId of await getChatIdsWithAccess()) {
     await tg.sendLong(chatId, text, { silent: true });
     await tg.sleep(300);
   }

@@ -16,12 +16,13 @@ const {
 } = require('./riskService');
 const { fetchKlinesWithSource, fetchPrice } = require('../lib/market');
 
-async function fetchCurrentData(symbol) {
+/** @param {object} [opts] opts.exchange — the position's exchange (no cross-exchange fallback) */
+async function fetchCurrentData(symbol, { exchange = null } = {}) {
   const sym = symbol.toUpperCase();
   const [h1, h4, livePrice] = await Promise.all([
-    fetchKlinesWithSource(sym, '1h', 100),
-    fetchKlinesWithSource(sym, '4h', 250),
-    fetchPrice(sym),
+    fetchKlinesWithSource(sym, '1h', 100, { exchange }),
+    fetchKlinesWithSource(sym, '4h', 250, { exchange }),
+    fetchPrice(sym, { exchange }),
   ]);
   const candles1h = h1.candles;
   if (!candles1h.length) throw new Error(`No price data for ${sym}`);

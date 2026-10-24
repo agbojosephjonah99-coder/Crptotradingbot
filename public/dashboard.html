@@ -367,6 +367,63 @@ body::before {
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+/* ─── Mobile fixes ─────────────────────────────────────────────────────── */
+.tabs { overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.cards-grid { grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); }
+@media (max-width: 640px) {
+  .app { padding: 0 16px 40px; }
+  .header { flex-wrap: wrap; gap: 12px; }
+  .header-status { gap: 10px; }
+}
+
+/* ─── Portfolio ────────────────────────────────────────────────────────── */
+.account-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; font-size: 12px; color: var(--text-dim); }
+.account-bar strong { color: var(--text); font-family: var(--sans); font-size: 14px; }
+.link-btn { background: none; border: none; color: var(--text-dim); font-family: var(--mono); font-size: 11px; cursor: pointer; text-decoration: underline; padding: 4px; }
+.link-btn:hover { color: var(--sell); }
+.pf-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); }
+.pf-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.pf-card.alert { border-color: var(--sell); box-shadow: 0 0 0 1px var(--sell-glow); }
+.pf-card.done { border-color: var(--buy); }
+.pf-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.pf-coin { font-family: var(--sans); font-size: 20px; font-weight: 700; color: #fff; }
+.pf-sub { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.pf-pnl { text-align: right; }
+.pf-pnl-pct { font-size: 20px; font-weight: 700; }
+.pf-pnl-usd { font-size: 11px; color: var(--text-dim); }
+.up { color: var(--buy); } .down { color: var(--sell); }
+.pf-status { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; background: var(--surface2); color: var(--text-dim); }
+.pf-status.bad { background: var(--sell-glow); color: var(--sell); }
+.pf-status.good { background: var(--buy-glow); color: var(--buy); }
+.pf-nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pf-num { background: var(--surface2); border-radius: var(--radius-sm); padding: 8px 10px; min-width: 0; }
+.pf-num-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
+.pf-num-value { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-bar { position: relative; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--sell-glow), var(--surface2) 30%, var(--buy-glow)); margin: 6px 0 18px; }
+.track-mark { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--text-muted); }
+.track-mark span { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); font-size: 9px; color: var(--text-muted); white-space: nowrap; }
+.track-mark.hit { background: var(--buy); } .track-mark.hit span { color: var(--buy); }
+.track-now { position: absolute; top: -5px; width: 12px; height: 18px; margin-left: -6px; border-radius: 3px; background: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.5); }
+.pf-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-sm { padding: 7px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border2); background: var(--surface2); color: var(--text); font-family: var(--mono); font-size: 11px; cursor: pointer; }
+.btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+.btn-sm.danger:hover { border-color: var(--sell); color: var(--sell); }
+.btn-sm.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.login-card { max-width: 520px; margin: 40px auto; text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px 24px; }
+.login-card h2 { font-family: var(--sans); color: #fff; margin-bottom: 10px; }
+.login-card p { font-size: 12px; color: var(--text-dim); line-height: 1.7; margin-bottom: 18px; }
+.login-card code { background: var(--surface2); padding: 2px 6px; border-radius: 4px; color: var(--text); }
+dialog.modal { margin: auto; border: 1px solid var(--border2); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 22px; width: min(420px, calc(100vw - 32px)); }
+dialog.modal::backdrop { background: rgba(0,0,0,0.6); }
+dialog.modal h3 { font-family: var(--sans); color: #fff; margin-bottom: 6px; }
+dialog.modal p { font-size: 11px; color: var(--text-dim); margin-bottom: 14px; line-height: 1.6; }
+dialog.modal .form-group { margin-bottom: 12px; }
+dialog.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+.hist-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.hist-table th, .hist-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+.hist-table th:first-child, .hist-table td:first-child { text-align: left; }
+.hist-table th { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
 </style>
 </head>
 <body>
@@ -395,14 +452,20 @@ body::before {
 
   <!-- Tabs -->
   <div class="tabs">
+    <div class="tab" onclick="switchTab('portfolio')" id="tab-portfolio">
+      💼 My Portfolio <span class="tab-badge" id="badge-portfolio">—</span>
+    </div>
+    <div class="tab" onclick="switchTab('history')" id="tab-history">
+      🧾 History
+    </div>
+    <div class="tab" onclick="switchTab('auto')" id="tab-auto">
+      🤖 Auto-exits
+    </div>
     <div class="tab active" onclick="switchTab('scanner')" id="tab-scanner">
       📡 Market Scanner <span class="tab-badge" id="badge-scanner">—</span>
     </div>
     <div class="tab" onclick="switchTab('listings')" id="tab-listings">
       🚀 New Listings <span class="tab-badge" id="badge-listings">—</span>
-    </div>
-    <div class="tab" onclick="switchTab('positions')" id="tab-positions">
-      💼 My Positions <span class="tab-badge" id="badge-positions">0</span>
     </div>
     <div class="tab" onclick="switchTab('track')" id="tab-track">
       📊 Track Record
@@ -447,45 +510,61 @@ body::before {
     </div>
   </div>
 
-  <!-- Positions Panel -->
-  <div class="panel" id="panel-positions">
-    <div class="position-form">
-      <div class="form-title">📌 Log a Buy</div>
-      <div class="form-sub">Saved in this browser only. Stop loss and targets are ATR-based. For 24/7 alerts, use <code>buy</code> in the Telegram bot.</div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Symbol</label>
-          <input class="form-input" id="pos-symbol" placeholder="e.g. SOLUSDT" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Buy Price ($)</label>
-          <input class="form-input" id="pos-buy" type="number" placeholder="e.g. 150.00" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Quantity (optional)</label>
-          <input class="form-input" id="pos-qty" type="number" placeholder="e.g. 10" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Account size $ (optional)</label>
-          <input class="form-input" id="pos-acct" type="number" placeholder="e.g. 1000" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Risk % per trade</label>
-          <input class="form-input" id="pos-risk" type="number" placeholder="1" value="1" />
-        </div>
-      </div>
-      <button class="btn-add" onclick="addPosition()">＋ Track Position</button>
-    </div>
-    <div id="positions-list">
-      <div class="state-empty">
-        <div style="font-size:32px;margin-bottom:12px">💼</div>
-        <div>No positions tracked yet.</div>
-        <div class="state-label">Use the form above to log a coin you bought.</div>
-      </div>
-    </div>
+  <!-- Portfolio Panel (the logged-in user's real positions) -->
+  <div class="panel" id="panel-portfolio">
+    <div id="portfolio-content"></div>
+  </div>
+
+  <!-- Automated exits Panel -->
+  <div class="panel" id="panel-auto">
+    <div id="auto-content"></div>
+  </div>
+
+  <!-- History Panel -->
+  <div class="panel" id="panel-history">
+    <div id="history-content"></div>
   </div>
 
 </div>
+
+<!-- Dialogs -->
+<dialog class="modal" id="dlg-add">
+  <form method="dialog" onsubmit="return submitAdd(event)">
+    <h3>Add a position</h3>
+    <p>Same as <code>buy</code> in the bot. Your stop and targets are set automatically, unless you enter your own stop.</p>
+    <div class="form-group"><label class="form-label" for="add-symbol">Coin</label><input class="form-input" id="add-symbol" placeholder="e.g. SOL" required autocomplete="off"></div>
+    <div class="form-group"><label class="form-label" for="add-exchange">Exchange</label>
+      <select class="form-input" id="add-exchange">
+        <option value="auto">Auto-detect (Binance first)</option>
+        <option value="binance">Binance</option><option value="bybit">Bybit</option><option value="okx">OKX</option>
+        <option value="gate">Gate</option><option value="mexc">MEXC</option><option value="kucoin">KuCoin</option><option value="kraken">Kraken (USD)</option>
+      </select></div>
+    <div class="form-group"><label class="form-label" for="add-price">Buy price ($)</label><input class="form-input" id="add-price" type="number" step="any" min="0" required></div>
+    <div class="form-group"><label class="form-label" for="add-qty">Quantity (optional — enables $ P&amp;L)</label><input class="form-input" id="add-qty" type="number" step="any" min="0"></div>
+    <div class="form-group"><label class="form-label" for="add-target">Target (optional, e.g. 2x or 25%)</label><input class="form-input" id="add-target" autocomplete="off"></div>
+    <div class="form-group"><label class="form-label" for="add-stop">Your stop loss (optional)</label><input class="form-input" id="add-stop" type="number" step="any" min="0"></div>
+    <div class="modal-actions"><button type="button" class="btn-sm" onclick="closeDlg('dlg-add')">Cancel</button><button class="btn-sm primary" type="submit">Add</button></div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-stop">
+  <form method="dialog" onsubmit="return submitStop(event)">
+    <h3>Change stop — <span id="stop-coin"></span></h3>
+    <p>Must be below the current price. The 10-minute check alerts you on Telegram when it's hit.</p>
+    <div class="form-group"><label class="form-label" for="stop-price">New stop price ($)</label><input class="form-input" id="stop-price" type="number" step="any" min="0" required></div>
+    <div class="modal-actions"><button type="button" class="btn-sm" onclick="closeDlg('dlg-stop')">Cancel</button><button class="btn-sm primary" type="submit">Save stop</button></div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-sold">
+  <form method="dialog" onsubmit="return submitSold(event)">
+    <h3>Record a sale — <span id="sold-coin"></span></h3>
+    <p>Saves the trade to your history and stops monitoring this position.</p>
+    <div class="form-group"><label class="form-label" for="sold-price">Price you sold at ($)</label><input class="form-input" id="sold-price" type="number" step="any" min="0" required></div>
+    <div class="form-group"><label class="form-label" for="sold-qty">Quantity sold (optional)</label><input class="form-input" id="sold-qty" type="number" step="any" min="0"></div>
+    <div class="modal-actions"><button type="button" class="btn-sm" onclick="closeDlg('dlg-sold')">Cancel</button><button class="btn-sm primary" type="submit">Record sale</button></div>
+  </form>
+</dialog>
 
 <!-- Toast container -->
 <div class="toast-container" id="toasts"></div>
@@ -494,6 +573,7 @@ body::before {
 // ─── State ──────────────────────────────────────────────────────────────────
 const BASE = '';  // Same origin — set to your Vercel URL in production if needed
 let countdownTimer = null;
+let SUB = null;
 let refreshInterval = 300; // 5 minutes
 let countdownSec = refreshInterval;
 
@@ -503,7 +583,9 @@ function switchTab(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.add('active');
   document.getElementById(`panel-${name}`).classList.add('active');
-  if (name === 'positions') renderPositions();
+  if (name === 'portfolio') loadPortfolio();
+  if (name === 'history') loadHistory();
+  if (name === 'auto') loadAuto();
   if (name === 'track') loadTrack();
 }
 
@@ -515,9 +597,12 @@ function esc(v) {
 
 function fmt(n, decimals = 4) {
   if (n == null || isNaN(n)) return '—';
+  n = Number(n);
   if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
   if (n >= 1)    return n.toFixed(Math.min(decimals, 4));
-  return n.toFixed(6);
+  if (n === 0)   return '0';
+  // Small prices: keep 4 significant digits (0.0000098 stays 0.000009800, not 0.000010)
+  return n.toFixed(Math.min(12, Math.max(4, 3 - Math.floor(Math.log10(Math.abs(n))))));
 }
 
 function fmtVol(n) {
@@ -785,179 +870,369 @@ function renderListingCard(l) {
   `;
 }
 
-// ─── Positions ────────────────────────────────────────────────────────────────
-function getPositions() {
-  try { return JSON.parse(localStorage.getItem('cb_positions') || '[]'); } catch { return []; }
-}
-function savePositions(positions) {
-  try { localStorage.setItem('cb_positions', JSON.stringify(positions)); } catch { /* private mode */ }
-  document.getElementById('badge-positions').textContent = positions.length;
-}
+// ─── Account (personal link from the bot) ────────────────────────────────────
+const BOT_USERNAME = 'JijazyBot';
+let TOKEN = null;
+let ME = null;
+let PORTFOLIO = null;
 
-function addPosition() {
-  const symbol   = document.getElementById('pos-symbol').value.trim().toUpperCase().replace(/\//, '');
-  const buyPrice = parseFloat(document.getElementById('pos-buy').value);
-  const qty      = parseFloat(document.getElementById('pos-qty').value) || null;
-  const acct     = parseFloat(document.getElementById('pos-acct').value) || null;
-  const risk     = parseFloat(document.getElementById('pos-risk').value) || 1;
-
-  if (!symbol || isNaN(buyPrice) || buyPrice <= 0) {
-    toast('Enter a valid symbol and buy price', 'error');
+function readToken() {
+  const m = location.hash.match(/(?:^#|&)t=([^&]+)/);
+  if (m) {
+    TOKEN = decodeURIComponent(m[1]);
+    try { localStorage.setItem('cb_token', TOKEN); } catch { /* private mode: keep in memory */ }
+    history.replaceState(null, '', location.pathname + location.search); // remove token from the address bar
     return;
   }
-  const sym = symbol.endsWith('USDT') ? symbol : symbol + 'USDT';
-  const positions = getPositions();
-  positions.push({ sym, buyPrice, qty, acct, risk, addedAt: Date.now(), advice: null, loading: false });
-  savePositions(positions);
-  toast(`Tracking ${sym} @ $${buyPrice}`, 'success');
-  switchTab('positions');
-  renderPositions();
+  try { TOKEN = localStorage.getItem('cb_token'); } catch { TOKEN = null; }
 }
 
-function removePosition(index) {
-  const positions = getPositions();
-  positions.splice(index, 1);
-  savePositions(positions);
-  renderPositions();
+function logout() {
+  try { localStorage.removeItem('cb_token'); } catch {}
+  TOKEN = null; ME = null; PORTFOLIO = null; SUB = null;
+  document.getElementById('badge-portfolio').textContent = '—';
+  loadPortfolio();
+  loadHistory();
 }
 
-async function fetchAdvice(pos, index) {
+async function api(action, body) {
+  const resp = await fetch(`${BASE}/api/app?action=${action}`, {
+    method: body ? 'POST' : 'GET',
+    headers: { Authorization: `Bearer ${TOKEN}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({ success: false, error: 'Bad response' }));
+  if (resp.status === 401) { logout(); throw new Error(data.error || 'Login expired'); }
+  if (!data.success) { const e = new Error(data.error || 'Request failed'); e.status = resp.status; throw e; }
+  return data.data;
+}
+
+function loginCard() {
+  return `<div class="login-card">
+    <div style="font-size:34px;margin-bottom:10px">🔐</div>
+    <h2>Your personal dashboard</h2>
+    <p>Open <a href="https://t.me/${BOT_USERNAME}" target="_blank" rel="noopener" style="color:var(--accent)">@${BOT_USERNAME}</a> in Telegram and send <code>/dashboard</code>.<br>
+    You'll get a private link that logs you in here — no password needed.</p>
+    <a class="btn-sm primary" style="text-decoration:none;display:inline-block" href="https://t.me/${BOT_USERNAME}" target="_blank" rel="noopener">Open the bot</a>
+  </div>`;
+}
+
+const money = (n) => n == null ? '—' : `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const signedPct = (n) => n == null ? '—' : `${n > 0 ? '+' : ''}${n.toFixed(2)}%`;
+const cls = (n) => n == null ? '' : n >= 0 ? 'up' : 'down';
+
+// ─── Portfolio ────────────────────────────────────────────────────────────────
+async function loadPortfolio(quiet = false) {
+  const box = document.getElementById('portfolio-content');
+  if (!TOKEN) { box.innerHTML = loginCard(); return; }
+  if (!quiet || !PORTFOLIO) box.innerHTML = `<div class="state-loading"><div class="spinner"></div><div class="state-label">Loading your positions…</div></div>`;
   try {
-    const params = new URLSearchParams({ symbol: pos.sym, buyPrice: pos.buyPrice });
-    if (pos.acct) params.set('account', pos.acct);
-    if (pos.risk) params.set('risk', pos.risk);
-    if (pos.qty)  params.set('qty', pos.qty);
-    const resp = await fetch(`${BASE}/api/v2advice?${params}`);
-    const data = await resp.json();
-    const positions = getPositions();
-    if (!positions[index]) return;
-    positions[index].loading = false;
-    if (data.success) positions[index].advice = data.advice;
-    else positions[index].error = data.error || 'Advice request failed';
-    savePositions(positions);
-    renderPositions();
+    if (!ME) ME = await api('me');
+    if (!SUB) SUB = await api('subscription').catch(() => null);
+    PORTFOLIO = await api('portfolio');
+    renderPortfolio();
   } catch (e) {
-    const positions = getPositions();
-    if (!positions[index]) return;
-    positions[index].loading = false;
-    positions[index].error = e.message;
-    savePositions(positions);
-    renderPositions();
+    box.innerHTML = !TOKEN ? loginCard() : e.status === 402 ? renewCard(e.message) : `<div class="state-empty"><div>⚠ ${esc(e.message)}</div></div>`;
   }
 }
 
-function renderPositions() {
-  const positions = getPositions();
-  const list = document.getElementById('positions-list');
-  document.getElementById('badge-positions').textContent = positions.length;
+// ─── Paid access ──────────────────────────────────────────────────────────────
+function renewCard(msg) {
+  return `<div class="login-card">
+    <div style="font-size:34px;margin-bottom:10px">💳</div>
+    <h2>Renew your subscription</h2>
+    <p>${esc(msg)}</p>
+    <form onsubmit="return startPay(event)" style="max-width:320px;margin:0 auto;text-align:left">
+      <div class="form-group"><label class="form-label" for="pay-email">Email for the receipt</label><input class="form-input" id="pay-email" type="email" required autocomplete="email"></div>
+      <button class="btn-sm primary" type="submit" style="width:100%">Pay with Paystack</button>
+    </form>
+  </div>`;
+}
+
+async function startPay(ev) {
+  ev.preventDefault();
+  try {
+    const { url } = await api('subscribe', { email: document.getElementById('pay-email').value.trim() });
+    window.location.href = url;
+  } catch (e) { toast(e.message, 'error'); }
+  return false;
+}
+
+function renderPortfolio() {
+  const { positions, totals } = PORTFOLIO;
+  document.getElementById('badge-portfolio').textContent = positions.length;
+  const box = document.getElementById('portfolio-content');
+  const head = `
+    <div class="account-bar">
+      <div>Signed in as <strong>${esc(ME?.name || 'Trader')}</strong>${ME?.username ? ` · @${esc(ME.username)}` : ''}${SUB?.required && SUB.active ? ` · <span class="track-note" style="display:inline">subscription: ${SUB.daysLeft} day${SUB.daysLeft === 1 ? '' : 's'} left</span>` : ''}</div>
+      <div><button class="btn-sm primary" onclick="openAdd()">＋ Add position</button> <button class="link-btn" onclick="logout()">Sign out</button></div>
+    </div>
+    <div class="stats-bar" style="display:flex">
+      <div class="stat"><div class="stat-label">Open positions</div><div class="stat-value">${totals.open}</div></div>
+      <div class="stat"><div class="stat-label">Invested</div><div class="stat-value">${money(totals.invested)}</div></div>
+      <div class="stat"><div class="stat-label">Value now</div><div class="stat-value">${money(totals.value)}</div></div>
+      <div class="stat"><div class="stat-label">Unrealised P&amp;L</div><div class="stat-value ${totals.unrealizedUsd >= 0 ? 'buy' : 'sell'}">${money(totals.unrealizedUsd)} <span style="font-size:11px">${totals.unrealizedPct == null ? '' : signedPct(totals.unrealizedPct)}</span></div></div>
+      ${totals.needsAction ? `<div class="stat"><div class="stat-label">Need action</div><div class="stat-value sell">${totals.needsAction}</div></div>` : ''}
+    </div>
+    ${totals.withoutQuantity ? `<div class="track-note" style="margin:-8px 0 14px">${totals.withoutQuantity} position(s) have no quantity, so they're not in the $ totals. Add a quantity next time (<code>buy SOL 150 2</code>).</div>` : ''}`;
 
   if (!positions.length) {
-    list.innerHTML = `<div class="state-empty"><div style="font-size:32px;margin-bottom:12px">💼</div><div>No positions tracked yet.</div><div class="state-label">Use the form above to log a coin you bought.</div></div>`;
+    box.innerHTML = head + `<div class="state-empty"><div style="font-size:32px;margin-bottom:12px">💼</div><div>No open positions.</div><div class="state-label">Add one here, or send <code>buy SOL 150</code> to the bot.</div></div>`;
     return;
   }
-
-  // Trigger advice fetch for positions that don't have it
-  let changed = false;
-  positions.forEach((pos, i) => {
-    if (!pos.advice && !pos.loading && !pos.error) {
-      pos.loading = true;
-      changed = true;
-      fetchAdvice(pos, i);
-    }
-  });
-  if (changed) savePositions(positions);
-
-  list.innerHTML = positions.map((pos, i) => renderPositionCard(pos, i)).join('');
+  box.innerHTML = head + `<div class="pf-grid">${positions.map(renderPfCard).join('')}</div>`;
 }
 
-function renderPositionCard(pos, i) {
-  const { sym, buyPrice, qty, acct, risk, addedAt, advice, loading, error } = pos;
-
-  const adviceHtml = loading
-    ? `<div style="padding:12px;font-size:12px;color:var(--text-muted)"><div class="spinner" style="width:20px;height:20px;margin-bottom:8px"></div>Fetching live advice…</div>`
-    : error
-    ? `<div style="padding:10px;font-size:11px;color:var(--sell)">⚠ ${esc(error)}</div>`
-    : advice ? renderAdvice(advice) : '';
-
-  const pnlPct = advice ? advice.pnlPct : null;
-  const pnlClass = pnlPct != null ? (pnlPct >= 0 ? 'up' : 'down') : '';
-  const cardClass = pnlPct != null ? (pnlPct >= 0 ? 'profit' : 'loss') : '';
-  const pnlDisplay = advice ? advice.pnlDisplay : '…';
-
-  const currentPrice = advice ? advice.currentPrice : null;
-  const value = qty && currentPrice ? (qty * currentPrice).toFixed(2) : null;
-
-  return `
-    <div class="position-card ${cardClass}">
-      <div class="position-header">
-        <div>
-          <div class="position-symbol">${esc(sym)}</div>
-          <div style="font-size:10px;color:var(--text-muted)">Added ${new Date(addedAt).toLocaleString()}</div>
-        </div>
-        <div class="position-pnl ${pnlClass}">${pnlDisplay}</div>
-      </div>
-      <div class="position-prices">
-        <div class="pos-price">
-          <div class="pos-price-label">Buy Price</div>
-          <div class="pos-price-value">$${fmt(buyPrice)}</div>
-        </div>
-        <div class="pos-price">
-          <div class="pos-price-label">Current</div>
-          <div class="pos-price-value">${currentPrice ? `$${fmt(currentPrice)}` : '…'}</div>
-        </div>
-        <div class="pos-price">
-          <div class="pos-price-label">${qty ? 'Value' : 'TP1'}</div>
-          <div class="pos-price-value">${qty && value ? `$${parseFloat(value).toLocaleString()}` : advice ? `$${fmt(advice.tradePlan?.takeProfits?.tp1?.price)}` : '…'}</div>
-        </div>
-      </div>
-      ${adviceHtml}
-      <div class="position-footer">
-        <div class="pos-meta">${acct ? `Account: $${esc(acct)}  ·  Risk: ${esc(risk)}%` : 'ATR-based plan'}${qty ? `  ·  Qty: ${esc(qty)}` : ''}</div>
-        <button class="btn-remove" onclick="removePosition(${i})">✕ Remove</button>
-      </div>
-    </div>
-  `;
+function trackBar(p) {
+  const tps = p.takeProfits;
+  if (!p.stopLossPrice || !tps?.tp3?.price || p.currentPrice == null) return '';
+  const lo = Math.min(p.stopLossPrice, p.currentPrice), hi = Math.max(tps.tp3.price, p.currentPrice);
+  const pct = (v) => ((v - lo) / (hi - lo)) * 100;
+  const pos = (v) => `${pct(v).toFixed(1)}%`;
+  let lastLabelAt = -100;
+  const mark = (v, label, hit) => {
+    const at = pct(v);
+    const show = at - lastLabelAt >= 9;          // hide labels that would overlap
+    if (show) lastLabelAt = at;
+    const edge = at < 6 ? ' style="left:0;transform:none"' : at > 94 ? ' style="left:auto;right:0;transform:none"' : '';
+    return `<div class="track-mark${hit ? ' hit' : ''}" style="left:${pos(v)}">${show ? `<span${edge}>${label}</span>` : ''}</div>`;
+  };
+  const sameAsEntry = Math.abs(p.stopLossPrice - p.buyPrice) / p.buyPrice < 0.002;
+  return `<div class="track-bar" title="Stop → TP3">
+    ${sameAsEntry ? mark(p.buyPrice, 'Stop=Entry', false) : mark(p.stopLossPrice, 'Stop', false) + mark(p.buyPrice, 'Entry', false)}
+    ${mark(tps.tp1.price, 'TP1', p.tp1Hit)}${mark(tps.tp2.price, 'TP2', p.tp2Hit)}${mark(tps.tp3.price, 'TP3', p.tp3Hit)}
+    <div class="track-now" style="left:${pos(p.currentPrice)}" title="Now $${fmt(p.currentPrice)}"></div>
+  </div>`;
 }
 
-function renderAdvice(advice) {
-  const rec = advice.recommendation;
-  const reasons = (advice.reasons || []).map(r => `• ${esc(r)}`).join('<br>');
-  const actions = (advice.actions || []).map(a => `→ ${esc(a)}`).join('<br>');
-  const levels = advice.levels || {};
-  const plan   = advice.tradePlan || {};
-  const sizing = advice.positionSizing;
+const STAGE = { initial: 'plan', user: 'yours', breakeven: 'breakeven', tp1: 'at TP1', done: 'done' };
 
-  return `
-    <div class="rec-box ${esc(rec)}">
-      <div class="rec-label">${esc(String(rec).replace(/_/g, ' '))}</div>
-      <div class="rec-actions">${reasons}<br><br>${actions}</div>
+function renderPfCard(p) {
+  const alert = p.stopLossHit || p.targetHit;
+  const statusCls = p.stopLossHit ? 'bad' : (p.targetHit || p.tp1Hit) ? 'good' : '';
+  const id = esc(p.positionId);
+  return `<div class="pf-card ${alert ? 'alert' : p.tp3Hit ? 'done' : ''}">
+    <div class="pf-head">
+      <div>
+        <div class="pf-coin">${esc(p.coin)}</div>
+        <div class="pf-sub">Added ${new Date(p.addedAt).toLocaleDateString()}${p.exchange ? ` · ${esc(p.exchange)}` : ''}</div>
+        <div style="margin-top:6px"><span class="pf-status ${statusCls}">${esc(p.status)}</span></div>
+      </div>
+      <div class="pf-pnl">
+        <div class="pf-pnl-pct ${cls(p.pnlPct)}">${signedPct(p.pnlPct)}</div>
+        <div class="pf-pnl-usd">${p.pnlUsd == null ? '' : money(p.pnlUsd)}</div>
+      </div>
     </div>
-    <div class="levels" style="margin-bottom:10px">
-      <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(plan.stopLoss)}</div></div>
-      <div class="level tp"><div class="level-label">TP1 / TP2</div><div class="level-value">$${fmt(plan.takeProfits?.tp1?.price)} / $${fmt(plan.takeProfits?.tp2?.price)}</div></div>
-      <div class="level"><div class="level-label">Trailing Stop</div><div class="level-value" style="color:var(--warn)">$${fmt(plan.trailingStop)}</div></div>
+    <div class="pf-nums">
+      <div class="pf-num"><div class="pf-num-label">Entry</div><div class="pf-num-value">$${fmt(p.buyPrice)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Now</div><div class="pf-num-value">${p.currentPrice == null ? '—' : '$' + fmt(p.currentPrice)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">${p.quantity ? 'Value' : 'Qty'}</div><div class="pf-num-value">${p.quantity ? money(p.value) : '—'}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Stop · ${esc(STAGE[p.stopStage] || '—')}</div><div class="pf-num-value down">${p.stopLossPrice ? '$' + fmt(p.stopLossPrice) : '—'}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Next TP</div><div class="pf-num-value up">${nextTp(p)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Target</div><div class="pf-num-value">${p.targetPrice ? '$' + fmt(p.targetPrice) : '—'}</div></div>
     </div>
-    ${sizing && sizing.units ? `<div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Size: ${esc(sizing.units)} units ($${esc(sizing.positionValue)}) · risking $${esc(sizing.dollarRisk)}</div>` : ''}
-    <div class="indicators">
-      <span class="indicator-chip">RSI: ${advice.indicators?.rsi ?? '—'}</span>
-      ${levels.ema50 ? `<span class="indicator-chip">EMA50: $${fmt(levels.ema50)}</span>` : ''}
-      <span class="indicator-chip">Trend 4H: ${esc(advice.indicators?.macroTrend ?? '—')}</span>
-      <span class="indicator-chip">Urgency: ${esc(advice.urgency)}</span>
+    ${trackBar(p)}
+    ${autoLine(p)}
+    <div class="pf-actions">
+      <button class="btn-sm" onclick="openStop('${id}')">🛡 Change stop</button>
+      <button class="btn-sm" onclick="openSold('${id}')">💸 Record sale</button>
+      <button class="btn-sm danger" onclick="removePf('${id}')">✕ Remove</button>
     </div>
-  `;
+  </div>`;
+}
+
+function nextTp(p) {
+  const t = p.takeProfits;
+  if (!t) return '—';
+  if (!p.tp1Hit) return `$${fmt(t.tp1.price)}`;
+  if (!p.tp2Hit) return `$${fmt(t.tp2.price)}`;
+  if (!p.tp3Hit) return `$${fmt(t.tp3.price)}`;
+  return 'done';
+}
+
+// ─── Actions ──────────────────────────────────────────────────────────────────
+let ACTIVE_ID = null;
+const findPos = (id) => PORTFOLIO?.positions.find(p => p.positionId === id);
+function closeDlg(id) { document.getElementById(id).close(); }
+function openAdd() { document.querySelector('#dlg-add form').reset(); document.getElementById('dlg-add').showModal(); }
+function openStop(id) {
+  const p = findPos(id); if (!p) return;
+  ACTIVE_ID = id;
+  document.getElementById('stop-coin').textContent = p.coin;
+  document.getElementById('stop-price').value = p.stopLossPrice || '';
+  document.getElementById('dlg-stop').showModal();
+}
+function openSold(id) {
+  const p = findPos(id); if (!p) return;
+  ACTIVE_ID = id;
+  document.getElementById('sold-coin').textContent = p.coin;
+  document.getElementById('sold-price').value = p.currentPrice || '';
+  document.getElementById('sold-qty').value = p.quantity || '';
+  document.getElementById('dlg-sold').showModal();
+}
+
+async function runAction(dialogId, action, body, okMsg) {
+  try {
+    await api(action, body);
+    if (dialogId) closeDlg(dialogId);
+    toast(okMsg, 'success');
+    await loadPortfolio(true);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function submitAdd(ev) {
+  ev.preventDefault();
+  const v = (id) => document.getElementById(id).value.trim();
+  runAction('dlg-add', 'add', { symbol: v('add-symbol'), exchange: v('add-exchange'), buyPrice: v('add-price'), quantity: v('add-qty'), target: v('add-target'), stop: v('add-stop') }, 'Position added — monitoring started');
+  return false;
+}
+function submitStop(ev) {
+  ev.preventDefault();
+  runAction('dlg-stop', 'setstop', { positionId: ACTIVE_ID, price: document.getElementById('stop-price').value }, 'Stop updated');
+  return false;
+}
+function submitSold(ev) {
+  ev.preventDefault();
+  runAction('dlg-sold', 'sold', { positionId: ACTIVE_ID, sellPrice: document.getElementById('sold-price').value, quantity: document.getElementById('sold-qty').value }, 'Sale recorded');
+  return false;
+}
+function removePf(id) {
+  const p = findPos(id); if (!p) return;
+  if (!window.confirm(`Stop monitoring ${p.coin} (entry $${fmt(p.buyPrice)})? This doesn't record a sale.`)) return;
+  runAction(null, 'remove', { positionId: id }, `${p.coin} removed`);
+}
+
+// ─── Automated exits ──────────────────────────────────────────────────────────
+const qty = (n) => n == null ? '—' : String(+Number(n).toFixed(8));
+function autoLine(p) {
+  const a = p.auto;
+  if (!a) return '';
+  const sold = (a.sold || []).reduce((s, x) => s + x.qty, 0);
+  const bits = [];
+  if (a.paused) bits.push('⏸ paused — you manage this one');
+  else if (a.stopOrder) bits.push(`🛡 Binance stop: sell ${qty(a.stopOrder.qty)} at $${fmt(a.stopOrder.price)}`);
+  if (sold) bits.push(`sold ${qty(sold)} so far, ${qty(a.remainingQty)} left`);
+  if (a.lastError) bits.push(`⚠ ${esc(a.lastError)}`);
+  return bits.length ? `<div class="track-note" style="margin:8px 0 0">🤖 ${bits.join(' · ')}</div>` : '';
+}
+
+const LIVE_PHRASE = 'I UNDERSTAND REAL MONEY';
+
+async function loadAuto() {
+  const box = document.getElementById('auto-content');
+  if (!TOKEN) { box.innerHTML = loginCard(); return; }
+  box.innerHTML = `<div class="state-loading"><div class="spinner"></div><div class="state-label">Loading…</div></div>`;
+  try { renderAuto(await api('trading')); }
+  catch (e) { box.innerHTML = `<div class="state-empty"><div>⚠ ${esc(e.message)}</div></div>`; }
+}
+
+function renderAuto(s) {
+  const box = document.getElementById('auto-content');
+  const intro = `<div class="card" style="margin-bottom:16px;line-height:1.7;font-size:12px">
+    <div class="form-title">What automated exits do</div>
+    The bot places your <b>sell</b> orders on your own Binance account, following each position's plan:
+    a real stop order at your stop, 40% sold at TP1, 35% at TP2, the rest at TP3, and 60% at your own target.
+    It <b>never buys</b>, only works on Binance positions that have a quantity, and keys that can withdraw are refused.
+    Removing a position (or <code>sell SOL</code> in the bot) cancels its stop order without selling.
+    <div class="track-note" style="margin-top:8px">This strategy has not shown an edge in backtests. Automation removes slow reactions, not risk. Start on the testnet.</div>
+  </div>`;
+  if (!s.encryptionReady) {
+    box.innerHTML = intro + `<div class="state-empty"><div>Not set up on this bot yet.</div><div class="state-label">The admin needs to add <code>TRADING_ENCRYPTION_KEY</code> in Vercel.</div></div>`;
+    return;
+  }
+  if (!s.connected) {
+    box.innerHTML = intro + `<div class="card"><div class="form-title">Connect Binance</div>
+      <form onsubmit="return connectAuto(event)">
+        <div class="form-group"><label class="form-label" for="auto-live">Account</label>
+          <select class="form-input" id="auto-live">
+            <option value="">Testnet — fake money (keys from testnet.binance.vision)</option>
+            <option value="1">Live — real money (binance.com key, withdrawals OFF)</option>
+          </select></div>
+        <div class="form-group"><label class="form-label" for="auto-key">API key</label><input class="form-input" id="auto-key" autocomplete="off" required></div>
+        <div class="form-group"><label class="form-label" for="auto-secret">Secret key</label><input class="form-input" id="auto-secret" type="password" autocomplete="off" required></div>
+        <div class="track-note" style="margin-bottom:10px">Keys are checked with Binance, then stored encrypted. Auto-exits stay off until you turn them on.</div>
+        <button class="btn-sm primary" type="submit">Connect</button>
+      </form></div>`;
+    return;
+  }
+  const mode = s.testnet ? 'Testnet (fake money)' : '<span class="down">LIVE — real money</span>';
+  box.innerHTML = intro + `<div class="card">
+    <div class="form-title">Binance · ${mode}</div>
+    <div style="font-size:12px;line-height:1.9">
+      Key: <code>${esc(s.keyHint)}</code> · connected ${new Date(s.connectedAt).toLocaleDateString()}<br>
+      Status: <b class="${s.enabled ? 'up' : ''}">${s.enabled ? '🟢 ON' : '⚪ OFF'}</b>${s.dryRun ? ' · <b>DRY RUN</b> (no real orders)' : ''}<br>
+      ${s.lastError ? `Last problem: <span class="down">${esc(s.lastError)}</span><br>` : ''}
+    </div>
+    ${!s.enabled && !s.testnet ? `<div class="form-group" style="margin-top:10px"><label class="form-label" for="auto-confirm">Type <code>${LIVE_PHRASE}</code> to turn on real-money exits</label><input class="form-input" id="auto-confirm" autocomplete="off"></div>` : ''}
+    <div class="pf-actions" style="margin-top:12px">
+      ${s.enabled
+        ? `<button class="btn-sm" onclick="setAuto(false)">⏸ Turn off (cancels the bot's stop orders)</button>`
+        : `<button class="btn-sm primary" onclick="setAuto(true)">▶ Turn on</button>`}
+      <button class="btn-sm danger" onclick="disconnectAuto()">Disconnect</button>
+    </div></div>`;
+}
+
+async function connectAuto(ev) {
+  ev.preventDefault();
+  const v = (id) => document.getElementById(id).value.trim();
+  try {
+    const s = await api('trading-connect', { apiKey: v('auto-key'), apiSecret: v('auto-secret'), live: !!v('auto-live') });
+    toast('Binance connected — auto-exits are still off', 'success');
+    renderAuto(s);
+  } catch (e) { toast(e.message, 'error'); }
+  return false;
+}
+
+async function setAuto(enabled) {
+  const el = document.getElementById('auto-confirm');
+  try {
+    const s = await api('trading-mode', { enabled, confirm: el ? el.value : '' });
+    toast(enabled ? 'Auto-exits on — stop orders are being placed' : 'Auto-exits off', 'success');
+    renderAuto(s);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function disconnectAuto() {
+  if (!window.confirm('Disconnect Binance? The bot cancels its stop orders and deletes your keys.')) return;
+  try { renderAuto(await api('trading-disconnect', {})); toast('Disconnected', 'success'); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── History ──────────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const box = document.getElementById('history-content');
+  if (!TOKEN) { box.innerHTML = loginCard(); return; }
+  box.innerHTML = `<div class="state-loading"><div class="spinner"></div><div class="state-label">Loading your trades…</div></div>`;
+  try {
+    const { trades, stats } = await api('history');
+    const s = (x) => x || { totalTrades: 0 };
+    const tile = (label, st) => `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${!st.totalTrades ? '' : st.totalPnlDollar >= 0 ? 'buy' : 'sell'}">${st.totalTrades ? money(st.totalPnlDollar) : '—'}</div><div style="font-size:10px;color:var(--text-dim)">${st.totalTrades ? `${st.totalTrades} trades · ${st.winRate}% win` : 'no trades'}</div></div>`;
+    const rows = trades.map(t => `<tr>
+      <td>${esc(String(t.symbol).replace(/USDT$/, ''))}</td>
+      <td>${new Date(t.closedAt).toLocaleDateString()}</td>
+      <td>$${fmt(t.buyPrice)}</td><td>$${fmt(t.sellPrice)}</td>
+      <td class="${cls(t.pnlPct)}">${signedPct(t.pnlPct)}</td>
+      <td class="${cls(t.pnlDollar)}">${t.pnlDollar == null ? '—' : money(t.pnlDollar)}</td>
+    </tr>`).join('');
+    box.innerHTML = `
+      <div class="stats-bar" style="display:flex">${tile('This month', s(stats.thisMonth))}${tile('Last month', s(stats.lastMonth))}${tile('All time', s(stats.allTime))}</div>
+      ${trades.length ? `<div class="card"><div class="track-scroll"><table class="hist-table">
+        <tr><th>Coin</th><th>Closed</th><th>Bought</th><th>Sold</th><th>Result</th><th>P&amp;L</th></tr>${rows}</table></div></div>`
+      : `<div class="state-empty"><div>No closed trades yet.</div><div class="state-label">Use “Record sale” on a position, or send <code>sold SOL 150 165</code> to the bot.</div></div>`}`;
+  } catch (e) {
+    box.innerHTML = TOKEN ? `<div class="state-empty"><div>⚠ ${esc(e.message)}</div></div>` : loginCard();
+  }
 }
 
 // ─── Refresh all ─────────────────────────────────────────────────────────────
 async function refreshAll() {
   document.getElementById('lastUpdate').textContent = 'Refreshing…';
   clearInterval(countdownTimer);
-  await Promise.all([loadScanner(), loadListings()]);
-  if (document.getElementById('panel-positions').classList.contains('active')) {
-    // Re-fetch advice for all positions
-    const positions = getPositions().map(p => ({ ...p, advice: null, loading: false, error: null }));
-    savePositions(positions);
-    renderPositions();
-  }
+  const jobs = [loadScanner(), loadListings()];
+  if (TOKEN) jobs.push(loadPortfolio(true));
+  await Promise.all(jobs);
   document.getElementById('lastUpdate').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   startCountdown();
 }
@@ -985,11 +1260,11 @@ function toast(msg, type = 'success') {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Restore positions (clear any fetch left half-done by a reload)
-  const saved = getPositions().map(p => ({ ...p, loading: false, error: null }));
-  savePositions(saved);
+  readToken();
+  // Logged in → open on your portfolio; otherwise on the market scanner
+  if (TOKEN) switchTab('portfolio');
+  else { loadPortfolio(); loadHistory(); }
 
-  // Load data
   await Promise.all([loadScanner(), loadListings()]);
   document.getElementById('lastUpdate').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   startCountdown();

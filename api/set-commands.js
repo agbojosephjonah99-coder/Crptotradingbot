@@ -17,6 +17,7 @@ const { requireAdminKey } = require('../src/lib/auth');
 
 const COMMANDS = [
   { command: 'menu',        description: '📋 Open the main menu' },
+  { command: 'dashboard',   description: '🖥 Your personal web dashboard (live P&L)' },
   { command: 'scan',        description: '🔍 Small caps with strong momentum (high risk)' },
   { command: 'moonshots',   description: '🌕 Small caps with strong momentum' },
   { command: 'newlistings', description: '🚀 Hot new coins with contract addresses' },
@@ -27,6 +28,9 @@ const COMMANDS = [
   { command: 'setstop',     description: '🛡 Change your stop — e.g. /setstop SOL 88.5' },
   { command: 'check',       description: '🔎 Instant advice on a position — e.g. /check SOL' },
   { command: 'profit',      description: '📈 Your trading stats' },
+  { command: 'autotrade',   description: '🤖 Automated exits on Binance (optional)' },
+  { command: 'account',     description: '💳 Your subscription' },
+  { command: 'subscribe',   description: '💳 Subscribe / renew' },
   { command: 'help',        description: '📖 Show all commands' },
 ];
 

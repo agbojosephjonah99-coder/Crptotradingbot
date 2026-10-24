@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.9.0 — Paid access (optional, Paystack)
+
+- **Off unless you set `PAID_ACCESS_ENABLED=true`.** Until then nothing changes.
+- When it's on, approved users also need an active subscription to use the bot and dashboard and to get position alerts. **The admin never pays.** Approval still works as before.
+- **Paying:** `subscribe you@example.com` (the email is for the Paystack receipt) → a 💳 Pay button → Paystack checkout (card, transfer, USSD) → back to Telegram, and access starts straight away. The dashboard shows a "Renew" card with the same flow.
+- **Payments are only counted after Paystack's verify API confirms them**, with the right amount and currency, for a payment link this bot made for that user. Each payment is credited once, even if the webhook, the return link and `subscribe check` all arrive together.
+- Renewing early adds the time on top of what's left.
+- **Reminders** (sent by the 30-minute monitor): 3 days before the end, and once when it ends. When a subscription ends, position alerts pause. Stop orders already on Binance stay there.
+- While a subscription has ended, users can still use `account`, `subscribe`, `help`, `sell`/`remove` (to close positions) and `autotrade off`/`disconnect`.
+- Commands: `account`, `subscribe [email]`, `subscribe check`. Admin: `subs` (everyone's status), `grant ID DAYS` (free time), `revoke ID`.
+- Settings: `SUBSCRIPTION_PRICE` (default 5000), `SUBSCRIPTION_CURRENCY` (default NGN), `SUBSCRIPTION_DAYS` (default 30).
+- New links: `/paid` (where Paystack sends payers back) and `/paystack-webhook`. Both are actions inside `api/app.js`, so there are still 12 functions.
+- **Fix:** the 10-minute quickcheck sent stop/target alerts to anyone with saved positions, including blocked or removed users. It now only checks approved users.
+- `vercel.json` now includes `"regions": ["fra1"]` (which you'd added on your side) plus the two new links.
+- Tests: 103.
+
+## 2.8.0 — Automated exits (optional, Binance)
+
+- **The bot can place your sell orders for you** on your own Binance account. It follows each position's locked plan:
+  - a real **stop order on Binance** at your saved stop, so it works between bot checks;
+  - **TP1** sells 40% of the quantity and moves the stop to breakeven; **TP2** sells 35% and moves it to TP1; **TP3** sells the rest;
+  - **your own target** (2x, 25%…) sells 60% of what's left;
+  - **stop hit** but the exchange stop didn't fill (price gapped through it) → the rest is sold at market;
+  - when everything is sold, the trade is saved to your history and the position closes.
+- **It never buys**, never opens positions, and only acts on Binance positions that have a quantity.
+- **Off unless you turn it on.** New connections use the **Binance testnet** (fake money). Real money needs a key from binance.com plus the phrase `I UNDERSTAND REAL MONEY`.
+- **Keys that can withdraw are refused.** Keys are checked with Binance, then stored encrypted (AES-256-GCM, `TRADING_ENCRYPTION_KEY`). The status never shows them, and the Telegram message containing them is deleted and never logged.
+- **You stay in control:** `sell SOL`, `sold …`, or Remove on the dashboard cancel that position's stop order *without selling*. `setstop` moves the Binance order. `autotrade off` cancels all the bot's stop orders. A stop order cancelled outside the bot is re-placed once; if it happens again, that position is paused (`autotrade resume SOL`).
+- Telegram: `autotrade` (status + set-up), `autotrade connect KEY SECRET`, `autotrade connect live KEY SECRET`, `autotrade on`, `autotrade off`, `autotrade disconnect`.
+- Dashboard: new **🤖 Auto-exits** tab (connect, on/off, disconnect). Each position card shows its Binance stop order and what has been sold.
+- Alerts for TP / stop / target say when the bot is handling the sale, so you don't sell twice.
+- `AUTOTRADE_DRY_RUN=true` makes every order a no-op (the bot reads your balance but places nothing), to watch what it would do.
+- `/api/health` shows `autoExits.available`.
+- **Fix:** the 2.7.0 package contained an empty `package.json`. This package has the correct one.
+- Tests: 96 (a fake Binance with balances and orders checks the whole plan).
+
+## 2.7.0 — More coins & exchanges
+
+- **Track coins on 7 exchanges:** Binance, Bybit, OKX, Gate, MEXC, KuCoin and Kraken. Previously, a coin not on Binance had no stop/TP plan and often no price.
+  - **Auto-detect:** `buy XYZ 0.05` checks the exchanges in that order, uses the first that lists XYZ/USDT, and remembers it for 7 days.
+  - **Choose:** `buy XYZ 0.05 ex mexc` (or `on gate`, `@okx`, or just `mexc`). The dashboard's "Add position" has an exchange picker.
+  - The bot replies with "📍 Prices from: MEXC". `positions` and the dashboard show each position's exchange.
+- **Each position uses only its own exchange** for alerts, advice, the dashboard and stop checks. There's deliberately no fallback to another exchange: the same ticker can be a different token elsewhere, and its price would trigger false stop or target alerts.
+- **Monitor and quickcheck** fetch prices once per coin and exchange.
+- **Unknown coins are refused** with a clear message, instead of being saved and never priced.
+- **`/api/health`** now fetches a real BTC price and recent candles from every exchange, and checks that they agree. `exchangesWorking` lists which exchanges' data reads correctly.
+- Positions added before this update have no exchange saved and keep working as before (Binance first).
+- Tests: 84.
+
+
+## 2.6.0 — Personal dashboard
+
+- **My Portfolio tab:** each user sees their own real positions. It shows live price and P&L (% and $), the current stop and why it's there (plan / yours / breakeven / at TP1), the next take-profit, the target, and a bar showing where the price sits between stop and TP3. Totals: invested, value now, unrealised P&L, and positions needing action.
+- **Actions on the dashboard:** add a position (with optional quantity, target and your own stop), change a stop, record a sale, remove a position. The rules are the same as the bot's: stops must be below the current price, and the trade plan is locked when you add.
+- **History tab:** every closed trade, plus this month / last month / all-time P&L and win rate.
+- **Login without passwords:** send `/dashboard` (or tap 🖥 My Dashboard in the menu) and the bot sends a private link that logs you in for 30 days.
+  - The link is signed, so nobody can make one for another user.
+  - The login code is removed from the address bar after opening.
+  - `dashboard logout` signs out every device.
+  - Blocked and pending users are refused.
+- The old "My Positions" tab, which saved positions only in your browser, is replaced. Anything saved there is left untouched.
+- **New `api/app.js`** handles all user actions. It's the 12th and last function allowed on Vercel Hobby, so future features become actions inside it.
+- Small-price coins (e.g. PEPE) now show 4 significant digits instead of rounding to 0.000010. The layout works on phones (no sideways scrolling).
+- Tests: 76.
+
+### Do this after deploying
+Open `/api/set-commands?key=…` once to add `/dashboard` to the bot menu, then send `/dashboard` to the bot.
+
+
 ## 2.5.0 — Reliability
 
 ### Do this after deploying
