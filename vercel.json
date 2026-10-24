@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "cleanUrls": true,
+  "regions": ["fra1"],
+  "functions": {
+    "api/**/*.js": {
+      "includeFiles": "data/**",
+      "maxDuration": 60
+    }
+  }
+}
