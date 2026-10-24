@@ -112,27 +112,42 @@ function calcRiskReward({ entryPrice, stopLoss, takeProfit }) {
 // ─── Signal Deduplication ─────────────────────────────────────────────────────
 
 /**
- * In-memory signal cache (resets on Vercel cold start — acceptable for serverless).
- * Prevents the same signal from firing multiple times within the cooldown window.
- * Original had no dedup — could spam the same BUY signal every hour.
+ * Signal deduplication, persisted in Redis (cryptobot:signal-fired) so it
+ * survives Vercel cold starts. The old in-memory Map reset on every cold start,
+ * which let the same alert fire again. Falls back to memory without Upstash.
  */
-const signalCache = new Map();
+const store = require('../lib/redis');
+
 const SIGNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+const FIRED_KEY = 'cryptobot:signal-fired';
 
-function isDuplicateSignal(symbol, signal) {
-  const key = `${symbol}:${signal}`;
-  const lastFired = signalCache.get(key);
-  if (!lastFired) return false;
-  return (Date.now() - lastFired) < SIGNAL_COOLDOWN_MS;
+async function loadFired() {
+  try { return (await store.getJSON(FIRED_KEY, {})) || {}; }
+  catch { return {}; }
 }
 
-function markSignalFired(symbol, signal) {
-  const key = `${symbol}:${signal}`;
-  signalCache.set(key, Date.now());
+async function isDuplicateSignal(symbol, signal, cooldownMs = SIGNAL_COOLDOWN_MS) {
+  const fired = await loadFired();
+  const last = fired[`${symbol}:${signal}`];
+  return !!last && (Date.now() - last) < cooldownMs;
 }
 
-function clearSignalCache() {
-  signalCache.clear();
+async function markSignalFired(symbol, signal) {
+  try {
+    await store.update(FIRED_KEY, {}, fired => {
+      const now = Date.now();
+      fired[`${symbol}:${signal}`] = now;
+      // prune anything older than 48h
+      for (const [k, ts] of Object.entries(fired)) if (now - ts > 48 * 3600 * 1000) delete fired[k];
+      return fired;
+    });
+  } catch (err) {
+    console.error('[Risk] markSignalFired failed:', err.message);
+  }
+}
+
+async function clearSignalCache() {
+  await store.del(FIRED_KEY);
 }
 
 // ─── Portfolio Heat ───────────────────────────────────────────────────────────

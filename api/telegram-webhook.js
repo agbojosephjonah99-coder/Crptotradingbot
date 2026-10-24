@@ -11,24 +11,36 @@
  *  users    → list all approved users
  *  pending  → list pending requests
  *  block ID → block a user
- *  remove ID → remove a user
+ *  remove ID → remove a user (numeric chat ID; `remove SOL` still removes a position)
+ *
+ * SECURITY: requests must carry Telegram's secret-token header
+ * (TELEGRAM_WEBHOOK_SECRET, registered by /api/set-commands). Without it anyone
+ * could POST a fake update "from" the admin chat ID and get admin powers.
+ *
+ * FIXES: `sold SOL 92.5 185` now records the trade (it used to be swallowed by
+ * the `sell` handler), "Buy #N" numbering, admin `remove` vs position `remove`,
+ * `/cmd@BotName` in groups, trade plan locked at buy time.
  */
 
-const axios = require('axios');
+const tg = require('../src/lib/telegram');
+const { verifyTelegramWebhook } = require('../src/lib/auth');
+const { normaliseSymbol } = require('../src/lib/market');
+const { fetchCurrentData, buildAdvice, planFromAdvice } = require('../src/services/adviceService');
 const {
   getUser, isApproved, isBlocked,
   registerUser, approveUser, blockUser, removeUser,
   getUsersByStatus, formatName,
 } = require('../src/services/userService');
 const {
-  getAllPositions, getPositionsBySymbol, addPosition,
-  removePositionById, removeAllBySymbol, updateLastChecked,
+  getAllPositions, getPositionsBySymbol, addPosition, updatePosition,
+  removePositionById, removeAllBySymbol,
 } = require('../src/services/positionStore');
 const { recordTrade, getMonthlyStats } = require('../src/services/profitTracker');
 const { adviseSplit, compoundingAdvice, targetProgress } = require('../src/services/portfolioAdvisor');
 
-const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_ID    = process.env.TELEGRAM_CHAT_ID;
+const adminId = () => process.env.TELEGRAM_CHAT_ID;
+const esc = tg.escapeMd;
+const nameOf = (user) => esc(formatName(user));
 
 // ─── Persistent MENU button ───────────────────────────────────────────────────
 const PERSISTENT_MENU = {
@@ -64,70 +76,33 @@ const INLINE_MENU = {
   ],
 };
 
-// ─── Send message ─────────────────────────────────────────────────────────────
+// ─── Send helpers (shared Telegram client, Markdown-safe) ───────────────────
 async function send(chatId, text, markup) {
-  if (!BOT_TOKEN) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      {
-        chat_id:      chatId,
-        text,
-        parse_mode:   'Markdown',
-        disable_web_page_preview: true,
-        reply_markup: markup || PERSISTENT_MENU,
-      },
-      { timeout: 8000 }
-    );
-  } catch (e) {
-    console.error('[Webhook] Send failed:', e.message);
-  }
+  return tg.send(chatId, text, { markup: markup || PERSISTENT_MENU });
 }
 
 async function reply(chatId, text, showInline = false) {
-  await send(chatId, text, showInline ? INLINE_MENU : PERSISTENT_MENU);
+  return send(chatId, text, showInline ? INLINE_MENU : PERSISTENT_MENU);
 }
 
 async function replyChunked(chatId, text, showInline = false) {
-  const MAX = 4000;
-  if (text.length <= MAX) { await reply(chatId, text, showInline); return; }
-  const chunks = [];
-  let current  = '';
-  for (const line of text.split('\n')) {
-    if ((current + line).length > MAX) { chunks.push(current); current = ''; }
-    current += line + '\n';
-  }
-  if (current) chunks.push(current);
-  for (let i = 0; i < chunks.length; i++) {
-    await reply(chatId, chunks[i], i === chunks.length - 1 ? showInline : false);
-  }
+  return tg.sendLong(chatId, text, { markup: showInline ? INLINE_MENU : PERSISTENT_MENU });
 }
 
-async function answerCallback(id) {
-  if (!BOT_TOKEN) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`,
-      { callback_query_id: id },
-      { timeout: 5000 }
-    );
-  } catch {}
-}
-
-function normaliseSymbol(raw) {
-  const u = raw.toUpperCase().trim();
-  return u.endsWith('USDT') ? u : `${u}USDT`;
-}
+const answerCallback = tg.answerCallback;
 
 function isAdmin(chatId) {
-  return chatId?.toString() === ADMIN_ID?.toString();
+  const admin = adminId();
+  return !!admin && chatId?.toString() === admin.toString();
 }
+
+const isChatId = (v) => /^-?\d{3,}$/.test(String(v || ''));
 
 // ─── Notify admin of new access request ───────────────────────────────────────
 async function notifyAdminNewRequest(user) {
-  if (!ADMIN_ID) return;
-  const name = formatName(user);
-  await send(ADMIN_ID, [
+  if (!adminId()) return;
+  const name = nameOf(user);
+  await send(adminId(), [
     `🔔 *New Access Request*`,
     ``,
     `👤 *Name:* ${name}`,
@@ -152,7 +127,7 @@ async function handleApproval(action, targetId, adminChatId) {
     if (ok) {
       // Notify admin
       const user = await getUser(targetId);
-      await reply(adminChatId, `✅ *${formatName(user)}* has been approved.`);
+      await reply(adminChatId, `✅ *${nameOf(user)}* has been approved.`);
       // Welcome the new user
       await send(targetId, [
         `🎉 *Your access has been approved!*`,
@@ -167,7 +142,7 @@ async function handleApproval(action, targetId, adminChatId) {
   if (action === 'reject') {
     const user = await getUser(targetId);
     await blockUser(targetId);
-    await reply(adminChatId, `❌ *${formatName(user)}* has been rejected.`);
+    await reply(adminChatId, `❌ *${nameOf(user)}* has been rejected.`);
     await send(targetId, [
       `❌ *Access Denied*`,
       ``,
@@ -180,7 +155,8 @@ async function handleApproval(action, targetId, adminChatId) {
 async function handleMessage(chatId, text, from) {
   const cleanText = text.trim().startsWith('/') ? text.trim().slice(1) : text.trim();
   const parts     = cleanText.split(/\s+/);
-  const cmd       = parts[0]?.toLowerCase();
+  // "/buy@MyBot SOL 1" (group chats) → "buy"
+  const cmd       = parts[0]?.toLowerCase().split('@')[0];
 
   // ── START / New user flow ────────────────────────────────────────────────
   if (cmd === 'start') {
@@ -198,6 +174,7 @@ async function handleMessage(chatId, text, from) {
         `\`users\`     — view approved users`,
         `\`block ID\`  — block a user`,
         `\`remove ID\` — remove a user`,
+        `\`approve ID\` — approve a user`,
         `\`invite\`    — get your invite link`,
       ].join('\n'), {
         keyboard: [
@@ -328,7 +305,7 @@ async function handleMessage(chatId, text, from) {
       }
       const lines = [`⏳ *Pending Requests (${pending.length})*`, ``];
       pending.forEach(u => {
-        lines.push(`👤 *${formatName(u)}*`);
+        lines.push(`👤 *${nameOf(u)}*`);
         lines.push(`   ID: \`${u.chatId}\``);
         lines.push(`   Requested: ${new Date(u.requestedAt).toUTCString()}`);
         lines.push(``);
@@ -347,7 +324,7 @@ async function handleMessage(chatId, text, from) {
       }
       const lines = [`✅ *Approved Users (${approved.length})*`, ``];
       approved.forEach(u => {
-        lines.push(`👤 *${formatName(u)}*`);
+        lines.push(`👤 *${nameOf(u)}*`);
         lines.push(`   ID: \`${u.chatId}\``);
         lines.push(`   Since: ${new Date(u.approvedAt || u.requestedAt).toUTCString()}`);
         lines.push(``);
@@ -356,11 +333,11 @@ async function handleMessage(chatId, text, from) {
       return;
     }
 
-    if (cmd === 'approve' && parts[1]) {
+    if (cmd === 'approve' && isChatId(parts[1])) {
       const ok   = await approveUser(parts[1]);
       const user = await getUser(parts[1]);
       if (ok && user) {
-        await reply(chatId, `✅ *${formatName(user)}* approved.`);
+        await reply(chatId, `✅ *${nameOf(user)}* approved.`);
         await send(parts[1], [
           `🎉 *Your access has been approved!*`,
           ``,
@@ -372,7 +349,7 @@ async function handleMessage(chatId, text, from) {
       return;
     }
 
-    if (cmd === 'block' && parts[1]) {
+    if (cmd === 'block' && isChatId(parts[1])) {
       const user = await getUser(parts[1]);
       await blockUser(parts[1]);
       await reply(chatId, `🚫 User \`${parts[1]}\` blocked.`);
@@ -380,7 +357,9 @@ async function handleMessage(chatId, text, from) {
       return;
     }
 
-    if (cmd === 'remove' && parts[1]) {
+    // Only treat `remove <numeric chat id>` as user removal; `remove SOL`
+    // falls through to the position-removal command below.
+    if (cmd === 'remove' && isChatId(parts[1])) {
       const ok = await removeUser(parts[1]);
       await reply(chatId, ok ? `🗑 User \`${parts[1]}\` removed.` : `⚠️ User not found.`);
       return;
@@ -616,11 +595,11 @@ async function handleMessage(chatId, text, from) {
 
     const symbol      = normaliseSymbol(rawSymbol);
     const targetPrice = targetMultiple ? buyPrice * targetMultiple : null;
-    await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple });
 
-    // Check how many entries already exist for this coin
+    // Count existing entries BEFORE adding (old code counted after → off by one)
     const existing = await getPositionsBySymbol(chatId, symbol);
     const entryNum = existing.length + 1;
+    const newPos   = await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple });
 
     // Build a human-friendly target label e.g. "10% profit" or "2X"
     const targetLabel = targetPct != null
@@ -643,12 +622,16 @@ async function handleMessage(chatId, text, from) {
     // This is what actually starts the alerts. Without this, you'd wait
     // up to 30 mins for the cron to notice the new position.
     try {
-      const { fetchCurrentData, buildAdvice } = require('./v2advice');
       const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol);
 
       const advice = buildAdvice({
         symbol, buyPrice, currentPrice, candles1h, candles4h,
       });
+
+      // Lock the stop loss + TPs now, so the 10-min quickcheck watches the stop
+      // from the start and every later check uses the same levels.
+      const plan = planFromAdvice(advice);
+      if (plan) await updatePosition(chatId, newPos.positionId, plan);
 
       const sl  = advice.tradePlan?.stopLoss;
       const tp1 = advice.tradePlan?.takeProfits?.tp1;
@@ -657,8 +640,6 @@ async function handleMessage(chatId, text, from) {
 
       const pnlPct = ((currentPrice - buyPrice) / buyPrice) * 100;
       const pnlStr = `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
-
-      const INFO_CHANNEL = process.env.TELEGRAM_INFO_CHANNEL_ID;
 
       // Send the live trade plan to ACTION channel (main chat)
       await reply(chatId, [
@@ -675,10 +656,7 @@ async function handleMessage(chatId, text, from) {
         tp3 ? `  🟢 TP3 (25%):  \`$${tp3.price.toFixed(6)}\`` : '',
         targetLabel ? `  🎯 Your target: \`$${targetPrice.toFixed(6)}\` (${targetLabel})` : '',
         ``,
-        `📌 *Milestone alerts* (10%, 20%, 30%...) → Info channel`,
-        INFO_CHANNEL
-          ? `   Quiet alerts → ${INFO_CHANNEL}`
-          : `   _(Set TELEGRAM_INFO_CHANNEL_ID to keep main chat clean)_`,
+        `📌 Milestones (every +10%) and 4-hourly HOLD updates arrive here silently.`,
         ``,
         `⏰ Next auto-check in ~30 mins via cron.`,
         `Type \`check ${symbol.replace('USDT','')}\` anytime for an instant update.`,
@@ -695,8 +673,8 @@ async function handleMessage(chatId, text, from) {
         targetLabel ? `  🎯 Price hits \`$${targetPrice.toFixed(6)}\` (${targetLabel}) → SELL NOW` : '',
         `  🔴 Stop loss hit → exit immediately`,
         `  🟢 TP1 / TP2 / TP3 hit → take partial profit`,
-        `  📊 Every 10% milestone → info channel`,
-        `  ⚪ Hold update every 4 hours → info channel`,
+        `  📊 Every 10% milestone (silent)`,
+        `  ⚪ Hold update every 4 hours (silent)`,
         ``,
         `\`positions\` to see all your entries`,
       ].filter(Boolean).join('\n'));
@@ -705,7 +683,10 @@ async function handleMessage(chatId, text, from) {
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
-  if (cmd === 'sell' || cmd === 'remove' || cmd === 'sold') {
+  // `sold SOL 92.5 185` (with prices) records a trade — handled further down.
+  // Plain `sold SOL` keeps working as an alias for `sell SOL`.
+  const isSoldRecord = cmd === 'sold' && parts[1] && parts[2] && parts[3];
+  if ((cmd === 'sell' || cmd === 'remove' || cmd === 'sold') && !isSoldRecord) {
     const rawSymbol = parts[1];
     if (!rawSymbol) { await reply(chatId, `❌ Example: \`sell SOL\``); return; }
     const symbol   = normaliseSymbol(rawSymbol);
@@ -719,7 +700,12 @@ async function handleMessage(chatId, text, from) {
     // Only one entry — remove it directly
     if (entries.length === 1) {
       await removePositionById(chatId, entries[0].positionId);
-      await reply(chatId, `✅ *${symbol}* removed. Good trade! 💸`);
+      await reply(chatId, [
+        `✅ *${symbol}* removed. Good trade! 💸`,
+        ``,
+        `To track profit, record it next time with:`,
+        `\`sold ${symbol.replace('USDT', '')} ${entries[0].buyPrice} SELLPRICE\``,
+      ].join('\n'));
       return;
     }
 
@@ -825,12 +811,16 @@ async function handleMessage(chatId, text, from) {
     await reply(chatId, `🔍 Checking *${symbol}* (${entries.length} entr${entries.length > 1 ? 'ies' : 'y'})...`);
 
     try {
-      const adv = require('./v2advice');
-      const { candles1h, candles4h, currentPrice } = await adv.fetchCurrentData(symbol);
+      const { candles1h, candles4h, currentPrice } = await fetchCurrentData(symbol);
 
       for (let i = 0; i < entries.length; i++) {
         const pos    = entries[i];
-        const advice = adv.buildAdvice({ symbol, buyPrice: pos.buyPrice, currentPrice, candles1h, candles4h });
+        const lockedPlan = pos.stopLossPrice ? { stopLoss: pos.stopLossPrice, takeProfits: pos.takeProfits || null } : null;
+        const advice = buildAdvice({ symbol, buyPrice: pos.buyPrice, currentPrice, candles1h, candles4h, lockedPlan });
+        if (!lockedPlan) {
+          const plan = planFromAdvice(advice);
+          if (plan) await updatePosition(chatId, pos.positionId, plan);
+        }
         const tp1    = advice.tradePlan?.takeProfits?.tp1;
         const tp2    = advice.tradePlan?.takeProfits?.tp2;
         const tp3    = advice.tradePlan?.takeProfits?.tp3;
@@ -1126,7 +1116,7 @@ async function handleMessage(chatId, text, from) {
     const sellPrice = parseFloat(parts[3]);
     const quantity  = parts[4] ? parseFloat(parts[4]) : null;
 
-    if (isNaN(buyPrice) || isNaN(sellPrice)) {
+    if (isNaN(buyPrice) || isNaN(sellPrice) || buyPrice <= 0 || sellPrice <= 0) {
       await reply(chatId, [
         `❌ *Invalid format*`,
         ``,
@@ -1139,15 +1129,16 @@ async function handleMessage(chatId, text, from) {
 
     // Find matching position to get targetMultiple
     const positions = await getPositionsBySymbol(chatId, symbol);
-    const matchPos  = positions.find(p => Math.abs(p.buyPrice - buyPrice) < buyPrice * 0.01);
+    const matchPos  = positions.find(p => Math.abs(p.buyPrice - buyPrice) <= buyPrice * 0.01);
     const targetMultiple = matchPos?.targetMultiple || null;
+    const qty = quantity || matchPos?.quantity || null;
 
-    const trade  = await recordTrade({ chatId, symbol, buyPrice, sellPrice, quantity, targetMultiple });
+    const trade  = await recordTrade({ chatId, symbol, buyPrice, sellPrice, quantity: qty, targetMultiple });
     const pnlSign = trade.pnlPct >= 0 ? '+' : '';
 
     // Compounding advice
-    const compound = quantity
-      ? compoundingAdvice(buyPrice * quantity, trade.pnlDollar || 0)
+    const compound = qty
+      ? compoundingAdvice(buyPrice * qty, trade.pnlDollar || 0)
       : null;
 
     const lines = [
@@ -1156,7 +1147,7 @@ async function handleMessage(chatId, text, from) {
       `💰 *Bought at:* \`$${buyPrice}\``,
       `💰 *Sold at:*   \`$${sellPrice}\``,
       `📈 *Result:*    ${pnlSign}${trade.pnlPct}% (${trade.multiple}X)`,
-      quantity ? `💵 *P&L:*       ${pnlSign}$${trade.pnlDollar?.toFixed(2)}` : '',
+      trade.pnlDollar !== null ? `💵 *P&L:*       ${trade.pnlDollar >= 0 ? '+' : '-'}$${Math.abs(trade.pnlDollar).toFixed(2)}` : '',
       ``,
       trade.outcome === 'WIN' ? `🎉 Winning trade! Great discipline.` : `📉 Losing trade. The stop loss protected you from worse.`,
       ``,
@@ -1173,7 +1164,10 @@ async function handleMessage(chatId, text, from) {
     await reply(chatId, lines);
 
     // Also remove position if it exists
-    if (matchPos) await removePositionById(chatId, matchPos.positionId);
+    if (matchPos) {
+      await removePositionById(chatId, matchPos.positionId);
+      await reply(chatId, `🗑 Removed your open ${symbol} entry at \`$${matchPos.buyPrice}\` from monitoring.`);
+    }
     return;
   }
 
@@ -1314,6 +1308,11 @@ async function handleMessage(chatId, text, from) {
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
 
+  if (!verifyTelegramWebhook(req)) {
+    console.warn('[Webhook] Rejected request without valid secret token');
+    return res.status(401).json({ ok: false });
+  }
+
   try {
     const body = req.body || {};
 
@@ -1321,9 +1320,10 @@ module.exports = async (req, res) => {
     if (body.callback_query) {
       const cq     = body.callback_query;
       const chatId = cq.message?.chat?.id?.toString();
-      const data   = cq.data;
+      const data   = cq.data || '';
 
       await answerCallback(cq.id);
+      if (!chatId) return res.status(200).json({ ok: true });
 
       // Admin approval buttons
       if (data.startsWith('approve:') || data.startsWith('reject:')) {
@@ -1360,13 +1360,13 @@ module.exports = async (req, res) => {
     const text   = message.text;
     const from   = message.from;
 
-    console.log(`[Webhook] From ${chatId}: ${text}`);
+    console.log(`[Webhook] From ${chatId}: ${text.slice(0, 80)}`);
 
     await handleMessage(chatId, text, from);
     return res.status(200).json({ ok: true });
 
   } catch (err) {
-    console.error('[Webhook] Error:', err.message);
+    console.error('[Webhook] Error:', err.stack || err.message);
     return res.status(200).json({ ok: true });
   }
 };

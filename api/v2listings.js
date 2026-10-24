@@ -15,6 +15,7 @@ const {
   isDuplicateSignal, markSignalFired,
 } = require('../src/services/riskService');
 const { sendListingBuyAlert } = require('../src/services/telegramService');
+const { cors, mayAlert } = require('../src/lib/auth');
 
 const BINANCE_BASE  = 'https://api.binance.com/api/v3';
 const KRAKEN_BASE   = 'https://api.kraken.com/0/public';
@@ -63,7 +64,7 @@ const CHAIN_LABELS = {
 };
 
 // ─── Fetch coin name + contract address from CoinGecko ───────────────────────
-// Only called for BUY-qualified coins — avoids rate limiting
+// Called for each deep-analysed candidate (up to 15). CoinGecko free tier may rate-limit.
 async function fetchCoinMetadata(baseAsset) {
   try {
     // Step 1: Search CoinGecko for the coin by ticker symbol
@@ -297,11 +298,11 @@ function scoreTicker(t) {
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
+    const alerting = mayAlert(req);
     const [tickerResp, exchangeResp, krakenResp] = await Promise.allSettled([
       axios.get(`${BINANCE_BASE}/ticker/24hr`, { timeout: 15000 }),
       axios.get(`${BINANCE_BASE}/exchangeInfo`, { timeout: 15000 }),
@@ -415,18 +416,16 @@ module.exports = async (req, res) => {
 
       results.push(result);
 
-      // Telegram alert for BUY signals
-      if (analysis.signal === 'BUY' && !isDuplicateSignal(coin.symbol, 'LISTING_BUY')) {
-        setImmediate(() => {
-          try {
-            if (typeof sendListingBuyAlert === 'function') {
-              sendListingBuyAlert(result).catch(e => console.error('[TG LISTING]', e.message));
-              markSignalFired(coin.symbol, 'LISTING_BUY');
-            }
-          } catch (e) {
-            console.error('[TG LISTING] Alert error:', e.message);
-          }
-        });
+      // Telegram alert for BUY signals — only on keyed (cron) calls when
+      // CRON_SECRET is set, deduplicated for 4h across cold starts, and awaited
+      // so serverless doesn't freeze it half-sent.
+      if (alerting && analysis.signal === 'BUY' && !(await isDuplicateSignal(coin.symbol, 'LISTING_BUY'))) {
+        try {
+          await sendListingBuyAlert(result);
+          await markSignalFired(coin.symbol, 'LISTING_BUY');
+        } catch (e) {
+          console.error('[TG LISTING] Alert error:', e.message);
+        }
       }
     }
 
@@ -440,6 +439,7 @@ module.exports = async (req, res) => {
       success:      true,
       totalScanned: candidates.length,
       buySignals:   results.filter(r => r.signal === 'BUY').length,
+      alertsSent:   alerting,
       results,
       scannedAt:    new Date().toISOString(),
     });

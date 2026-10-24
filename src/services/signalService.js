@@ -1,4 +1,5 @@
-const { calculateEMA, calculateRSI } = require('./indicatorService');
+// BUGFIX: indicatorService exports `ema` and `rsi` (the old names crashed every caller)
+const { ema: calculateEMA, rsi: calculateRSI } = require('./indicatorService');
 
 const SIGNAL_THRESHOLD = 6;
 const PULLBACK_THRESHOLD = 0.02;

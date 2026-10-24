@@ -431,7 +431,7 @@ body::before {
   <div class="panel" id="panel-positions">
     <div class="position-form">
       <div class="form-title">📌 Log a Buy</div>
-      <div class="form-sub">Tell the bot you bought a coin — it will track the best time to sell</div>
+      <div class="form-sub">Saved in this browser only. Stop loss and targets are ATR-based. For 24/7 alerts, use <code>buy</code> in the Telegram bot.</div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Symbol</label>
@@ -446,12 +446,12 @@ body::before {
           <input class="form-input" id="pos-qty" type="number" placeholder="e.g. 10" />
         </div>
         <div class="form-group">
-          <label class="form-label">Take Profit %</label>
-          <input class="form-input" id="pos-tp" type="number" placeholder="8" value="8" />
+          <label class="form-label">Account size $ (optional)</label>
+          <input class="form-input" id="pos-acct" type="number" placeholder="e.g. 1000" />
         </div>
         <div class="form-group">
-          <label class="form-label">Stop Loss %</label>
-          <input class="form-input" id="pos-sl" type="number" placeholder="5" value="5" />
+          <label class="form-label">Risk % per trade</label>
+          <input class="form-input" id="pos-risk" type="number" placeholder="1" value="1" />
         </div>
       </div>
       <button class="btn-add" onclick="addPosition()">＋ Track Position</button>
@@ -487,6 +487,11 @@ function switchTab(name) {
 }
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
+// Escape anything that came from the API before putting it into innerHTML
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function fmt(n, decimals = 4) {
   if (n == null || isNaN(n)) return '—';
   if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -551,19 +556,21 @@ function renderScanCard(r) {
   const badgeLabel = isBuy ? 'BUY' : isBear ? '⚠ BEARISH' : r.signal === 'ERROR' ? 'ERROR' : 'WAIT';
 
   if (r.signal === 'ERROR') {
-    return `<div class="card"><div class="card-header"><div><div class="card-symbol">${r.symbol}</div></div><span class="signal-badge badge-error">ERROR</span></div><div style="font-size:11px;color:var(--sell)">${r.error}</div></div>`;
+    return `<div class="card"><div class="card-header"><div><div class="card-symbol">${esc(r.symbol)}</div></div><span class="signal-badge badge-error">ERROR</span></div><div style="font-size:11px;color:var(--sell)">${esc(r.error)}</div></div>`;
   }
 
-  const factors = (r.factors || []).map(f => `<div class="factor">${f}</div>`).join('');
+  const factors = (r.factors || []).map(f => `<div class="factor">${esc(f)}</div>`).join('');
+  const tps = r.takeProfits || {};
 
-  const levelsHtml = (isBuy && r.entryPrice) ? `
+  // Field names match /api/v2scan: price, stopLoss, takeProfits.tp1/tp2/tp3
+  const levelsHtml = (isBuy && r.price) ? `
     <div class="levels">
-      <div class="level entry"><div class="level-label">Entry</div><div class="level-value">$${fmt(r.entryPrice)}</div></div>
+      <div class="level entry"><div class="level-label">Entry</div><div class="level-value">$${fmt(r.price)}</div></div>
       <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(r.stopLoss)}</div></div>
-      <div class="level tp"><div class="level-label">Target 1</div><div class="level-value">$${fmt(r.takeProfit1)}</div></div>
+      <div class="level tp"><div class="level-label">TP1 (${esc(tps.tp1?.ratio ?? '1.5R')})</div><div class="level-value">$${fmt(tps.tp1?.price)}</div></div>
     </div>
     <div class="levels" style="grid-template-columns:1fr 1fr">
-      <div class="level" style="background:rgba(0,232,135,0.05)"><div class="level-label">Target 2 (3R)</div><div class="level-value" style="color:var(--buy)">$${fmt(r.takeProfit2)}</div></div>
+      <div class="level" style="background:rgba(0,232,135,0.05)"><div class="level-label">TP2 (${esc(tps.tp2?.ratio ?? '2.5R')})</div><div class="level-value" style="color:var(--buy)">$${fmt(tps.tp2?.price)}</div></div>
       <div class="level"><div class="level-label">RSI (1H)</div><div class="level-value">${r.rsi?.toFixed(1) ?? '—'}</div></div>
     </div>
   ` : `
@@ -573,19 +580,21 @@ function renderScanCard(r) {
     </div>
   `;
 
+  const patternNames = (r.patterns || []).map(p => p.name).join(', ');
   const chips = [
-    r.macdBullish ? '<span class="indicator-chip active">MACD ↑</span>' : '<span class="indicator-chip">MACD ↓</span>',
-    r.volSurge    ? '<span class="indicator-chip active">Vol Surge</span>' : '<span class="indicator-chip">Normal Vol</span>',
-    r.candleType !== 'NONE' ? `<span class="indicator-chip active">${r.candleType}</span>` : '',
-    `<span class="indicator-chip">Trend: ${r.trend ?? '?'}</span>`,
+    `<span class="indicator-chip">Trend: ${esc(r.trend ?? '?')}</span>`,
+    r.adxValue != null ? `<span class="indicator-chip ${r.adxValue > 20 ? 'active' : ''}">ADX ${Number(r.adxValue).toFixed(0)}</span>` : '',
+    r.aboveVWAP ? '<span class="indicator-chip active">Above VWAP</span>' : '<span class="indicator-chip">Below VWAP</span>',
+    r.obvTrend === 'BULLISH' ? '<span class="indicator-chip active">OBV ↑</span>' : '<span class="indicator-chip">OBV ↓</span>',
+    patternNames ? `<span class="indicator-chip active">${esc(patternNames)}</span>` : '',
   ].filter(Boolean).join('');
 
   return `
     <div class="card ${cardClass}">
       <div class="card-header">
         <div>
-          <div class="card-symbol">${r.symbol}</div>
-          <div class="card-exchange">Binance / Kraken  ·  ${new Date(r.scannedAt).toLocaleTimeString()}</div>
+          <div class="card-symbol">${esc(r.symbol)}</div>
+          <div class="card-exchange">Binance / Kraken  ·  ${r.scannedAt ? new Date(r.scannedAt).toLocaleTimeString() : ''}</div>
         </div>
         <span class="signal-badge ${badgeClass}">${badgeLabel}</span>
       </div>
@@ -618,7 +627,7 @@ async function loadListings() {
     const data = await resp.json();
     if (!data.success) throw new Error(data.error);
 
-    const listings = data.topListings || [];
+    const listings = data.results || [];
     const hot = listings.filter(l => l.pumpRating === 'HOT').length;
     document.getElementById('stat-hot').textContent   = hot;
     document.getElementById('stat-total').textContent = data.totalScanned ?? '—';
@@ -646,18 +655,24 @@ function renderListingCard(l) {
   const changeClass = l.priceChange >= 0 ? 'up' : 'down';
   const changeSign  = l.priceChange >= 0 ? '+' : '';
 
-  const factors = (l.factors || []).map(f => `<div class="factor">${f}</div>`).join('');
+  const factors = [
+    ...(l.factors || []).map(f => `<div class="factor">${esc(f)}</div>`),
+    ...(l.warnings || []).map(w => `<div class="factor" style="color:var(--warn)">⚠ ${esc(w)}</div>`),
+  ].join('');
+  const signalChip = l.signal === 'BUY'
+    ? '<span class="indicator-chip active">BUY setup</span>'
+    : `<span class="indicator-chip">${esc(l.signal || 'WATCH')}</span>`;
 
   return `
     <div class="card ${cardClass}">
       <div class="card-header">
         <div>
-          <div class="card-symbol">${l.symbol.replace('USDT', '')} <span style="font-size:12px;color:var(--text-muted)">/ USDT</span></div>
-          <div class="card-exchange">${l.exchange}  ·  ${new Date(l.scannedAt).toLocaleTimeString()}</div>
+          <div class="card-symbol">${esc(String(l.symbol).replace('USDT', ''))} <span style="font-size:12px;color:var(--text-muted)">/ USDT</span></div>
+          <div class="card-exchange">${esc(l.coinName || l.exchange || '')}  ·  ${l.scannedAt ? new Date(l.scannedAt).toLocaleTimeString() : ''}</div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-          <span class="pump-rating ${pumpClass}">${l.pumpRating}</span>
-          <span style="font-size:11px;color:var(--text-dim)">Score: ${l.score}/12</span>
+          <span class="pump-rating ${pumpClass}">${esc(l.pumpRating)}</span>
+          <span style="font-size:11px;color:var(--text-dim)">Score: ${l.score ?? '—'}/12</span>
         </div>
       </div>
       <div class="price-row">
@@ -670,7 +685,7 @@ function renderListingCard(l) {
       </div>
       <div class="confidence-row">
         <div class="confidence-header">
-          <span>Pump Score</span>
+          <span>Setup Score</span>
           <span class="confidence-num">${l.confidence ?? 0}%</span>
         </div>
         <div class="confidence-bar-bg">
@@ -678,7 +693,7 @@ function renderListingCard(l) {
         </div>
       </div>
       <div class="indicators">
-        <span class="vol-chip">24H Vol</span>
+        ${signalChip}
         <span class="indicator-chip">${changeSign}${l.priceChange?.toFixed(1)}% move</span>
       </div>
       ${factors ? `<div class="factors">${factors}</div>` : ''}
@@ -691,7 +706,7 @@ function getPositions() {
   try { return JSON.parse(localStorage.getItem('cb_positions') || '[]'); } catch { return []; }
 }
 function savePositions(positions) {
-  localStorage.setItem('cb_positions', JSON.stringify(positions));
+  try { localStorage.setItem('cb_positions', JSON.stringify(positions)); } catch { /* private mode */ }
   document.getElementById('badge-positions').textContent = positions.length;
 }
 
@@ -699,8 +714,8 @@ function addPosition() {
   const symbol   = document.getElementById('pos-symbol').value.trim().toUpperCase().replace(/\//, '');
   const buyPrice = parseFloat(document.getElementById('pos-buy').value);
   const qty      = parseFloat(document.getElementById('pos-qty').value) || null;
-  const tp       = parseFloat(document.getElementById('pos-tp').value) || 8;
-  const sl       = parseFloat(document.getElementById('pos-sl').value) || 5;
+  const acct     = parseFloat(document.getElementById('pos-acct').value) || null;
+  const risk     = parseFloat(document.getElementById('pos-risk').value) || 1;
 
   if (!symbol || isNaN(buyPrice) || buyPrice <= 0) {
     toast('Enter a valid symbol and buy price', 'error');
@@ -708,7 +723,7 @@ function addPosition() {
   }
   const sym = symbol.endsWith('USDT') ? symbol : symbol + 'USDT';
   const positions = getPositions();
-  positions.push({ sym, buyPrice, qty, tp, sl, addedAt: Date.now(), advice: null, loading: true });
+  positions.push({ sym, buyPrice, qty, acct, risk, addedAt: Date.now(), advice: null, loading: false });
   savePositions(positions);
   toast(`Tracking ${sym} @ $${buyPrice}`, 'success');
   switchTab('positions');
@@ -724,18 +739,22 @@ function removePosition(index) {
 
 async function fetchAdvice(pos, index) {
   try {
-    const url = `${BASE}/api/v2advice?symbol=${pos.sym}&buyPrice=${pos.buyPrice}&tp=${pos.tp}&sl=${pos.sl}`;
-    const resp = await fetch(url);
+    const params = new URLSearchParams({ symbol: pos.sym, buyPrice: pos.buyPrice });
+    if (pos.acct) params.set('account', pos.acct);
+    if (pos.risk) params.set('risk', pos.risk);
+    if (pos.qty)  params.set('qty', pos.qty);
+    const resp = await fetch(`${BASE}/api/v2advice?${params}`);
     const data = await resp.json();
-    if (data.success) {
-      const positions = getPositions();
-      positions[index].advice = data.advice;
-      positions[index].loading = false;
-      savePositions(positions);
-      renderPositions();
-    }
+    const positions = getPositions();
+    if (!positions[index]) return;
+    positions[index].loading = false;
+    if (data.success) positions[index].advice = data.advice;
+    else positions[index].error = data.error || 'Advice request failed';
+    savePositions(positions);
+    renderPositions();
   } catch (e) {
     const positions = getPositions();
+    if (!positions[index]) return;
     positions[index].loading = false;
     positions[index].error = e.message;
     savePositions(positions);
@@ -754,25 +773,26 @@ function renderPositions() {
   }
 
   // Trigger advice fetch for positions that don't have it
+  let changed = false;
   positions.forEach((pos, i) => {
     if (!pos.advice && !pos.loading && !pos.error) {
-      const positions2 = getPositions();
-      positions2[i].loading = true;
-      savePositions(positions2);
+      pos.loading = true;
+      changed = true;
       fetchAdvice(pos, i);
     }
   });
+  if (changed) savePositions(positions);
 
   list.innerHTML = positions.map((pos, i) => renderPositionCard(pos, i)).join('');
 }
 
 function renderPositionCard(pos, i) {
-  const { sym, buyPrice, qty, tp, sl, addedAt, advice, loading, error } = pos;
+  const { sym, buyPrice, qty, acct, risk, addedAt, advice, loading, error } = pos;
 
   const adviceHtml = loading
     ? `<div style="padding:12px;font-size:12px;color:var(--text-muted)"><div class="spinner" style="width:20px;height:20px;margin-bottom:8px"></div>Fetching live advice…</div>`
     : error
-    ? `<div style="padding:10px;font-size:11px;color:var(--sell)">⚠ ${error}</div>`
+    ? `<div style="padding:10px;font-size:11px;color:var(--sell)">⚠ ${esc(error)}</div>`
     : advice ? renderAdvice(advice) : '';
 
   const pnlPct = advice ? advice.pnlPct : null;
@@ -787,7 +807,7 @@ function renderPositionCard(pos, i) {
     <div class="position-card ${cardClass}">
       <div class="position-header">
         <div>
-          <div class="position-symbol">${sym}</div>
+          <div class="position-symbol">${esc(sym)}</div>
           <div style="font-size:10px;color:var(--text-muted)">Added ${new Date(addedAt).toLocaleString()}</div>
         </div>
         <div class="position-pnl ${pnlClass}">${pnlDisplay}</div>
@@ -802,13 +822,13 @@ function renderPositionCard(pos, i) {
           <div class="pos-price-value">${currentPrice ? `$${fmt(currentPrice)}` : '…'}</div>
         </div>
         <div class="pos-price">
-          <div class="pos-price-label">${qty ? 'Value' : 'Target'}</div>
-          <div class="pos-price-value">${qty && value ? `$${parseFloat(value).toLocaleString()}` : advice ? `$${fmt(advice.levels?.takeProfit1)}` : '…'}</div>
+          <div class="pos-price-label">${qty ? 'Value' : 'TP1'}</div>
+          <div class="pos-price-value">${qty && value ? `$${parseFloat(value).toLocaleString()}` : advice ? `$${fmt(advice.tradePlan?.takeProfits?.tp1?.price)}` : '…'}</div>
         </div>
       </div>
       ${adviceHtml}
       <div class="position-footer">
-        <div class="pos-meta">TP: ${tp}%  ·  SL: ${sl}%${qty ? `  ·  Qty: ${qty}` : ''}</div>
+        <div class="pos-meta">${acct ? `Account: $${esc(acct)}  ·  Risk: ${esc(risk)}%` : 'ATR-based plan'}${qty ? `  ·  Qty: ${esc(qty)}` : ''}</div>
         <button class="btn-remove" onclick="removePosition(${i})">✕ Remove</button>
       </div>
     </div>
@@ -817,24 +837,28 @@ function renderPositionCard(pos, i) {
 
 function renderAdvice(advice) {
   const rec = advice.recommendation;
-  const reasons = (advice.reasons || []).map(r => `• ${r}`).join('<br>');
-  const actions = (advice.actions || []).map(a => `→ ${a}`).join('<br>');
+  const reasons = (advice.reasons || []).map(r => `• ${esc(r)}`).join('<br>');
+  const actions = (advice.actions || []).map(a => `→ ${esc(a)}`).join('<br>');
   const levels = advice.levels || {};
+  const plan   = advice.tradePlan || {};
+  const sizing = advice.positionSizing;
 
   return `
-    <div class="rec-box ${rec}">
-      <div class="rec-label">${rec.replace(/_/g, ' ')}</div>
+    <div class="rec-box ${esc(rec)}">
+      <div class="rec-label">${esc(String(rec).replace(/_/g, ' '))}</div>
       <div class="rec-actions">${reasons}<br><br>${actions}</div>
     </div>
     <div class="levels" style="margin-bottom:10px">
-      <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(levels.stopLoss)}</div></div>
-      <div class="level tp"><div class="level-label">Take Profit</div><div class="level-value">$${fmt(levels.takeProfit1)}</div></div>
-      <div class="level"><div class="level-label">Best Sell</div><div class="level-value" style="color:var(--warn)">$${fmt(levels.bestSell)}</div></div>
+      <div class="level sl"><div class="level-label">Stop Loss</div><div class="level-value">$${fmt(plan.stopLoss)}</div></div>
+      <div class="level tp"><div class="level-label">TP1 / TP2</div><div class="level-value">$${fmt(plan.takeProfits?.tp1?.price)} / $${fmt(plan.takeProfits?.tp2?.price)}</div></div>
+      <div class="level"><div class="level-label">Trailing Stop</div><div class="level-value" style="color:var(--warn)">$${fmt(plan.trailingStop)}</div></div>
     </div>
+    ${sizing && sizing.units ? `<div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Size: ${esc(sizing.units)} units ($${esc(sizing.positionValue)}) · risking $${esc(sizing.dollarRisk)}</div>` : ''}
     <div class="indicators">
       <span class="indicator-chip">RSI: ${advice.indicators?.rsi ?? '—'}</span>
       ${levels.ema50 ? `<span class="indicator-chip">EMA50: $${fmt(levels.ema50)}</span>` : ''}
-      <span class="indicator-chip">Urgency: ${advice.urgency}</span>
+      <span class="indicator-chip">Trend 4H: ${esc(advice.indicators?.macroTrend ?? '—')}</span>
+      <span class="indicator-chip">Urgency: ${esc(advice.urgency)}</span>
     </div>
   `;
 }
@@ -846,7 +870,7 @@ async function refreshAll() {
   await Promise.all([loadScanner(), loadListings()]);
   if (document.getElementById('panel-positions').classList.contains('active')) {
     // Re-fetch advice for all positions
-    const positions = getPositions().map(p => ({ ...p, advice: null, loading: false }));
+    const positions = getPositions().map(p => ({ ...p, advice: null, loading: false, error: null }));
     savePositions(positions);
     renderPositions();
   }
@@ -877,8 +901,9 @@ function toast(msg, type = 'success') {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Restore position badge
-  document.getElementById('badge-positions').textContent = getPositions().length;
+  // Restore positions (clear any fetch left half-done by a reload)
+  const saved = getPositions().map(p => ({ ...p, loading: false, error: null }));
+  savePositions(saved);
 
   // Load data
   await Promise.all([loadScanner(), loadListings()]);

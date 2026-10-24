@@ -3,85 +3,66 @@
  *
  * TWO-CHANNEL SYSTEM:
  *
- *  ACTION channel  → TELEGRAM_CHAT_ID (your private bot chat)
- *    • BUY signals from scanner (v2scan / liveService)
- *    • New listing BUY signals
- *    • Bearish alerts
- *    • Stop loss, TP1/TP2/TP3, custom target hit (from v2monitor)
- *    • Big milestones: 50%, 100%, 150%...
+ *  ACTION → TELEGRAM_CHAT_ID / the user's own chat
+ *    • New listing BUY signals, bearish alerts
+ *    • Every alert about a user's OWN positions (stop loss, TPs, targets,
+ *      milestones, hold updates). Small milestones + HOLD are sent silently.
  *
- *  INFO channel    → TELEGRAM_INFO_CHANNEL_ID (quiet Telegram channel)
- *    • 10%, 20%, 30%, 40% milestones
- *    • HOLD updates every 4 hours
- *    • New listing info alerts (v2listings-alert)
+ *  INFO   → TELEGRAM_INFO_CHANNEL_ID (shared channel)
+ *    • Market-wide signals only (scanner BUY signals, listing broadcasts).
+ *    • Never anyone's personal positions — the channel is shared.
  *
  *  If TELEGRAM_INFO_CHANNEL_ID is not set, info alerts fall back to main chat.
  */
 
-const axios = require('axios');
+const tg = require('../lib/telegram');
 const { isDuplicateSignal, markSignalFired } = require('./riskService');
 
-const BOT_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
-const ACTION_CHAT  = process.env.TELEGRAM_CHAT_ID;          // main private chat
-const INFO_CHANNEL = process.env.TELEGRAM_INFO_CHANNEL_ID;  // quiet info channel
+const actionChat  = () => process.env.TELEGRAM_CHAT_ID;
+const infoChannel = () => process.env.TELEGRAM_INFO_CHANNEL_ID;
 
 // ─── Core send helpers ────────────────────────────────────────────────────────
 
-// Send to the ACTION channel (main chat) — requires immediate attention
-async function sendAction(text, overrideChatId) {
-  const chatId = overrideChatId || ACTION_CHAT;
-  if (!BOT_TOKEN || !chatId) {
+/** ACTION: needs attention. Throws on failure so callers can report it. */
+async function sendAction(text, overrideChatId, opts = {}) {
+  const chatId = overrideChatId || actionChat();
+  if (!tg.isConfigured() || !chatId) {
     console.warn('[Telegram] Missing credentials — skipping action alert');
-    return;
+    return null;
   }
-  const resp = await axios.post(
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-    { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-    { timeout: 10000 }
-  );
-  if (!resp.data.ok) throw new Error(`Telegram error: ${JSON.stringify(resp.data)}`);
-  return resp.data;
+  return tg.sendLong(chatId, text, { ...opts, throwOnError: true });
 }
 
-// Send to the INFO channel — low priority, no action needed
+/** INFO: low priority, market-wide. Never throws. */
 async function sendInfo(text, overrideChatId) {
-  const chatId = overrideChatId || INFO_CHANNEL || ACTION_CHAT; // fallback to main if not set
-  if (!BOT_TOKEN || !chatId) {
+  const chatId = overrideChatId || infoChannel() || actionChat();
+  if (!tg.isConfigured() || !chatId) {
     console.warn('[Telegram] Missing credentials — skipping info alert');
-    return;
+    return null;
   }
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-      { timeout: 10000 }
-    );
-  } catch (e) {
-    console.error('[Telegram] Info send failed:', e.message);
-  }
+  return tg.sendLong(chatId, text);
 }
 
-// Legacy alias — used by old code that calls _send() directly
+// Legacy alias
 async function _send(text) { return sendAction(text); }
 
-// ─── BUY Signal (v2scan / liveService) → CHANNEL ────────────────────────────
-// Scanner signals are market-wide, not personal trades.
-// They go to the channel so your main chat stays focused on your own positions.
+// ─── BUY Signal (v2scan / liveService) → INFO channel ────────────────────────
 async function sendBuyAlert(result) {
   if (result.signal !== 'BUY') return;
   if (result.score < 7) return;
-  if (isDuplicateSignal(result.symbol, 'BUY')) {
+  if (await isDuplicateSignal(result.symbol, 'BUY')) {
     console.log(`[Telegram] Dedup: ${result.symbol} BUY already sent within 4h`);
     return;
   }
 
-  const tp1     = result.takeProfits?.tp1;
-  const tp2     = result.takeProfits?.tp2;
-  const tp3     = result.takeProfits?.tp3;
-  const sl      = result.stopLoss;
-  const rr      = result.riskReward;
-  const conf    = result.confidence;
-  const confBar = '█'.repeat(Math.round(conf / 10)) + '░'.repeat(10 - Math.round(conf / 10));
+  const tp1  = result.takeProfits?.tp1;
+  const tp2  = result.takeProfits?.tp2;
+  const tp3  = result.takeProfits?.tp3;
+  const sl   = result.stopLoss;
+  const rr   = result.riskReward;
+  const conf = Math.max(0, Math.min(100, Number(result.confidence) || 0));
+  const bars = Math.round(conf / 10);
+  const confBar = '█'.repeat(bars) + '░'.repeat(10 - bars);
 
   const lines = [
     `🟢 *BUY SIGNAL — ${result.symbol}*`,
@@ -94,7 +75,7 @@ async function sendBuyAlert(result) {
     tp3 ? `🎯 *TP3 (sell 25%):* \`$${Number(tp3.price).toFixed(4)}\` — ${tp3.ratio}` : '',
     rr  ? `⚖️ *Risk:Reward:* ${rr}:1` : '',
     ``,
-    `📊 *Confidence:* ${conf}% |${confBar}|`,
+    `📊 *Signal score:* ${conf}% |${confBar}|`,
     `📈 *Score:* ${result.score}/15`,
     ``,
     `🔍 *Why:*`,
@@ -105,13 +86,12 @@ async function sendBuyAlert(result) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await sendInfo(lines);   // → channel (market-wide signal, not a personal trade)
-  markSignalFired(result.symbol, 'BUY');
-  console.log(`[Telegram] BUY alert sent → CHANNEL — ${result.symbol}`);
+  await sendInfo(lines);
+  await markSignalFired(result.symbol, 'BUY');
+  console.log(`[Telegram] BUY alert sent → INFO — ${result.symbol}`);
 }
 
 // ─── New Listing BUY Signal → MAIN CHAT ──────────────────────────────────────
-// Listings are personal — you need to act on them immediately.
 async function sendListingBuyAlert(result) {
   if (result.signal !== 'BUY') return;
 
@@ -121,19 +101,15 @@ async function sendListingBuyAlert(result) {
   const sl  = result.stopLoss;
   const rr  = result.riskReward;
 
-  // ── Coin identity ──────────────────────────────────────────────────────────
   const identityLines = [];
-  identityLines.push(`🪙 *Coin Name:* ${result.coinName || result.baseAsset}`);
-  identityLines.push(`🔤 *Ticker:* ${result.baseAsset}`);
-  if (result.description) {
-    identityLines.push(`📄 *What it is:* ${result.description}`);
-  }
+  identityLines.push(`🪙 *Coin Name:* ${tg.escapeMd(result.coinName || result.baseAsset)}`);
+  identityLines.push(`🔤 *Ticker:* ${tg.escapeMd(result.baseAsset)}`);
+  if (result.description) identityLines.push(`📄 *What it is:* ${tg.escapeMd(result.description)}`);
 
-  // ── Contract addresses ─────────────────────────────────────────────────────
   if (result.contracts && result.contracts.length > 0) {
     identityLines.push(`\n📋 *Contract Addresses:*`);
     result.contracts.forEach(c => {
-      identityLines.push(`  *${c.chainLabel}:*`);
+      identityLines.push(`  *${tg.escapeMd(c.chainLabel)}:*`);
       identityLines.push(`  \`${c.address}\``);
     });
     identityLines.push(`\n⚠️ *Always verify on CoinGecko before buying*`);
@@ -142,13 +118,10 @@ async function sendListingBuyAlert(result) {
   } else {
     identityLines.push(`⚠️ *Contract address not found — verify manually before buying*`);
   }
-
-  if (result.coingeckoUrl) {
-    identityLines.push(`🔗 *CoinGecko:* ${result.coingeckoUrl}`);
-  }
+  if (result.coingeckoUrl) identityLines.push(`🔗 *CoinGecko:* ${result.coingeckoUrl}`);
 
   const riskLine = result.riskFlags?.length > 0
-    ? `⚠️ *Risk Flags:* ${result.riskFlags.join(', ')}`
+    ? `⚠️ *Risk Flags:* ${tg.escapeMd(result.riskFlags.join(', '))}`
     : `✅ No major risk flags`;
 
   const lines = [
@@ -191,7 +164,7 @@ async function sendListingBuyAlert(result) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await sendAction(lines);  // → main chat (personal trade decision needed)
+  await sendAction(lines);
   console.log(`[Telegram] NEW LISTING BUY → MAIN CHAT — ${result.symbol}`);
 }
 
@@ -199,7 +172,7 @@ async function sendListingBuyAlert(result) {
 async function sendBearishAlert(result) {
   if (result.signal !== 'BEARISH_ALERT') return;
   if (result.score < 3) return;
-  if (isDuplicateSignal(result.symbol, 'BEARISH_ALERT')) return;
+  if (await isDuplicateSignal(result.symbol, 'BEARISH_ALERT')) return;
 
   const lines = [
     `🔴 *BEARISH ALERT — ${result.symbol}*`,
@@ -217,12 +190,12 @@ async function sendBearishAlert(result) {
   ].filter(Boolean).join('\n');
 
   await sendAction(lines);
-  markSignalFired(result.symbol, 'BEARISH_ALERT');
+  await markSignalFired(result.symbol, 'BEARISH_ALERT');
 }
 
 // ─── Connection Test ──────────────────────────────────────────────────────────
 async function sendTestMessage() {
-  if (!BOT_TOKEN || !ACTION_CHAT) throw new Error('Telegram credentials not set');
+  if (!tg.isConfigured() || !actionChat()) throw new Error('Telegram credentials not set');
   await sendAction([
     `✅ *CryptoBot V2 Connected*`,
     ``,
@@ -230,20 +203,19 @@ async function sendTestMessage() {
     `  • 🚀 New listing BUY signals`,
     `  • 🔴 Stop loss alerts`,
     `  • 🟢 TP1 / TP2 / TP3 hit`,
-    `  • 🎯 Target hit (10%–50%+ milestones)`,
-    `  • ⚪ HOLD updates every 4 hours`,
+    `  • 🎯 Target hit + milestones`,
+    `  • ⚪ HOLD updates every 4 hours (silent)`,
     `  • 🔴 Bearish alerts`,
     ``,
-    `CHANNEL (${INFO_CHANNEL || '⚠️ not set — add TELEGRAM_INFO_CHANNEL_ID'}):`,
+    `CHANNEL (${infoChannel() || 'not set — add TELEGRAM_INFO_CHANNEL_ID'}):`,
     `  • 🟢 BUY signals from market scanner`,
+    `  • 🚀 Listing / moonshot broadcasts`,
   ].join('\n'));
 }
 
-// ─── Position Alert (v2monitor / check command) ───────────────────────────────
-// ACTION types: STOP_LOSS, TAKE_PROFIT, TARGET_HIT, big milestones (50%+)
-// INFO types:   HOLD, small milestones (10%-40%)
+// ─── Position Alert (check command / custom callers) ──────────────────────────
 async function sendPositionAlert(position, advice, overrideChatId) {
-  const actionChatId = overrideChatId || ACTION_CHAT;
+  const chatId = overrideChatId || position.chatId || actionChat();
 
   const tp1 = advice.tradePlan?.takeProfits?.tp1;
   const tp2 = advice.tradePlan?.takeProfits?.tp2;
@@ -251,18 +223,11 @@ async function sendPositionAlert(position, advice, overrideChatId) {
   const sl  = advice.tradePlan?.stopLoss;
 
   const emoji = {
-    STOP_LOSS:     '🔴',
-    TAKE_PROFIT:   '🟢',
-    TRAIL_STOP:    '🟡',
-    CLOSE_PARTIAL: '🟠',
-    HOLD:          '⚪',
+    STOP_LOSS: '🔴', TAKE_PROFIT: '🟢', TRAIL_STOP: '🟡', CLOSE_PARTIAL: '🟠', HOLD: '⚪',
   }[advice.recommendation] || '⚪';
 
   const urgencyLabel = {
-    CRITICAL: '🚨 URGENT',
-    HIGH:     '⚡ High Priority',
-    MEDIUM:   '⚠️ Medium Priority',
-    LOW:      'ℹ️ Low Priority',
+    CRITICAL: '🚨 URGENT', HIGH: '⚡ High Priority', MEDIUM: '⚠️ Medium Priority', LOW: 'ℹ️ Low Priority',
   }[advice.urgency] || '';
 
   const lines = [
@@ -271,9 +236,7 @@ async function sendPositionAlert(position, advice, overrideChatId) {
     `💰 *Bought at:* \`$${position.buyPrice}\``,
     `📊 *Now:*       \`$${Number(advice.currentPrice).toFixed(4)}\``,
     `📈 *P&L:*       ${advice.pnlDisplay}`,
-    position.quantity
-      ? `💵 *Value:* $${(position.quantity * advice.currentPrice).toFixed(2)}`
-      : '',
+    position.quantity ? `💵 *Value:* $${(position.quantity * advice.currentPrice).toFixed(2)}` : '',
     ``,
     `── *What to do* ──`,
     ...(advice.reasons || []).map(r => `  ${r}`),
@@ -289,18 +252,14 @@ async function sendPositionAlert(position, advice, overrideChatId) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  // ALL position alerts go to main chat — these are your personal trades.
-  // (stop loss, TP, target hit, milestones, hold — you need to see all of these)
-  await sendAction(lines, actionChatId);
+  await sendAction(lines, chatId);
 }
 
-// ─── sendSignalAlert — used by liveService.js ────────────────────────────────
-// Routes to sendBuyAlert or sendBearishAlert based on signal type
+// ─── sendSignalAlert — used by liveService / api/signal ──────────────────────
 async function sendSignalAlert(result) {
   if (!result) return;
-  if (result.signal === 'BUY')            return sendBuyAlert(result);
-  if (result.signal === 'BEARISH_ALERT')  return sendBearishAlert(result);
-  // WAIT / neutral — no alert
+  if (result.signal === 'BUY')           return sendBuyAlert(result);
+  if (result.signal === 'BEARISH_ALERT') return sendBearishAlert(result);
 }
 
 module.exports = {
@@ -309,8 +268,8 @@ module.exports = {
   sendListingBuyAlert,
   sendTestMessage,
   sendPositionAlert,
-  sendSignalAlert,     // used by liveService
+  sendSignalAlert,
   sendAction,
   sendInfo,
-  _send,               // legacy alias
+  _send,
 };

@@ -1,350 +1,307 @@
 /**
  * ─── Position Monitor ─────────────────────────────────────────────────────────
- * GET /api/v2monitor
+ * GET /api/v2monitor?key=CRON_SECRET      (run every 30 min via cron-job.org)
  *
- * TWO-CHANNEL ALERT SYSTEM:
+ * Checks every open position for the admin + all approved users and alerts the
+ * position OWNER in their own chat:
  *
- *  ACTION channel (TELEGRAM_CHAT_ID — your main private chat)
- *  ────────────────────────────────────────────────────────────
- *  🔴 Stop Loss          → EXIT NOW
- *  🚨 Custom Target Hit  → SELL NOW
- *  🟢 TP1 / TP2 / TP3   → Take partial profit
- *  🚀 50%, 100%, 150%... → Round-number milestone (every 50%)
+ *  🔴 Stop loss · 🚨 Custom target · 🟢 TP1/TP2/TP3 · 🚀 50%/100%/150% milestones
+ *      → normal notification
+ *  📊 Other 10% milestones · ⚪ HOLD update every 4h
+ *      → delivered silently (no sound)
  *
- *  INFO channel (TELEGRAM_INFO_CHANNEL_ID — your Telegram channel)
- *  ────────────────────────────────────────────────────────────────
- *  📊 10%, 20%, 30%, 40% milestones (every 10%, skipping 50/100/150)
- *  ⚪ HOLD updates every 4 hours
+ * PRIVACY FIX: personal position alerts used to go to the shared
+ * TELEGRAM_INFO_CHANNEL_ID, so every member saw everyone's trades. They now
+ * only go to the owner. The info channel is for market-wide signals only.
  *
- * Setup:
- *  1. Create a Telegram Channel (e.g. "CryptoBot Info")
- *  2. Add your bot as admin of that channel
- *  3. Add TELEGRAM_INFO_CHANNEL_ID to Vercel env vars
- *     Value = the channel's chat ID (e.g. -1001234567890)
- *     or username (e.g. @mycryptobotinfo)
+ * Other fixes:
+ *  - Stop loss / TPs are locked on the position the first time they are
+ *    calculated (previously recalculated from live ATR every run).
+ *  - HOLD updates use their own timer (lastHoldAlertAt); before, lastChecked
+ *    was reset every run so the 4-hour HOLD never fired.
+ *  - A jump past several milestones sends one alert and marks all of them,
+ *    instead of back-filling lower milestones on later runs.
+ *  - Jumping straight to TP2/TP3 marks the lower TPs as hit too.
+ *  - One storage write per position per run.
  */
 
-const axios = require('axios');
-const { getAllPositions, updateLastChecked, updatePosition } = require('../src/services/positionStore');
-const { getUsersByStatus } = require('../src/services/userService');
+const { getAllPositions, updatePosition } = require('../src/services/positionStore');
+const { getAllActiveChatIds } = require('../src/services/userService');
+const { fetchCurrentData, buildAdvice } = require('../src/services/adviceService');
+const tg = require('../src/lib/telegram');
+const { cors, requireCronKey } = require('../src/lib/auth');
 
-async function getApprovedUsers() {
-  return getUsersByStatus('approved');
-}
-const { fetchCurrentData, buildAdvice } = require('./v2advice');
+const HOLD_INTERVAL_HOURS = 4;
+const MILESTONE_STEP = 10;
 
-const BOT_TOKEN      = process.env.TELEGRAM_BOT_TOKEN;
-const INFO_CHANNEL   = process.env.TELEGRAM_INFO_CHANNEL_ID; // low-priority channel
-
-// ─── Send helpers ─────────────────────────────────────────────────────────────
-
-// ACTION: sends to the user's own chat (urgent — requires immediate action)
-async function sendAction(chatId, text) {
-  if (!BOT_TOKEN || !chatId) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-      { timeout: 8000 }
-    );
-  } catch (e) { console.error('[Monitor ACTION]', e.message); }
-}
-
-// INFO: sends to the shared info channel (low-priority, no action needed)
-// Falls back to the user's own chat if INFO channel not configured
-async function sendInfo(chatId, text) {
-  const dest = INFO_CHANNEL || chatId;
-  if (!BOT_TOKEN || !dest) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: dest, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-      { timeout: 8000 }
-    );
-  } catch (e) { console.error('[Monitor INFO]', e.message); }
-}
-
-// ─── Milestone Helper ─────────────────────────────────────────────────────────
+// ─── Milestone helpers ────────────────────────────────────────────────────────
+/** Highest 10%-step milestone reached and not yet alerted, or null. */
 function getNextMilestone(pnlPct, milestoneHits = []) {
-  if (pnlPct < 10) return null;
-  const STEP    = 10;
-  const highest = Math.floor(pnlPct / STEP) * STEP;
-  for (let m = highest; m >= STEP; m -= STEP) {
-    if (!milestoneHits.includes(m)) return m;
-  }
-  return null;
+  if (pnlPct < MILESTONE_STEP) return null;
+  const highest = Math.floor(pnlPct / MILESTONE_STEP) * MILESTONE_STEP;
+  return milestoneHits.includes(highest) ? null : highest;
 }
 
-// Round milestones (50, 100, 150...) go to ACTION channel — everything else to INFO
-function isRoundMilestone(m) {
-  return m % 50 === 0;
+function milestonesUpTo(m, existing = []) {
+  const all = new Set(existing);
+  for (let x = MILESTONE_STEP; x <= m; x += MILESTONE_STEP) all.add(x);
+  return [...all].sort((a, b) => a - b);
 }
 
-function milestoneEmoji(milestone) {
-  if (milestone >= 100) return '🚀🚀🚀';
-  if (milestone >= 70)  return '🚀🚀';
-  if (milestone >= 40)  return '🚀';
-  if (milestone >= 20)  return '🟢🟢';
+const isRoundMilestone = (m) => m % 50 === 0;
+
+function milestoneEmoji(m) {
+  if (m >= 100) return '🚀🚀🚀';
+  if (m >= 70)  return '🚀🚀';
+  if (m >= 40)  return '🚀';
+  if (m >= 20)  return '🟢🟢';
   return '🟢';
 }
 
-// ─── Core position checker ────────────────────────────────────────────────────
-async function checkPosition(pos, userId) {
-  const actionChatId = userId || pos.chatId || process.env.TELEGRAM_CHAT_ID;
-  const { candles1h, candles4h, currentPrice } = await fetchCurrentData(pos.symbol);
+const fmt = (n, d = 6) => Number(n).toFixed(d);
+const now = () => new Date().toUTCString();
 
-  const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
-  const currentMultiple = currentPrice / pos.buyPrice;
-  const profitDollar    = pos.quantity
-    ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2)
+// ─── Core position checker ────────────────────────────────────────────────────
+/**
+ * Evaluates one position. Returns { recommendation, alerted, updates, messages }
+ * without side effects, so it can be unit-tested; the handler sends/saves.
+ */
+function evaluatePosition(pos, market, nowMs = Date.now()) {
+  const { candles1h, candles4h, currentPrice } = market;
+  const updates  = {};
+  const messages = []; // { text, silent }
+
+  const lockedPlan = pos.stopLossPrice
+    ? { stopLoss: pos.stopLossPrice, takeProfits: pos.takeProfits || null }
     : null;
 
   const advice = buildAdvice({
-    symbol:      pos.symbol,
-    buyPrice:    pos.buyPrice,
-    currentPrice,
-    candles1h,
-    candles4h,
-    accountSize: pos.accountSize,
-    riskPct:     pos.riskPct,
+    symbol: pos.symbol, buyPrice: pos.buyPrice, currentPrice,
+    candles1h, candles4h, accountSize: pos.accountSize, riskPct: pos.riskPct, lockedPlan,
   });
 
   const sl  = advice.tradePlan?.stopLoss;
-  const tp1 = advice.tradePlan?.takeProfits?.tp1;
-  const tp2 = advice.tradePlan?.takeProfits?.tp2;
-  const tp3 = advice.tradePlan?.takeProfits?.tp3;
+  const tps = advice.tradePlan?.takeProfits;
+  const tp1 = tps?.tp1, tp2 = tps?.tp2, tp3 = tps?.tp3;
 
-  if (sl && !pos.stopLossPrice) {
-    await updatePosition(pos.chatId, pos.positionId, { stopLossPrice: sl });
-  }
-  if (currentPrice > (pos.highestPrice || pos.buyPrice)) {
-    await updatePosition(pos.chatId, pos.positionId, { highestPrice: currentPrice });
+  // Lock the plan the first time we have one
+  if (sl && !pos.stopLossPrice) updates.stopLossPrice = sl;
+  if (tps && !pos.takeProfits)  updates.takeProfits = tps;
+  if (currentPrice > (pos.highestPrice || pos.buyPrice)) updates.highestPrice = currentPrice;
+
+  const pnlPct          = ((currentPrice - pos.buyPrice) / pos.buyPrice) * 100;
+  const currentMultiple = currentPrice / pos.buyPrice;
+  const profitDollar    = pos.quantity ? ((currentPrice - pos.buyPrice) * pos.quantity).toFixed(2) : null;
+
+  // Stopped-out positions stay quiet until the user removes or records them
+  if (pos.stopLossHit) {
+    return { recommendation: 'STOPPED_OUT', alerted: false, updates, messages };
   }
 
-  // ── MILESTONE ALERTS ──────────────────────────────────────────────────────
+  // ── MILESTONES ────────────────────────────────────────────────────────────
   const milestoneHits = pos.milestoneHits || [];
   const nextMilestone = getNextMilestone(pnlPct, milestoneHits);
-  let milestoneAlerted = false;
-
   if (nextMilestone !== null) {
-    const emoji      = milestoneEmoji(nextMilestone);
-    const nextTarget = nextMilestone + 10;
-    const nextPrice  = (pos.buyPrice * (1 + nextTarget / 100)).toFixed(6);
+    const nextTarget = nextMilestone + MILESTONE_STEP;
+    const nextPrice  = fmt(pos.buyPrice * (1 + nextTarget / 100));
     const isRound    = isRoundMilestone(nextMilestone);
-
     const ceilingPct   = pos.targetMultiple ? (pos.targetMultiple - 1) * 100 : null;
-    const ceilingAhead = ceilingPct && ceilingPct > nextMilestone && !pos.targetHit;
-    const ceilingMsg   = ceilingAhead
-      ? `🎯 Your target (+${Number.isInteger(ceilingPct) ? ceilingPct : ceilingPct.toFixed(1)}% = \`$${pos.targetPrice.toFixed(6)}\`) is still ahead — hold on.`
-      : '';
+    const ceilingAhead = ceilingPct && ceilingPct > nextMilestone && !pos.targetHit && pos.targetPrice;
 
-    const milestoneMsg = [
-      `${emoji} *+${nextMilestone}% MILESTONE — ${pos.symbol}*`,
-      isRound ? `🎉 *Round number — consider taking some profit!*` : '',
-      ``,
-      `💰 *Bought at:*  \`$${pos.buyPrice}\``,
-      `📊 *Now:*        \`$${currentPrice.toFixed(6)}\``,
-      `📈 *Gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      profitDollar ? `💵 *Profit:*      $${profitDollar}` : '',
-      ``,
-      `📌 *Next milestone:* +${nextTarget}% at \`$${nextPrice}\``,
-      ceilingMsg,
-      ``,
-      sl ? `🛡 *Stop loss:* \`$${sl.toFixed(6)}\`` : '',
-      `💡 _Consider moving your stop loss up to lock in profit._`,
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n');
-
-    if (isRound) {
-      // 50%, 100%, 150%... → ACTION channel (phone buzzes)
-      await sendAction(actionChatId, milestoneMsg);
-    } else {
-      // 10%, 20%, 30%, 40%, 60%... → INFO channel (quiet)
-      await sendInfo(actionChatId, milestoneMsg);
-    }
-
-    await updatePosition(pos.chatId, pos.positionId, {
-      milestoneHits: [...milestoneHits, nextMilestone],
+    messages.push({
+      silent: !isRound,
+      text: [
+        `${milestoneEmoji(nextMilestone)} *+${nextMilestone}% MILESTONE — ${pos.symbol}*`,
+        isRound ? `🎉 *Round number — consider taking some profit!*` : '',
+        ``,
+        `💰 *Bought at:*  \`$${pos.buyPrice}\``,
+        `📊 *Now:*        \`$${fmt(currentPrice)}\``,
+        `📈 *Gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+        profitDollar ? `💵 *Profit:*      $${profitDollar}` : '',
+        ``,
+        `📌 *Next milestone:* +${nextTarget}% at \`$${nextPrice}\``,
+        ceilingAhead ? `🎯 Your target (+${Number.isInteger(ceilingPct) ? ceilingPct : ceilingPct.toFixed(1)}% = \`$${fmt(pos.targetPrice)}\`) is still ahead — hold on.` : '',
+        ``,
+        sl ? `🛡 *Stop loss:* \`$${fmt(sl)}\`` : '',
+        `💡 _Consider moving your stop loss up to lock in profit._`,
+        `⏰ ${now()}`,
+      ].filter(Boolean).join('\n'),
     });
-    milestoneAlerted = true;
+    updates.milestoneHits = milestonesUpTo(nextMilestone, milestoneHits);
   }
 
-  // ── CUSTOM TARGET HIT → ACTION ────────────────────────────────────────────
+  // ── CUSTOM TARGET HIT ─────────────────────────────────────────────────────
   if (pos.targetMultiple && pos.targetPrice && !pos.targetHit && currentPrice >= pos.targetPrice) {
     const ceilingPct  = (pos.targetMultiple - 1) * 100;
-    const targetLabel = Number.isInteger(ceilingPct)
-      ? `+${ceilingPct}% (${pos.targetMultiple}X)`
-      : `${pos.targetMultiple}X`;
-
-    await sendAction(actionChatId, [
-      ``,
-      `🚨🎯🚨 *TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
-      ``,
-      `🌕 *${targetLabel} REACHED — SELL NOW*`,
-      ``,
-      `💰 *You bought at:*   \`$${pos.buyPrice}\``,
-      `📊 *Current price:*   \`$${currentPrice.toFixed(8)}\``,
-      `📈 *Your gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      profitDollar ? `💵 *Estimated profit:* $${profitDollar}` : '',
-      ``,
-      `🔴 *DO THIS RIGHT NOW:*`,
-      `  1. Open your exchange immediately`,
-      `  2. Sell 60% of your position at market price`,
-      `  3. Move stop on remaining 40% to your buy price (\`$${pos.buyPrice}\`)`,
-      `  4. If price drops back to buy price → sell the rest`,
-      `  5. If price keeps rising → enjoy the ride 🚀`,
-      ``,
-      `⚠️ _Do not be greedy. Secure your profit now._`,
-      ``,
-      `Type \`sell ${pos.symbol}\` after you exit to remove this position.`,
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
-
-    await updatePosition(pos.chatId, pos.positionId, { targetHit: true });
-    return { recommendation: `TARGET_HIT_${targetLabel}`, alerted: true };
+    const targetLabel = Number.isInteger(ceilingPct) ? `+${ceilingPct}% (${pos.targetMultiple}X)` : `${pos.targetMultiple}X`;
+    messages.push({
+      silent: false,
+      text: [
+        `🚨🎯🚨 *TARGET HIT — ${pos.symbol}* 🚨🎯🚨`,
+        ``,
+        `🌕 *${targetLabel} REACHED — SELL NOW*`,
+        ``,
+        `💰 *You bought at:*   \`$${pos.buyPrice}\``,
+        `📊 *Current price:*   \`$${fmt(currentPrice, 8)}\``,
+        `📈 *Your gain:*       +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
+        profitDollar ? `💵 *Estimated profit:* $${profitDollar}` : '',
+        ``,
+        `🔴 *DO THIS RIGHT NOW:*`,
+        `  1. Open your exchange immediately`,
+        `  2. Sell 60% of your position at market price`,
+        `  3. Move stop on remaining 40% to your buy price (\`$${pos.buyPrice}\`)`,
+        `  4. If price drops back to buy price → sell the rest`,
+        `  5. If price keeps rising → enjoy the ride 🚀`,
+        ``,
+        `📝 Record your sale: \`sold ${pos.symbol.replace('USDT', '')} ${pos.buyPrice} ${fmt(currentPrice)}\``,
+        `⏰ ${now()}`,
+      ].filter(Boolean).join('\n'),
+    });
+    updates.targetHit = true;
+    return { recommendation: `TARGET_HIT_${targetLabel}`, alerted: true, updates, messages };
   }
 
-  // ── STOP LOSS HIT → ACTION ────────────────────────────────────────────────
-  if (sl && currentPrice <= sl && !pos.stopLossHit) {
-    await sendAction(actionChatId, [
-      `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
-      ``,
-      `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(8)}\``,
-      `📉 *Loss:*      ${pnlPct.toFixed(2)}%`,
-      ``,
-      `🔴 *Sell 100% immediately. No hesitation.*`,
-      `A small loss now prevents a wipeout later.`,
-      ``,
-      `Type \`sell ${pos.symbol}\` to remove this position.`,
-      `⏰ ${new Date().toUTCString()}`,
-    ].join('\n'));
-
-    await updatePosition(pos.chatId, pos.positionId, { stopLossHit: true });
-    return { recommendation: 'STOP_LOSS', alerted: true };
+  // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
+  if (sl && currentPrice <= sl) {
+    messages.push({
+      silent: false,
+      text: [
+        `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
+        ``,
+        `💰 *Bought at:* \`$${pos.buyPrice}\``,
+        `🛡 *Stop:*      \`$${fmt(sl)}\``,
+        `📊 *Now:*       \`$${fmt(currentPrice, 8)}\``,
+        `📉 *Loss:*      ${pnlPct.toFixed(2)}%`,
+        ``,
+        `🔴 *Sell 100% immediately. No hesitation.*`,
+        `A small loss now prevents a wipeout later.`,
+        ``,
+        `📝 Record your exit: \`sold ${pos.symbol.replace('USDT', '')} ${pos.buyPrice} ${fmt(currentPrice)}\``,
+        `⏰ ${now()}`,
+      ].join('\n'),
+    });
+    updates.stopLossHit = true;
+    return { recommendation: 'STOP_LOSS', alerted: true, updates, messages };
   }
 
-  // ── TP3 HIT → ACTION ──────────────────────────────────────────────────────
+  const watching = pos.targetMultiple && !pos.targetHit && pos.targetPrice
+    ? `🎯 Your target is \`$${fmt(pos.targetPrice)}\` — still watching.` : '';
+
+  // ── TP3 ───────────────────────────────────────────────────────────────────
   if (tp3 && currentPrice >= tp3.price && !pos.tp3Hit) {
-    await updatePosition(pos.chatId, pos.positionId, { tp3Hit: true });
-    await sendAction(actionChatId, [
-      `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`,
-      ``,
+    Object.assign(updates, { tp1Hit: true, tp2Hit: true, tp3Hit: true });
+    messages.push({ silent: false, text: [
+      `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
-      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      ``,
+      `📊 *Now:*       \`$${fmt(currentPrice, 4)}\``,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`, ``,
       `🟢 *Sell remaining 25% — TP3 reached. Outstanding trade.*`,
-      pos.targetMultiple && !pos.targetHit
-        ? `🎯 Your target is \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
-        : '',
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
-    return { recommendation: 'TP3', alerted: true };
+      watching, `⏰ ${now()}`,
+    ].filter(Boolean).join('\n') });
+    return { recommendation: 'TP3', alerted: true, updates, messages };
   }
 
-  // ── TP2 HIT → ACTION ──────────────────────────────────────────────────────
-  if (tp2 && currentPrice >= tp2.price && pnlPct > 0 && !pos.tp2Hit) {
-    await updatePosition(pos.chatId, pos.positionId, { tp2Hit: true });
-    await sendAction(actionChatId, [
-      `🟢🟢 *TP2 HIT — ${pos.symbol}*`,
-      ``,
+  // ── TP2 ───────────────────────────────────────────────────────────────────
+  if (tp2 && currentPrice >= tp2.price && !pos.tp2Hit) {
+    Object.assign(updates, { tp1Hit: true, tp2Hit: true });
+    messages.push({ silent: false, text: [
+      `🟢🟢 *TP2 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
-      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      ``,
+      `📊 *Now:*       \`$${fmt(currentPrice, 4)}\``,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`, ``,
       `🟢 *Sell 35% of position now.*`,
-      `🛡 Move stop loss to \`$${tp1?.price.toFixed(4) || pos.buyPrice}\` (lock in profit)`,
-      pos.targetMultiple && !pos.targetHit
-        ? `🎯 Target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
-        : `🎯 Next: TP3 at \`$${tp3?.price.toFixed(4)}\``,
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
-    return { recommendation: 'TP2', alerted: true };
+      `🛡 Move stop loss to \`$${tp1 ? fmt(tp1.price, 4) : pos.buyPrice}\` (lock in profit)`,
+      watching || (tp3 ? `🎯 Next: TP3 at \`$${fmt(tp3.price, 4)}\`` : ''),
+      `⏰ ${now()}`,
+    ].filter(Boolean).join('\n') });
+    return { recommendation: 'TP2', alerted: true, updates, messages };
   }
 
-  // ── TP1 HIT → ACTION ──────────────────────────────────────────────────────
-  if (tp1 && currentPrice >= tp1.price && pnlPct > 0 && !pos.tp1Hit) {
-    await updatePosition(pos.chatId, pos.positionId, { tp1Hit: true });
-    await sendAction(actionChatId, [
-      `🟢 *TP1 HIT — ${pos.symbol}*`,
-      ``,
+  // ── TP1 ───────────────────────────────────────────────────────────────────
+  if (tp1 && currentPrice >= tp1.price && !pos.tp1Hit) {
+    updates.tp1Hit = true;
+    messages.push({ silent: false, text: [
+      `🟢 *TP1 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(4)}\``,
-      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      ``,
+      `📊 *Now:*       \`$${fmt(currentPrice, 4)}\``,
+      `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`, ``,
       `🟢 *Sell 40% of position now.*`,
       `🛡 Move stop loss to \`$${pos.buyPrice}\` — free trade, can't lose now.`,
-      pos.targetMultiple && !pos.targetHit
-        ? `🎯 Target at \`$${pos.targetPrice.toFixed(6)}\` — still watching.`
-        : `🎯 Next: TP2 at \`$${tp2?.price.toFixed(4)}\``,
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
-    return { recommendation: 'TP1', alerted: true };
+      watching || (tp2 ? `🎯 Next: TP2 at \`$${fmt(tp2.price, 4)}\`` : ''),
+      `⏰ ${now()}`,
+    ].filter(Boolean).join('\n') });
+    return { recommendation: 'TP1', alerted: true, updates, messages };
   }
 
-  // ── HOLD → INFO (every 4 hours, quiet channel) ────────────────────────────
-  const lastChecked     = pos.lastChecked ? new Date(pos.lastChecked).getTime() : 0;
-  const hoursSinceCheck = (Date.now() - lastChecked) / (1000 * 60 * 60);
+  // ── HOLD update (every 4h, silent) ────────────────────────────────────────
+  const lastHold = pos.lastHoldAlertAt ? new Date(pos.lastHoldAlertAt).getTime() : 0;
+  const hoursSinceHold = (nowMs - lastHold) / 3_600_000;
 
-  if (hoursSinceCheck >= 4) {
+  if (hoursSinceHold >= HOLD_INTERVAL_HOURS && nextMilestone === null) {
     const distToTarget = pos.targetPrice
-      ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away`
-      : null;
-    const nextMs      = Math.ceil(Math.max(pnlPct, 0) / 10) * 10 || 10;
-    const nextMsPrice = (pos.buyPrice * (1 + nextMs / 100)).toFixed(6);
+      ? `${(((pos.targetPrice - currentPrice) / currentPrice) * 100).toFixed(1)}% away` : null;
+    const nextMs      = (Math.floor(Math.max(pnlPct, 0) / MILESTONE_STEP) + 1) * MILESTONE_STEP;
+    const nextMsPrice = fmt(pos.buyPrice * (1 + nextMs / 100));
 
-    await sendInfo(actionChatId, [
-      `⚪ *HOLD — ${pos.symbol}*`,
-      ``,
+    messages.push({ silent: true, text: [
+      `⚪ *HOLD — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
-      `📊 *Now:*       \`$${currentPrice.toFixed(6)}\``,
+      `📊 *Now:*       \`$${fmt(currentPrice)}\``,
       `📈 *P&L:*       ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`,
-      pos.targetMultiple
-        ? `🎯 *Target:* \`$${pos.targetPrice.toFixed(6)}\` — ${distToTarget}`
-        : '',
-      pnlPct < nextMs
-        ? `📌 *Next milestone:* +${nextMs}% at \`$${nextMsPrice}\``
-        : '',
+      pos.targetPrice && !pos.targetHit ? `🎯 *Target:* \`$${fmt(pos.targetPrice)}\` — ${distToTarget}` : '',
+      `📌 *Next milestone:* +${nextMs}% at \`$${nextMsPrice}\``,
       ``,
       `✅ Stay in the trade. No action needed.`,
-      sl  ? `🛡 Stop loss: \`$${sl.toFixed(6)}\`` : '',
-      tp1 ? `🎯 Next TP: \`$${tp1.price.toFixed(4)}\`` : '',
-      `⏰ ${new Date().toUTCString()}`,
-    ].filter(Boolean).join('\n'));
-
-    return { recommendation: 'HOLD', alerted: true };
+      sl  ? `🛡 Stop loss: \`$${fmt(sl)}\`` : '',
+      tp1 && !pos.tp1Hit ? `🎯 Next TP: \`$${fmt(tp1.price, 4)}\`` : '',
+      `⏰ ${now()}`,
+    ].filter(Boolean).join('\n') });
+    updates.lastHoldAlertAt = new Date(nowMs).toISOString();
+    return { recommendation: 'HOLD', alerted: true, updates, messages };
   }
 
-  if (milestoneAlerted) {
-    return { recommendation: `MILESTONE_${nextMilestone}PCT`, alerted: true };
+  if (nextMilestone !== null) {
+    return { recommendation: `MILESTONE_${nextMilestone}PCT`, alerted: true, updates, messages };
+  }
+  return { recommendation: 'HOLD', alerted: false, updates, messages };
+}
+
+async function checkPosition(pos, ownerChatId) {
+  const market = await fetchCurrentData(pos.symbol);
+  const result = evaluatePosition(pos, market);
+  const chatId = ownerChatId || pos.chatId;
+
+  for (const m of result.messages) {
+    await tg.send(chatId, m.text, { silent: m.silent });
   }
 
-  return { recommendation: 'HOLD', alerted: false };
+  await updatePosition(chatId, pos.positionId, {
+    ...result.updates,
+    lastChecked:        new Date().toISOString(),
+    lastRecommendation: result.recommendation,
+  });
+
+  return { recommendation: result.recommendation, alerted: result.alerted };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!requireCronKey(req, res)) return;
 
   try {
-    const adminId       = process.env.TELEGRAM_CHAT_ID;
-    const approvedUsers = await getApprovedUsers();
-    const allUserIds    = [...new Set([adminId, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
-
-    const results      = [];
+    const userIds = await getAllActiveChatIds();
+    const results = [];
     let totalPositions = 0;
 
-    for (const userId of allUserIds) {
-      const positions = await getAllPositions(userId);
-      const entries   = Object.values(positions);
+    for (const userId of userIds) {
+      const entries = Object.values(await getAllPositions(userId));
       totalPositions += entries.length;
 
       for (const pos of entries) {
         try {
           const result = await checkPosition(pos, userId);
-          await updateLastChecked(userId, pos.positionId, result.recommendation);
           results.push({ userId, symbol: pos.symbol, ...result });
         } catch (err) {
           console.error(`[Monitor] ${userId}/${pos.symbol}:`, err.message);
@@ -361,11 +318,12 @@ module.exports = async (req, res) => {
       success:   true,
       checked:   results.length,
       results,
-      infoChannel: INFO_CHANNEL || 'not configured — falling back to user chat',
       checkedAt: new Date().toISOString(),
     });
-
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+
+module.exports.evaluatePosition = evaluatePosition;
+module.exports.getNextMilestone = getNextMilestone;

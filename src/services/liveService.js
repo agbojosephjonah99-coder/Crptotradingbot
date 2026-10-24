@@ -1,59 +1,39 @@
+/**
+ * Local runner used by index.js (one-off) and scheduler.js (cron).
+ * Uses the same scan engine as /api/v2scan, so local and deployed signals match.
+ */
 require('dotenv').config();
-const { fetchHistoricalKlines, fetchLatestPrice } = require('./binanceService');
-const { evaluateSignal } = require('./signalService');
+const { scanSymbols } = require('./scanEngine');
 const { sendSignalAlert } = require('./telegramService');
 const { saveSignals } = require('./storageService');
+const { configuredSymbols } = require('../lib/market');
 
 function getSymbols() {
-  const envSymbols = process.env.BINANCE_SYMBOLS || process.env.BINANCE_SYMBOL || 'SOLUSDT';
-  return envSymbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+  return configuredSymbols('SOLUSDT');
 }
 
-async function evaluateSymbol(symbol) {
-  const [fourHour, oneHour, fifteenMin] = await Promise.all([
-    fetchHistoricalKlines(symbol, '4h', 250),
-    fetchHistoricalKlines(symbol, '1h', 120),
-    fetchHistoricalKlines(symbol, '15m', 20)
-  ]);
-
-  const signalData = evaluateSignal({ fourHour, oneHour, fifteenMin });
-  const marketPrice = await fetchLatestPrice(symbol);
-
-  signalData.symbol = symbol;
-  signalData.price = marketPrice;
-
-  return signalData;
-}
+const fmt = (n, d = 2) => (typeof n === 'number' && isFinite(n) ? n.toFixed(d) : 'n/a');
 
 async function runLiveCheck() {
-  const symbols = getSymbols();
-  const results = [];
+  const results = await scanSymbols(getSymbols());
 
-  for (const symbol of symbols) {
-    try {
-      const signalData = await evaluateSymbol(symbol);
-      console.log(`=== ${symbol} MTF SIGNAL ===`);
-      console.log(`Signal: ${signalData.signal}`);
-      console.log(`Score: ${signalData.score}`);
-      console.log(`Trend: ${signalData.trend}`);
-      console.log(`Price: ${signalData.price.toFixed(2)}`);
-      console.log(`RSI: ${signalData.rsi?.toFixed(2)}`);
-      console.log(`EMA50: ${signalData.ema50?.toFixed(2)}`);
-      console.log(`EMA200: ${signalData.ema200?.toFixed(2)}`);
-      console.log(`Confirmed: ${signalData.confirmationType}`);
-      console.log(`Time: ${signalData.time}`);
+  for (const r of results) {
+    console.log(`=== ${r.symbol} MTF SIGNAL ===`);
+    if (r.signal === 'ERROR') {
+      console.error(`Live check failed for ${r.symbol}: ${r.error}`);
+      continue;
+    }
+    console.log(`Signal: ${r.signal}  Score: ${r.score}  Confidence: ${r.confidence}%  Trend: ${r.trend ?? 'n/a'}`);
+    console.log(`Price: ${fmt(r.price, 4)}  RSI: ${fmt(r.rsi)}  EMA50: ${fmt(r.ema50, 4)}  EMA200(4h): ${fmt(r.ema200, 4)}  ADX: ${fmt(r.adxValue)}`);
+    (r.factors || []).forEach(f => console.log(`  • ${f}`));
 
-      if (signalData.signal === 'BUY' || signalData.signal === 'SELL') {
-        await sendSignalAlert(signalData);
-        console.log('Telegram alert sent.');
-      } else {
-        console.log('No alert sent for WAIT signal.');
+    if (r.signal === 'BUY' || r.signal === 'BEARISH_ALERT') {
+      try {
+        await sendSignalAlert(r);
+        console.log('Telegram alert processed (dedup may skip repeats).');
+      } catch (err) {
+        console.error('Telegram alert failed:', err.message);
       }
-
-      results.push(signalData);
-    } catch (error) {
-      console.error(`Live check failed for ${symbol}:`, error.message || error);
-      results.push({ symbol, signal: 'ERROR', error: error.message || 'unknown error' });
     }
   }
 
@@ -61,7 +41,4 @@ async function runLiveCheck() {
   return results;
 }
 
-module.exports = {
-  runLiveCheck,
-  getSymbols
-};
+module.exports = { runLiveCheck, getSymbols };

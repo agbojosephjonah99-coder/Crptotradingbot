@@ -2,7 +2,7 @@
  * ─── New Listings Auto-Alert ──────────────────────────────────────────────────
  * GET /api/v2listings-alert
  *
- * Hit by cron-job.org every 30 minutes.
+ * Hit by cron-job.org every 30 minutes:  /api/v2listings-alert?key=CRON_SECRET
  * Broadcasts new listings to ALL approved users automatically.
  *
  * TWO-CHANNEL SYSTEM:
@@ -17,74 +17,43 @@
  *  Every alert includes the contract address for every chain from CoinGecko.
  */
 
-const axios = require('axios');
 const { getMoonshots, getNewListingsWithMetadata } = require('../src/services/listingsService');
-const { getUsersByStatus } = require('../src/services/userService');
+const { getAllActiveChatIds } = require('../src/services/userService');
+const store = require('../src/lib/redis');
+const tg = require('../src/lib/telegram');
+const { cors, requireCronKey } = require('../src/lib/auth');
 
-const BOT_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_ID     = process.env.TELEGRAM_CHAT_ID;
-const INFO_CHANNEL = process.env.TELEGRAM_INFO_CHANNEL_ID;
-
-// ─── Alert cache (24h dedup) ──────────────────────────────────────────────────
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const CACHE_KEY     = 'cryptobot:listed-alerts';
-const COOLDOWN_MS   = 24 * 60 * 60 * 1000;
-const memCache      = {};
+// ─── Alert cache (24h dedup, persisted in Redis) ──────────────────────────────
+const CACHE_KEY   = 'cryptobot:listed-alerts';
+const COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 async function getAlertedCache() {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return memCache;
-  try {
-    const r = await axios.get(`${UPSTASH_URL}/get/${CACHE_KEY}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }, timeout: 5000,
-    });
-    return r.data.result ? JSON.parse(r.data.result) : {};
-  } catch { return {}; }
+  try { return (await store.getJSON(CACHE_KEY, {})) || {}; }
+  catch { return {}; }
 }
 
 async function saveAlertedCache(cache) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) { Object.assign(memCache, cache); return; }
-  try {
-    await axios.post(`${UPSTASH_URL}/set/${CACHE_KEY}`, JSON.stringify(cache), {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
-      timeout: 5000,
-    });
-  } catch (e) { console.error('[ListingsAlert] Cache save error:', e.message); }
+  try { await store.setJSON(CACHE_KEY, cache); }
+  catch (e) { console.error('[ListingsAlert] Cache save error:', e.message); }
 }
 
 function isAlreadyAlerted(cache, symbol) {
   const ts = cache[symbol];
-  return ts && (Date.now() - ts) < COOLDOWN_MS;
-}
-
-// ─── Send to one destination ──────────────────────────────────────────────────
-async function sendMessage(chatId, text) {
-  if (!BOT_TOKEN || !chatId) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-      { timeout: 8000 }
-    );
-  } catch (e) { console.error(`[ListingsAlert] Send failed to ${chatId}:`, e.message); }
+  return !!ts && (Date.now() - ts) < COOLDOWN_MS;
 }
 
 // ─── Broadcast listing to INFO channel (or fallback to all user chats) ────────
-// Listings are LOW PRIORITY — they go to the quiet info channel only.
-// Users check that channel at their own pace.
+// Listings are market-wide and LOW PRIORITY — they go to the shared info channel.
 async function broadcastListing(text) {
-  if (INFO_CHANNEL) {
-    // Single destination — the shared info channel
-    await sendMessage(INFO_CHANNEL, text);
-  } else {
-    // Fallback: no info channel configured → send to all users directly
-    // (this is the noisy fallback — set up TELEGRAM_INFO_CHANNEL_ID to avoid this)
-    const approvedUsers = await getUsersByStatus('approved');
-    const allIds = [...new Set([ADMIN_ID, ...approvedUsers.map(u => u.chatId)])].filter(Boolean);
-    for (const chatId of allIds) {
-      await sendMessage(chatId, text);
-      await new Promise(r => setTimeout(r, 300));
-    }
+  const infoChannel = process.env.TELEGRAM_INFO_CHANNEL_ID;
+  if (infoChannel) {
+    await tg.sendLong(infoChannel, text);
+    return;
+  }
+  // Fallback: no info channel configured → send silently to every user
+  for (const chatId of await getAllActiveChatIds()) {
+    await tg.sendLong(chatId, text, { silent: true });
+    await tg.sleep(300);
   }
 }
 
@@ -103,7 +72,7 @@ function buildListingMessage(coin, type) {
   const meta     = coin.meta;
   const price    = meta?.currentPrice || coin.price;
   const symbol   = coin.base || coin.symbol;
-  const name     = meta?.name || symbol || 'Unknown';
+  const name     = tg.escapeMd(meta?.name || symbol || 'Unknown');
   const change   = coin.change24h ?? coin.priceChange24h;
   const vol      = coin.volume    || coin.volume24h;
   const mcap     = meta?.marketCap;
@@ -115,7 +84,7 @@ function buildListingMessage(coin, type) {
   if (contracts.length > 0) {
     const lines = ['📋 *Contract Addresses:*'];
     contracts.forEach(ct => {
-      lines.push(`  *${ct.chainLabel}:*`);
+      lines.push(`  *${tg.escapeMd(ct.chainLabel)}:*`);
       lines.push(`  \`${ct.address}\``);
     });
     lines.push(`⚠️ _Verify on CoinGecko before buying_`);
@@ -128,7 +97,7 @@ function buildListingMessage(coin, type) {
 
   // ── Probability line (for moonshots) ───────────────────────────────────
   const probLine = coin.probability
-    ? `\n📊 *Probability:* ${coin.probability}% — ${coin.band}`
+    ? `\n📊 *Signal score:* ${coin.probability}% — ${coin.band}`
     : '';
 
   // ── Green signals ───────────────────────────────────────────────────────
@@ -145,7 +114,7 @@ function buildListingMessage(coin, type) {
 
   // ── Description ─────────────────────────────────────────────────────────
   const desc = meta?.description
-    ? `\n📄 _${meta.description.slice(0, 120)}_`
+    ? `\n📄 _${tg.escapeMd(meta.description.slice(0, 120))}_`
     : '';
 
   // ── Targets ─────────────────────────────────────────────────────────────
@@ -181,8 +150,9 @@ function buildListingMessage(coin, type) {
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!requireCronKey(req, res)) return;
 
   try {
     const cache   = await getAlertedCache();
@@ -202,7 +172,7 @@ module.exports = async (req, res) => {
       await broadcastListing(buildListingMessage(coin, 'moonshot'));
       cache[symbol] = Date.now();
       alerted.push(symbol);
-      await new Promise(r => setTimeout(r, 500));
+      await tg.sleep(500);
     }
 
     // ── Scan 2: New listings + CoinGecko trending ─────────────────────────
@@ -217,7 +187,7 @@ module.exports = async (req, res) => {
       await broadcastListing(buildListingMessage(coin, 'listing'));
       cache[symbol] = Date.now();
       alerted.push(symbol);
-      await new Promise(r => setTimeout(r, 500));
+      await tg.sleep(500);
     }
 
     for (const coin of trending) {
@@ -227,7 +197,7 @@ module.exports = async (req, res) => {
       await broadcastListing(buildListingMessage(coin, 'trending'));
       cache[symbol] = Date.now();
       alerted.push(symbol);
-      await new Promise(r => setTimeout(r, 500));
+      await tg.sleep(500);
     }
 
     // ── Prune cache entries older than 24h then save ───────────────────────
@@ -243,9 +213,9 @@ module.exports = async (req, res) => {
       skipped,
       alertedCount: alerted.length,
       skippedCount: skipped.length,
-      destination:  INFO_CHANNEL
-        ? `Info channel (${INFO_CHANNEL})`
-        : 'Fallback — no TELEGRAM_INFO_CHANNEL_ID set',
+      destination:  process.env.TELEGRAM_INFO_CHANNEL_ID
+        ? 'Info channel'
+        : 'Fallback — no TELEGRAM_INFO_CHANNEL_ID set (sent silently to each user)',
       checkedAt:    new Date().toISOString(),
     });
 

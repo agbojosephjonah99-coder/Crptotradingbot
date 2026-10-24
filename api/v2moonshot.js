@@ -1,149 +1,127 @@
 /**
  * ─── Auto Moonshot Alert Engine ──────────────────────────────────────────────
- * GET /api/v2moonshot
+ * GET /api/v2moonshot?key=CRON_SECRET     (every 30 min via cron-job.org)
  *
- * Hit this endpoint every 30 mins via cron-job.org
- * Scans the entire market for coins with genuine 2x-5x potential
- * and fires Telegram alerts automatically — no command needed.
+ * Scans for high-scoring moonshot candidates and sends them to the admin chat.
  *
- * Only alerts when score >= 70/100 to avoid spam.
- * Deduplication: same coin won't alert again for 6 hours.
+ * BUGFIX: this filtered on `coin.score >= 70` and printed `coin.reasons`, but
+ * getMoonshots() returns `probability` and `greenSignals` — so it never sent a
+ * single alert. It now uses the real fields.
+ * Threshold: MOONSHOT_MIN_SCORE env var (default 70).
+ * Dedup: 6h per coin, stored in Redis (the in-memory cache reset on cold starts).
  */
 
-const axios = require('axios');
 const { getMoonshots } = require('../src/services/listingsService');
+const store = require('../src/lib/redis');
+const tg = require('../src/lib/telegram');
+const { cors, requireCronKey } = require('../src/lib/auth');
 
-const BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID    = process.env.TELEGRAM_CHAT_ID;
-const KUCOIN_BASE = 'https://api.kucoin.com/api/v1';
+const COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const CACHE_KEY   = 'cryptobot:moonshot-alerts';
 
-// In-memory dedup cache (resets on cold start — acceptable)
-const alertCache = new Map();
-const COOLDOWN   = 6 * 60 * 60 * 1000; // 6 hours per coin
-
-function isDuplicate(symbol) {
-  const last = alertCache.get(symbol);
-  return last && (Date.now() - last) < COOLDOWN;
+function fmtPrice(p) {
+  if (!p) return 'N/A';
+  if (p < 0.001) return p.toFixed(8);
+  if (p < 0.01)  return p.toFixed(6);
+  return p.toFixed(4);
 }
-function markSent(symbol) { alertCache.set(symbol, Date.now()); }
 
-async function sendAlert(text) {
-  if (!BOT_TOKEN || !CHAT_ID) return;
-  try {
-    await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-      { chat_id: CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-      { timeout: 8000 }
-    );
-  } catch (e) { console.error('[Moonshot Alert]', e.message); }
+function buildMessage(coin) {
+  const meta  = coin.meta;
+  const price = meta?.currentPrice || coin.price;
+  const p     = fmtPrice(price);
+  const name  = tg.escapeMd(meta?.name || coin.base);
+
+  const lines = [
+    `🚨 *HIGH-SCORE MOONSHOT — ${name} (${coin.base})* 🚨`,
+    ``,
+    `📊 *Signal score:* ${coin.probability}% — ${coin.band}`,
+    `_Heuristic score from 7 factors, not a guaranteed probability._`,
+    ``,
+    `💰 *Current Price:* \`$${p}\``,
+    `📈 *24H Change:*    +${Number(coin.change24h).toFixed(2)}%`,
+    `💵 *24H Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
+    meta?.marketCap ? `🏦 *Market Cap:*    $${(meta.marketCap / 1e6).toFixed(1)}M` : '',
+    coin.isTrending ? `🔥 *TRENDING on CoinGecko right now*` : '',
+    ``,
+    `🎯 *PROFIT TARGETS:*`,
+    `  2X → \`$${fmtPrice(price * 2)}\` (+100%)`,
+    `  3X → \`$${fmtPrice(price * 3)}\` (+200%)`,
+    `  5X → \`$${fmtPrice(price * 5)}\` (+400%)`,
+    ``,
+    (coin.greenSignals || []).length ? `📋 *Why this coin:*` : '',
+    ...(coin.greenSignals || []).slice(0, 5).map(r => `  ✅ ${r}`),
+    (coin.redFlags || []).length ? `\n⚠️ *Watch out:*` : '',
+    ...(coin.redFlags || []).slice(0, 3).map(r => `  • ${r}`),
+    ``,
+  ];
+
+  if (meta?.contracts?.length > 0) {
+    lines.push(`📋 *Contract Addresses:*`);
+    meta.contracts.slice(0, 3).forEach(ct => {
+      lines.push(`  *${tg.escapeMd(ct.chainLabel)}:*`);
+      lines.push(`  \`${ct.address}\``);
+    });
+    lines.push(`⚠️ _Verify on CoinGecko before buying_`);
+  } else if (meta?.isNativeAsset) {
+    lines.push(`ℹ️ _Native asset — no contract address_`);
+  } else {
+    lines.push(`⚠️ _Verify contract on CoinGecko before buying_`);
+  }
+  if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
+
+  lines.push(
+    ``,
+    `── *HOW TO TRADE THIS* ──`,
+    `1️⃣ Buy on exchange at \`$${p}\``,
+    `2️⃣ Tell the bot you bought:`,
+    `   \`buy ${coin.base} ${p} 2x\` ← alert at 2X`,
+    `   \`buy ${coin.base} ${p} 5x\` ← alert at 5X`,
+    `3️⃣ The bot monitors it and alerts you when to sell`,
+    ``,
+    `🔴 *RISK MANAGEMENT:*`,
+    `  • ${coin.positionAdvice || 'Max 1-2% of your account on this trade'}`,
+    `  • New coins are HIGH RISK — only money you can afford to lose`,
+    `⏰ ${new Date().toUTCString()}`,
+  );
+  return lines.filter(Boolean).join('\n');
 }
 
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!requireCronKey(req, res)) return;
 
   try {
+    const minScore  = Number(process.env.MOONSHOT_MIN_SCORE) || 70;
     const moonshots = await getMoonshots();
+    const cache     = (await store.getJSON(CACHE_KEY, {}).catch(() => ({}))) || {};
+    const nowMs     = Date.now();
 
-    // Only fire alerts for genuinely high-confidence picks (score >= 70)
-    const qualified = moonshots.filter(c => c.score >= 70 && !isDuplicate(c.base));
-
-    if (qualified.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No high-confidence moonshots right now',
-        scannedAt: new Date().toISOString(),
-      });
-    }
+    const qualified = moonshots.filter(c =>
+      c.probability >= minScore && !(cache[c.base] && nowMs - cache[c.base] < COOLDOWN_MS)
+    );
 
     for (const coin of qualified) {
-      const meta     = coin.meta;
-      const priceStr = coin.price < 0.001
-        ? coin.price.toFixed(8)
-        : coin.price < 0.01
-          ? coin.price.toFixed(6)
-          : coin.price.toFixed(4);
-
-      const cgPrice = meta?.currentPrice
-        ? (meta.currentPrice < 0.001 ? meta.currentPrice.toFixed(8) : meta.currentPrice.toFixed(4))
-        : priceStr;
-
-      // Calculate each target price
-      const t2x = (parseFloat(cgPrice) * 2).toFixed(6);
-      const t3x = (parseFloat(cgPrice) * 3).toFixed(6);
-      const t4x = (parseFloat(cgPrice) * 4).toFixed(6);
-      const t5x = (parseFloat(cgPrice) * 5).toFixed(6);
-
-      const lines = [
-        `🚨 *HIGH CONFIDENCE ALERT — ${meta?.name || coin.base} (${coin.base})* 🚨`,
-        ``,
-        `⚡ *This coin has a ${coin.probability}% chance of a major pump within 3 days.*`,
-        ``,
-        `💰 *Current Price:* \`$${cgPrice}\``,
-        `📈 *24H Change:*    +${coin.change24h.toFixed(2)}%`,
-        `💵 *24H Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
-        meta?.marketCap ? `🏦 *Market Cap:*    $${(meta.marketCap / 1e6).toFixed(1)}M` : '',
-        coin.isTrending ? `🔥 *TRENDING on CoinGecko right now*` : '',
-        `📊 *Confidence Score:* ${coin.score}/100`,
-        ``,
-        `🎯 *PROFIT TARGETS:*`,
-        `  2X → \`$${t2x}\` (+100%)`,
-        `  3X → \`$${t3x}\` (+200%)`,
-        `  4X → \`$${t4x}\` (+300%)`,
-        `  5X → \`$${t5x}\` (+400%)`,
-        ``,
-        `📋 *Why this coin:*`,
-        ...coin.reasons.map(r => `  ✅ ${r}`),
-        ``,
-      ];
-
-      // Contract addresses
-      if (meta?.contracts?.length > 0) {
-        lines.push(`📋 *Contract Addresses:*`);
-        meta.contracts.slice(0, 3).forEach(ct => {
-          lines.push(`  *${ct.chainLabel}:*`);
-          lines.push(`  \`${ct.address}\``);
-        });
-        lines.push(`⚠️ _Verify on CoinGecko before buying_`);
-      } else if (meta?.isNativeAsset) {
-        lines.push(`ℹ️ _Native asset — no contract address_`);
-      } else {
-        lines.push(`⚠️ _Verify contract on CoinGecko before buying_`);
-      }
-
-      if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
-
-      lines.push(``);
-      lines.push(`── *HOW TO TRADE THIS* ──`);
-      lines.push(`1️⃣ Buy on exchange at \`$${cgPrice}\``);
-      lines.push(`2️⃣ Tell the bot you bought:`);
-      lines.push(`   \`buy ${coin.base} ${cgPrice} 2x\` ← alert at 2X`);
-      lines.push(`   \`buy ${coin.base} ${cgPrice} 3x\` ← alert at 3X`);
-      lines.push(`   \`buy ${coin.base} ${cgPrice} 5x\` ← alert at 5X`);
-      lines.push(`3️⃣ Bot monitors 24/7 and alerts you the moment to sell`);
-      lines.push(``);
-      lines.push(`🔴 *RISK MANAGEMENT:*`);
-      lines.push(`  • Max 1-2% of your account on this trade`);
-      lines.push(`  • If it drops 20% from entry → exit immediately`);
-      lines.push(`  • New coins are HIGH RISK — only money you can afford to lose`);
-      lines.push(`⏰ ${new Date().toUTCString()}`);
-
-      await sendAlert(lines.filter(Boolean).join('\n'));
-      markSent(coin.base);
-
-      // Small delay between messages to avoid Telegram rate limit
-      await new Promise(r => setTimeout(r, 1000));
+      await tg.sendLong(process.env.TELEGRAM_CHAT_ID, buildMessage(coin));
+      cache[coin.base] = Date.now();
+      await tg.sleep(1000); // stay under Telegram rate limits
     }
+
+    for (const [sym, ts] of Object.entries(cache)) if (nowMs - ts > COOLDOWN_MS) delete cache[sym];
+    await store.setJSON(CACHE_KEY, cache).catch(e => console.error('[v2moonshot] cache save:', e.message));
 
     return res.status(200).json({
       success:   true,
-      alerted:   qualified.length,
-      coins:     qualified.map(c => c.base),
+      minScore,
+      candidates: moonshots.map(c => ({ coin: c.base, score: c.probability })),
+      alerted:   qualified.map(c => c.base),
       scannedAt: new Date().toISOString(),
     });
-
   } catch (err) {
     console.error('[v2moonshot]', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+
+module.exports.buildMessage = buildMessage;
