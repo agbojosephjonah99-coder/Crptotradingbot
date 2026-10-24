@@ -458,6 +458,9 @@ dialog.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end
     <div class="tab" onclick="switchTab('history')" id="tab-history">
       🧾 History
     </div>
+    <div class="tab" onclick="switchTab('practice')" id="tab-practice">
+      🎮 Practice
+    </div>
     <div class="tab" onclick="switchTab('auto')" id="tab-auto">
       🤖 Auto-exits
     </div>
@@ -513,6 +516,11 @@ dialog.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end
   <!-- Portfolio Panel (the logged-in user's real positions) -->
   <div class="panel" id="panel-portfolio">
     <div id="portfolio-content"></div>
+  </div>
+
+  <!-- Practice Panel -->
+  <div class="panel" id="panel-practice">
+    <div id="practice-content"></div>
   </div>
 
   <!-- Automated exits Panel -->
@@ -586,6 +594,7 @@ function switchTab(name) {
   if (name === 'portfolio') loadPortfolio();
   if (name === 'history') loadHistory();
   if (name === 'auto') loadAuto();
+  if (name === 'practice') loadPractice();
   if (name === 'track') loadTrack();
 }
 
@@ -1102,6 +1111,77 @@ function removePf(id) {
   const p = findPos(id); if (!p) return;
   if (!window.confirm(`Stop monitoring ${p.coin} (entry $${fmt(p.buyPrice)})? This doesn't record a sale.`)) return;
   runAction(null, 'remove', { positionId: id }, `${p.coin} removed`);
+}
+
+// ─── Practice ─────────────────────────────────────────────────────────────────
+async function loadPractice() {
+  const box = document.getElementById('practice-content');
+  if (!TOKEN) { box.innerHTML = loginCard(); return; }
+  box.innerHTML = `<div class="state-loading"><div class="spinner"></div><div class="state-label">Loading your practice account…</div></div>`;
+  try { renderPractice(await api('practice')); }
+  catch (e) { box.innerHTML = e.status === 402 ? renewCard(e.message) : `<div class="state-empty"><div>⚠ ${esc(e.message)}</div></div>`; }
+}
+
+function renderPractice(s) {
+  const box = document.getElementById('practice-content');
+  const pos = s.positions.map(p => `<div class="pf-card">
+    <div class="pf-head">
+      <div><div class="pf-coin">${esc(p.coin)}</div><div class="pf-sub">Bought ${new Date(p.openedAt).toLocaleDateString()} · ${money(p.cost)}</div>
+        <div style="margin-top:6px"><span class="pf-status ${p.tp1Hit ? 'good' : ''}">${p.tp2Hit ? 'TP2 reached' : p.tp1Hit ? 'TP1 reached' : 'Open'}</span></div></div>
+      <div class="pf-pnl"><div class="pf-pnl-pct ${cls(p.pnlPct)}">${signedPct(p.pnlPct)}</div><div class="pf-pnl-usd">${money(p.pnlUsd)}</div></div>
+    </div>
+    <div class="pf-nums">
+      <div class="pf-num"><div class="pf-num-label">Entry</div><div class="pf-num-value">$${fmt(p.buyPrice)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Now</div><div class="pf-num-value">${p.currentPrice == null ? '—' : '$' + fmt(p.currentPrice)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Value</div><div class="pf-num-value">${money(p.value)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Stop · ${esc(STAGE[p.stopStage] || '—')}</div><div class="pf-num-value down">${p.stopLossPrice ? '$' + fmt(p.stopLossPrice) : '—'}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Next TP</div><div class="pf-num-value up">${nextTp(p)}</div></div>
+      <div class="pf-num"><div class="pf-num-label">Left</div><div class="pf-num-value">${qty(p.remainingQty)}</div></div>
+    </div>
+    <div class="pf-actions"><button class="btn-sm" onclick="practiceSell('${esc(p.id)}','${esc(p.coin)}')">💸 Sell now</button></div>
+  </div>`).join('');
+  const rows = s.trades.map(t => `<tr><td>${esc(t.symbol.replace(/USDT$/, ''))}</td><td>${new Date(t.closedAt).toLocaleDateString()}</td><td>${money(t.cost)}</td><td>${money(t.proceeds)}</td><td>${money(t.fees)}</td><td class="${cls(t.pnlDollar)}">${money(t.pnlDollar)} (${signedPct(t.pnlPct)})</td></tr>`).join('');
+  box.innerHTML = `
+    <div class="stats-bar" style="display:flex">
+      <div class="stat"><div class="stat-label">Total value</div><div class="stat-value">${money(s.equity)}</div></div>
+      <div class="stat"><div class="stat-label">Since start</div><div class="stat-value ${s.returnUsd >= 0 ? 'buy' : 'sell'}">${money(s.returnUsd)} <span style="font-size:11px">${signedPct(s.returnPct)}</span></div></div>
+      <div class="stat"><div class="stat-label">Cash</div><div class="stat-value">${money(s.cash)}</div></div>
+      <div class="stat"><div class="stat-label">Closed trades</div><div class="stat-value">${s.stats ? `${s.stats.trades} · ${s.stats.winRate}% win` : '—'}</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="form-title">Practice buy — play money, live Binance prices</div>
+      <form onsubmit="return practiceBuy(event)" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <div class="form-group" style="flex:1;min-width:110px"><label class="form-label" for="pr-coin">Coin</label><input class="form-input" id="pr-coin" placeholder="SOL" required autocomplete="off"></div>
+        <div class="form-group" style="flex:1;min-width:110px"><label class="form-label" for="pr-amt">Spend ($)</label><input class="form-input" id="pr-amt" type="number" min="10" step="any" value="100" required></div>
+        <div class="form-group" style="flex:1;min-width:110px"><label class="form-label" for="pr-target">Target (optional)</label><input class="form-input" id="pr-target" placeholder="2x or 25%" autocomplete="off"></div>
+        <button class="btn-sm primary" type="submit" style="margin-bottom:12px">Buy</button>
+      </form>
+      <div class="track-note">Priced like a real Binance account: ${s.rules.feePct}% fee on every buy and sell, ${s.rules.slippagePct}% slippage, and stops that trigger on any dip. The bot sells at the stop and take-profits for you, exactly like live automated exits.</div>
+    </div>
+    ${pos ? `<div class="pf-grid" style="margin-bottom:16px">${pos}</div>` : `<div class="state-empty"><div>No open practice trades.</div><div class="state-label">Buy something above to start.</div></div>`}
+    ${rows ? `<div class="card"><div class="form-title">Closed practice trades</div><div class="track-scroll"><table class="hist-table"><tr><th>Coin</th><th>Closed</th><th>Spent</th><th>Got back</th><th>Fees</th><th>Result</th></tr>${rows}</table></div></div>` : ''}
+    <div style="margin-top:14px;text-align:right"><button class="link-btn" onclick="practiceReset()">↺ Start again with $${Number(s.rules.start).toLocaleString()}</button></div>`;
+}
+
+async function practiceBuy(ev) {
+  ev.preventDefault();
+  const v = (id) => document.getElementById(id).value.trim();
+  try {
+    await api('practice-buy', { symbol: v('pr-coin'), amount: v('pr-amt'), target: v('pr-target') });
+    toast('Practice buy done — the bot manages the exits', 'success');
+    loadPractice();
+  } catch (e) { toast(e.message, 'error'); }
+  return false;
+}
+async function practiceSell(id, coin) {
+  if (!window.confirm(`Sell your practice ${coin} now at the live price?`)) return;
+  try { await api('practice-sell', { positionId: id }); toast(`${coin} sold`, 'success'); loadPractice(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+async function practiceReset() {
+  if (!window.confirm('Start again with fresh play money? Practice trades and history are cleared.')) return;
+  try { await api('practice-reset', {}); toast('Practice account reset', 'success'); loadPractice(); }
+  catch (e) { toast(e.message, 'error'); }
 }
 
 // ─── Automated exits ──────────────────────────────────────────────────────────

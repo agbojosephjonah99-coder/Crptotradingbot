@@ -21,6 +21,22 @@ const { stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
 const autoTrader = require('../src/services/autoTrader');
 const { getChatIdsWithAccess } = require('../src/services/subscriptionService');
+const practice = require('../src/services/practiceService');
+
+/** Practice accounts: same exit plan, play money, real Binance prices. */
+async function runPractice(allowed) {
+  const cache = new Map();
+  let users = 0, messages = 0;
+  for (const chatId of await practice.allUsers()) {
+    if (!allowed.has(String(chatId))) continue;
+    try {
+      const msgs = await practice.syncUser(chatId, cache);
+      for (const m of msgs) await tg.send(chatId, m, { silent: true });
+      users++; messages += msgs.length;
+    } catch (err) { console.error('[QuickCheck] practice', chatId, err.message); }
+  }
+  return { users, messages };
+}
 
 const APPROACH_PCT = 5;
 
@@ -117,15 +133,16 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const positions = await getAllUsersPositions();
     // Only approved users (and paying ones, when paid access is on)
     const allowed = new Set(await getChatIdsWithAccess());
+    const practiceRun = await runPractice(allowed).catch(err => ({ error: err.message }));
+    const positions = await getAllUsersPositions();
     const active = positions.filter(p =>
       allowed.has(String(p.chatId)) && !p.targetHit && !p.stopLossHit && (p.targetPrice || p.stopLossPrice)
     );
 
     if (active.length === 0) {
-      return res.status(200).json({ success: true, message: 'No active targets to check', checkedAt: new Date().toISOString() });
+      return res.status(200).json({ success: true, message: 'No active targets to check', practice: practiceRun, checkedAt: new Date().toISOString() });
     }
 
     // Group by coin + exchange to avoid duplicate price fetches
@@ -167,6 +184,7 @@ module.exports = async (req, res) => {
       symbols:   keys.length,
       alerts:    results.filter(r => r.event),
       errors:    results.filter(r => r.error),
+      practice:  practiceRun,
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {

@@ -45,6 +45,8 @@ const { adviseSplit, compoundingAdvice, targetProgress } = require('../src/servi
 const accounts = require('../src/services/tradingAccounts');
 const autoTrader = require('../src/services/autoTrader');
 const subs = require('../src/services/subscriptionService');
+const practice = require('../src/services/practiceService');
+const box = require('../src/lib/secretBox');
 const { baseUrl } = require('../src/lib/dashAuth');
 
 // Commands that work while a subscription has ended (paid access only)
@@ -80,6 +82,10 @@ const INLINE_MENU = {
     [
       { text: '💼 Split Capital',  callback_data: 'split_help'  },
       { text: '📈 My Profits',     callback_data: 'profit'      },
+    ],
+    [
+      { text: '🎮 Practice',       callback_data: 'practice'    },
+      { text: '🚀 Go live',        callback_data: 'golive'      },
     ],
     [
       { text: '🖥 My Dashboard',   callback_data: 'dashboard'   },
@@ -286,6 +292,11 @@ async function handleMessage(chatId, text, from, meta = {}) {
     }
   }
 
+  // ── GO-LIVE WIZARD: the next message is an API key / secret ─────────────
+  if (!text.trim().startsWith('/') && /^[A-Za-z0-9]{32,128}$/.test(text.trim())) {
+    if (await handleWizardKey(chatId, text.trim(), meta)) return;
+  }
+
   // ── ADMIN KEYBOARD BUTTON SHORTCUTS ─────────────────────────────────────
   if (text.trim() === '🔗 Invite Link') {
     await handleMessage(chatId, 'invite', from);
@@ -447,6 +458,18 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  // ── PRACTICE (play money, real Binance prices) ──────────────────────────
+  if (cmd === 'practice' || cmd === 'paper' || cmd === 'demo') {
+    await handlePractice(chatId, parts.slice(1));
+    return;
+  }
+
+  // ── GO LIVE (step-by-step Binance set-up) ───────────────────────────────
+  if (cmd === 'golive' || cmd === 'live') {
+    await handleGoLive(chatId, parts.slice(1));
+    return;
+  }
+
   // ── SUBSCRIPTION (paid access) ───────────────────────────────────────────
   if (cmd === 'subscribe' || cmd === 'renew' || cmd === 'pay') {
     await handleSubscribe(chatId, parts.slice(1));
@@ -489,6 +512,11 @@ async function handleMessage(chatId, text, from, meta = {}) {
       ``,
       subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : '',
       subs.enabled() ? `` : '',
+      `━━━ *PRACTICE & GO LIVE* ━━━`,
+      `\`practice\` — trade with $10,000 play money at real prices`,
+      `\`practice buy SOL 100\` — spend $100 of play money on SOL`,
+      `\`golive\` — step-by-step: connect your real Binance account`,
+      ``,
       `━━━ *AUTOMATED EXITS (optional)* ━━━`,
       `\`autotrade\` — let the bot place your stops and take-profits on Binance`,
       ``,
@@ -1507,6 +1535,297 @@ async function handleMessage(chatId, text, from, meta = {}) {
   await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.`);
 }
 
+// ─── Practice mode ────────────────────────────────────────────────────────────
+const usd = (n) => n == null ? '—' : `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const pm = (n) => n == null ? '—' : `${n >= 0 ? '+' : ''}${usd(n)}`;
+const signed = (n, suffix = '') => n == null ? '—' : `${n >= 0 ? '+' : ''}${n}${suffix}`;
+const PRACTICE_BUTTONS = { inline_keyboard: [
+  [{ text: '📊 Refresh', callback_data: 'practice' }, { text: '❓ How to buy', callback_data: 'practice help' }],
+  [{ text: '🚀 Ready for real money? Go live', callback_data: 'golive' }],
+  [{ text: '↺ Start again with $10,000', callback_data: 'practice reset' }],
+] };
+
+async function handlePractice(chatId, args) {
+  const sub = (args[0] || '').toLowerCase();
+  try {
+    if (sub === 'buy') {
+      // practice buy SOL 100 [sl 88] [2x|25%]
+      const rest = args.slice(1);
+      const coin = rest[0];
+      const amount = parseFloat(String(rest[1] || '').replace(/[$,]/g, ''));
+      let stop = null, target = null;
+      for (let i = 2; i < rest.length; i++) {
+        const t = rest[i].toLowerCase();
+        if ((t === 'sl' || t === 'stop') && rest[i + 1]) { stop = parseFloat(rest[++i]); continue; }
+        if (/^\d+(\.\d+)?(x|%)$/.test(t)) target = t;
+      }
+      const { position: p, cash } = await practice.buy(chatId, { symbol: coin, amount, stop, target });
+      const t = p.takeProfits;
+      await reply(chatId, [
+        `🎮 *Practice buy — ${p.symbol.replace('USDT', '')}*`,
+        ``,
+        `Spent ${usd(p.cost)} → ${+p.quantity.toFixed(8)} ${p.symbol.replace('USDT', '')} at $${fmtP(p.buyPrice)}`,
+        `_(live Binance price $${fmtP(p.livePriceAtBuy)} + slippage, fee ${usd(p.fees)})_`,
+        ``,
+        p.stopLossPrice ? `🛡 Stop: $${fmtP(p.stopLossPrice)}` : `⚠️ No stop — couldn't build a plan for this coin`,
+        t?.tp1 ? `🟢 TP1 $${fmtP(t.tp1.price)} (sell 40%) · TP2 $${fmtP(t.tp2.price)} (35%) · TP3 $${fmtP(t.tp3.price)} (rest)` : '',
+        p.targetPrice ? `🎯 Your target: $${fmtP(p.targetPrice)} (sell 60%)` : '',
+        ``,
+        `The bot handles every exit automatically, exactly like live mode, and messages you here.`,
+        `💵 Practice cash left: ${usd(cash)}`,
+      ].filter(Boolean).join('\n'));
+      return;
+    }
+
+    if (sub === 'sell' && args[1]) {
+      const { trades, cash } = await practice.sellNow(chatId, { symbol: args[1] });
+      const lines = trades.filter(Boolean).map(t => `${t.symbol.replace('USDT', '')}: ${pm(t.pnlDollar)} (${signed(t.pnlPct, '%')}) after ${usd(t.fees)} fees`);
+      await reply(chatId, [`🎮 *Practice — sold*`, ...lines, ``, `💵 Practice cash: ${usd(cash)}`].join('\n'));
+      return;
+    }
+
+    if (sub === 'reset') {
+      if ((args[1] || '').toLowerCase() !== 'confirm') {
+        await send(chatId, `↺ Start again with $10,000? Your practice positions and practice history are cleared. (Real positions aren't touched.)`,
+          { inline_keyboard: [[{ text: 'Yes, start again', callback_data: 'practice reset confirm' }]] });
+        return;
+      }
+      await practice.reset(chatId);
+      await reply(chatId, `🎮 Practice account reset — you have $10,000 of play money again.`);
+      return;
+    }
+
+    if (sub === 'help') {
+      await send(chatId, [
+        `🎮 *How practice mode works*`,
+        ``,
+        `You get *$10,000 of play money*. Buy any Binance coin with it:`,
+        `\`practice buy SOL 100\` — spend $100 on SOL`,
+        `\`practice buy PEPE 50 2x\` — with your own 2x target`,
+        `\`practice buy SOL 100 sl 140\` — with your own stop`,
+        `\`practice sell SOL\` — sell it now at the live price`,
+        ``,
+        `*It's priced like the real thing:* live Binance prices, Binance's 0.1% fee on every buy and sell, a little slippage, and stops that trigger on any dip (and fill lower if the price jumps past them).`,
+        `The bot sells for you at the stop and take-profits, exactly as automated exits do with real money. So your practice result is close to what real money would have done.`,
+        ``,
+        `_Measured so far, this strategy has lost money after fees in backtests. Practise first and see for yourself before using real money._`,
+      ].join('\n'), PRACTICE_BUTTONS);
+      return;
+    }
+
+    // Status
+    const s = await practice.summary(chatId);
+    const lines = [
+      `🎮 *Practice account* — play money, real Binance prices`,
+      ``,
+      `💰 *Total value:* ${usd(s.equity)}  (${pm(s.returnUsd)} · ${signed(s.returnPct, '%')} since start)`,
+      `💵 Cash: ${usd(s.cash)}`,
+    ];
+    if (s.positions.length) {
+      lines.push(``, `*Open:*`);
+      for (const p of s.positions) {
+        lines.push(`• ${p.coin}: ${usd(p.value)} · ${signed(p.pnlPct, '%')}${p.stopLossPrice ? ` · stop $${fmtP(p.stopLossPrice)}` : ''}${p.tp1Hit ? ' · TP1 ✅' : ''}${p.tp2Hit ? ' TP2 ✅' : ''}`);
+      }
+    }
+    if (s.stats) {
+      lines.push(``, `*Closed trades:* ${s.stats.trades} · win rate ${s.stats.winRate}% · P&L ${usd(s.stats.pnlUsd)} (fees paid ${usd(s.stats.fees)})`);
+    }
+    if (!s.positions.length && !s.stats) lines.push(``, `No trades yet. Try: \`practice buy SOL 100\``);
+    await send(chatId, lines.join('\n'), PRACTICE_BUTTONS);
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof practice.PracticeError ? err.message : `Practice error: ${esc(err.message)}`}`);
+  }
+}
+
+const fmtP = (p) => (p == null ? '—' : p >= 1 ? Number(p).toFixed(4) : Number(p).toPrecision(4));
+
+// ─── Go live: step-by-step Binance set-up with buttons ───────────────────────
+const wizardKey = (chatId) => `cryptobot:wizard:${chatId}`;
+const next = (label, data) => ({ inline_keyboard: [[{ text: label, callback_data: data }], [{ text: '✕ Stop for now', callback_data: 'golive cancel' }]] });
+
+async function handleGoLive(chatId, args) {
+  const step = (args[0] || '').toLowerCase();
+
+  if (step === 'cancel') {
+    await store.cmd('DEL', wizardKey(chatId));
+    await reply(chatId, `👍 Stopped. Send \`golive\` any time to continue. Meanwhile you can keep practising: \`practice\`.`);
+    return;
+  }
+
+  if (!box.isConfigured()) {
+    await reply(chatId, `⚠️ Live trading isn't switched on for this bot yet. Practise in the meantime: \`practice\`.`);
+    return;
+  }
+
+  if (step === '' || step === 'start') {
+    const st = await accounts.getStatus(chatId);
+    if (st.connected && !st.testnet) {
+      await send(chatId, `✅ Your real Binance account is already connected (key ${st.keyHint}). Automated exits: ${st.enabled ? '🟢 ON' : '⚪ OFF'}.`,
+        { inline_keyboard: [[{ text: st.enabled ? '⏸ Turn off' : '🟢 Turn on automated exits', callback_data: st.enabled ? 'autotrade off' : 'golive on' }]] });
+      return;
+    }
+    let practiceLine = `💡 *Tip:* practise first with play money — \`practice\`.`;
+    try {
+      const s = await practice.summary(chatId);
+      if (s.stats) practiceLine = `🎮 Your practice so far: ${s.stats.trades} closed trades, ${signed(s.returnPct, '%')} overall.`;
+    } catch { /* ignore */ }
+    await send(chatId, [
+      `🚀 *Go live — 4 short steps*`,
+      ``,
+      `1. A Binance account`,
+      `2. Money in it (USDT, bought with Naira)`,
+      `3. A "key" that lets the bot sell for you — it can *never* withdraw your money`,
+      `4. Paste the key here`,
+      ``,
+      `Your money stays in *your own* Binance account the whole time. The bot only places sell orders (stops and take-profits) for positions you add.`,
+      ``,
+      practiceLine,
+      `⚠️ Real money can be lost. In backtests this strategy has lost money after fees.`,
+    ].join('\n'), next('Start step 1 →', 'golive 1'));
+    return;
+  }
+
+  if (step === '1') {
+    await send(chatId, [
+      `*Step 1 of 4 — Binance account*`,
+      ``,
+      `1. Install the *Binance* app (Play Store / App Store) or go to binance.com`,
+      `2. Sign up with your email or phone number`,
+      `3. Complete *identity verification* (photo of your NIN slip, ID card or passport + a selfie). It usually takes a few minutes.`,
+      ``,
+      `Already have a verified account? Tap Done.`,
+    ].join('\n'), { inline_keyboard: [
+      [{ text: 'Open Binance', url: 'https://www.binance.com/en/register' }],
+      [{ text: '✅ Done — next step', callback_data: 'golive 2' }],
+      [{ text: '✕ Stop for now', callback_data: 'golive cancel' }],
+    ] });
+    return;
+  }
+
+  if (step === '2') {
+    await send(chatId, [
+      `*Step 2 of 4 — Add money (Naira → USDT)*`,
+      ``,
+      `In the Binance app: *Trade → P2P → Buy → USDT*, payment *Bank transfer*, currency *NGN*.`,
+      `1. Pick a seller with a ✔ badge and a high completion rate`,
+      `2. Enter the amount, then pay the seller from your bank app *exactly* as shown`,
+      `3. Tap *Transferred, notify seller* — only after you've actually paid`,
+      `4. The seller releases the USDT to you`,
+      ``,
+      `⚠️ *Important:* P2P coins arrive in your *Funding* wallet. Move them to *Spot*: Assets → Funding → Transfer → Funding to Spot. The bot can only see your Spot wallet.`,
+      `Never send money outside the Binance P2P screen, and never share your password or codes with anyone.`,
+    ].join('\n'), { inline_keyboard: [
+      [{ text: 'Open Binance P2P (NGN)', url: 'https://p2p.binance.com/en/trade/all-payments/USDT?fiat=NGN' }],
+      [{ text: '✅ Done — next step', callback_data: 'golive 3' }],
+      [{ text: '✕ Stop for now', callback_data: 'golive cancel' }],
+    ] });
+    return;
+  }
+
+  if (step === '3') {
+    await send(chatId, [
+      `*Step 3 of 4 — Create the key for the bot*`,
+      ``,
+      `Easiest on binance.com (phone browser or computer):`,
+      `1. Tap your *profile icon → Account → API Management*`,
+      `2. *Create API* → choose *System generated* → name it \`JijazyBot\` → confirm with your codes`,
+      `3. Tap *Edit restrictions*:`,
+      `   ✅ tick *Enable Spot & Margin Trading*`,
+      `   ❌ leave *Enable Withdrawals* OFF (the bot refuses keys that can withdraw)`,
+      `   IP access: *Unrestricted*`,
+      `4. *Save*. You'll see two codes: *API Key* and *Secret Key*. Copy both — the Secret Key is shown only once.`,
+    ].join('\n'), { inline_keyboard: [
+      [{ text: 'Open API Management', url: 'https://www.binance.com/en/my/settings/api-management' }],
+      [{ text: '✅ I have both codes', callback_data: 'golive 4' }],
+      [{ text: '✕ Stop for now', callback_data: 'golive cancel' }],
+    ] });
+    return;
+  }
+
+  if (step === '4') {
+    await store.cmd('SET', wizardKey(chatId), JSON.stringify({ step: 'key' }), 'EX', 900);
+    await reply(chatId, [
+      `*Step 4 of 4 — Paste the codes*`,
+      ``,
+      `Paste your *API Key* (the first code) and send it as a message.`,
+      `_I'll delete it from this chat straight away and store it encrypted._`,
+    ].join('\n'));
+    return;
+  }
+
+  if (step === 'on') {
+    const st = await accounts.getStatus(chatId);
+    if (!st.connected) { await handleGoLive(chatId, ['4']); return; }
+    if ((args[1] || '').toLowerCase() !== 'confirm' && !st.testnet) {
+      await send(chatId, [
+        `⚠️ *Last check — real money*`,
+        ``,
+        `With automated exits on, the bot *sells on your Binance account* at each position's stop and take-profits (40% / 35% / the rest).`,
+        `It never buys and can't withdraw. You can turn it off any time with \`autotrade off\`.`,
+        ``,
+        `Losses are possible. Turn it on?`,
+      ].join('\n'), { inline_keyboard: [
+        [{ text: '✅ Yes, I understand — turn on', callback_data: 'golive on confirm' }],
+        [{ text: 'Not now', callback_data: 'golive cancel' }],
+      ] });
+      return;
+    }
+    try {
+      await accounts.setEnabled(chatId, true, { confirmLive: accounts.LIVE_CONFIRM });
+      await reply(chatId, [
+        `🟢 *Automated exits are ON*`,
+        ``,
+        `Now add positions for coins you buy on Binance, *with the quantity*:`,
+        `\`buy SOL 150 2\` (bought 2 SOL at $150)`,
+        `The bot puts a stop order on Binance straight away and sells at the take-profits for you.`,
+      ].join('\n'));
+      await autoTrader.syncUser(chatId);
+    } catch (err) {
+      await reply(chatId, `❌ ${err instanceof accounts.TradingError ? err.message : esc(err.message)}`);
+    }
+    return;
+  }
+
+  await handleGoLive(chatId, []);
+}
+
+/** A message that looks like a key arrived. Returns true if the wizard used it. */
+async function handleWizardKey(chatId, value, meta) {
+  const raw = await store.cmd('GET', wizardKey(chatId));
+  if (!raw) return false;
+  let st; try { st = JSON.parse(raw); } catch { return false; }
+  if (meta.messageId) await tg.call('deleteMessage', { chat_id: chatId, message_id: meta.messageId }).catch(() => {});
+
+  if (st.step === 'key') {
+    await store.cmd('SET', wizardKey(chatId), JSON.stringify({ step: 'secret', key: box.encrypt(value) }), 'EX', 900);
+    await reply(chatId, `✅ Got the API Key (deleted from the chat).\n\nNow paste the *Secret Key* (the second code).`);
+    return true;
+  }
+  if (st.step === 'secret') {
+    const apiKey = box.decrypt(st.key);
+    if (apiKey === value) { await reply(chatId, `That's the API Key again — please paste the *Secret Key* (the second code).`); return true; }
+    await reply(chatId, `⏳ Checking with Binance…`);
+    try {
+      await accounts.connect(chatId, { apiKey, apiSecret: value, live: true });
+      await store.cmd('DEL', wizardKey(chatId));
+      let balance = '';
+      try {
+        const c = await accounts.getAnyClient(chatId);
+        const usdt = await c.freeBalance('USDT');
+        balance = `\n💵 USDT in your Spot wallet: ${usdt.toFixed(2)}${usdt < 10 ? '\n⚠️ That\'s very little — remember to move USDT from Funding to Spot (step 2).' : ''}`;
+      } catch { /* balance is just a nice-to-have */ }
+      await send(chatId, `🔐 *Binance connected!* Key ${'…' + apiKey.slice(-4)}, withdrawals blocked.${balance}\n\nLast step: turn on automated exits.`,
+        { inline_keyboard: [[{ text: '🟢 Turn on automated exits', callback_data: 'golive on' }]] });
+    } catch (err) {
+      await store.cmd('SET', wizardKey(chatId), JSON.stringify({ step: 'key' }), 'EX', 900);
+      const why = err instanceof accounts.TradingError ? err.message : err.message;
+      await reply(chatId, `❌ ${esc(why)}\n\nLet's try again: paste your *API Key* (the first code). Or send \`golive 3\` to see how to create the key.`);
+    }
+    return true;
+  }
+  return false;
+}
+
 // ─── Paid access: subscribe / check / status ─────────────────────────────────
 async function handleSubscribe(chatId, args) {
   const sub = (args[0] || '').toLowerCase();
@@ -1704,8 +2023,9 @@ async function handleUpdate(body) {
   const { message } = body;
   if (!message || !message.text) return;
   const chatId = message.chat?.id?.toString();
-  // Never log API keys sent with `autotrade connect`
-  const logText = /^\/?auto(trade|exits?)(@\w+)?\s+connect/i.test(message.text.trim()) ? 'autotrade connect [redacted]' : message.text.slice(0, 80);
+  // Never log API keys (`autotrade connect …`, or a key pasted into the go-live wizard)
+  const looksSecret = /[A-Za-z0-9]{32,}/.test(message.text) || /^\/?auto(trade|exits?)(@\w+)?\s+connect/i.test(message.text.trim());
+  const logText = looksSecret ? '[message with a key — not logged]' : message.text.slice(0, 80);
   console.log(`[Webhook] From ${chatId}: ${logText}`);
   await handleMessage(chatId, message.text, message.from, { messageId: message.message_id });
 }

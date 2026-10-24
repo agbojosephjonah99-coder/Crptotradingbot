@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.10.0 — Practice mode and a guided "Go live"
+
+- **🎮 Practice mode:** every user gets $10,000 of play money, with nothing to set up — no Binance account, no keys. `practice buy SOL 100`, or the new 🎮 Practice tab on the dashboard.
+  - **Priced like a real Binance account:** live Binance prices, the 0.1% fee on every buy and sell, 0.05% slippage, and stops that act like real stop orders. A stop triggers if any 1-minute candle since the last check touched it, and fills lower if the price gapped past it.
+  - **The same exit plan as live automated exits:** stop, then TP1 40% (stop → breakeven), TP2 35% (stop → TP1), TP3 the rest, and 60% at your own target. The bot handles exits every 10 minutes and messages you.
+  - Separate from real positions and real history. `practice` shows total value, return since start, open trades and closed-trade stats. `practice sell SOL` sells now; `practice reset` starts again.
+- **🚀 Go live wizard (`golive`, or the button in the menu):** 4 steps with buttons:
+  1. Binance account and verification;
+  2. buying USDT with Naira on P2P, including the Funding → Spot transfer;
+  3. creating an API key with trading ON and withdrawals OFF;
+  4. pasting the two codes.
+
+  Each code is deleted from the chat as soon as it arrives, checked with Binance and stored encrypted. The bot shows the USDT balance, then turns automated exits on after a plain-language confirmation button (no phrase to type).
+- Money always stays in the user's own Binance account. The bot never holds funds.
+- **Security:** any message containing a long code is no longer written to the logs.
+- Menu: new 🎮 Practice and 🚀 Go live buttons.
+- Tests: 113.
+
 ## 2.9.0 — Paid access (optional, Paystack)
 
 - **Off unless you set `PAID_ACCESS_ENABLED=true`.** Until then nothing changes.

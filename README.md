@@ -40,6 +40,10 @@ If `CRON_SECRET` is not set, endpoints stay open (with a warning in the logs) so
 
 `buy SOL 92.50 [qty] [2x|10%] [sl 88] [ex mexc]` · `setstop SOL 90` · `sell SOL` · `sold SOL 92.50 110 [qty]` (records the trade for `profit`) · `positions` · `check SOL` · `profit` · `split 50` · `scan` · `newlistings` · `menu` · `help`
 
+Practice (play money, real prices): `practice` · `practice buy SOL 100 [2x] [sl 140]` · `practice sell SOL` · `practice reset`
+
+Go live (guided Binance set-up): `golive`
+
 Automated exits (optional, Binance): `autotrade` · `autotrade connect KEY SECRET` · `autotrade on` · `autotrade off` · `autotrade disconnect` · `autotrade resume SOL`
 
 Paid access (when PAID_ACCESS_ENABLED=true): `account` · `subscribe you@example.com` · `subscribe check`
@@ -67,7 +71,8 @@ src/services/         scanEngine (live strategy), strategyBacktest + strategySta
                       adviceService, positionStore, userService, profitTracker,
                       listings/probability, risk, portfolioService (dashboard),
                       tradingAccounts + autoTrader (automated exits),
-                      subscriptionService (paid access, Paystack)
+                      subscriptionService (paid access, Paystack),
+                      practiceService (play-money practice mode)
 data/                 strategy-stats.json (saved backtest summary, shown in alerts)
 public/               Landing page + dashboard
 test/                 node:test suite (no network)
