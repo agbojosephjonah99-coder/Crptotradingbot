@@ -17,6 +17,7 @@
 
 const tg = require('../lib/telegram');
 const { isDuplicateSignal, markSignalFired } = require('./riskService');
+const { trackRecordFor, formatTrackRecord } = require('./strategyStats');
 
 const actionChat  = () => process.env.TELEGRAM_CHAT_ID;
 const infoChannel = () => process.env.TELEGRAM_INFO_CHANNEL_ID;
@@ -60,9 +61,8 @@ async function sendBuyAlert(result) {
   const tp3  = result.takeProfits?.tp3;
   const sl   = result.stopLoss;
   const rr   = result.riskReward;
-  const conf = Math.max(0, Math.min(100, Number(result.confidence) || 0));
-  const bars = Math.round(conf / 10);
-  const confBar = '█'.repeat(bars) + '░'.repeat(10 - bars);
+  // Honest context: what signals like this actually did in the backtest
+  const track = result.trackRecord !== undefined ? result.trackRecord : trackRecordFor(result.score);
 
   const lines = [
     `🟢 *BUY SIGNAL — ${result.symbol}*`,
@@ -75,8 +75,8 @@ async function sendBuyAlert(result) {
     tp3 ? `🎯 *TP3 (sell 25%):* \`$${Number(tp3.price).toFixed(4)}\` — ${tp3.ratio}` : '',
     rr  ? `⚖️ *Risk:Reward:* ${rr}:1` : '',
     ``,
-    `📊 *Signal score:* ${conf}% |${confBar}|`,
-    `📈 *Score:* ${result.score}/15`,
+    `📈 *Setup score:* ${result.score}/15 _(how many conditions lined up — not a probability)_`,
+    `📊 ${formatTrackRecord(track)}`,
     ``,
     `🔍 *Why:*`,
     ...(result.factors || []).map(f => `  • ${f}`),

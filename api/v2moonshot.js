@@ -35,8 +35,8 @@ function buildMessage(coin) {
   const lines = [
     `🚨 *HIGH-SCORE MOONSHOT — ${name} (${coin.base})* 🚨`,
     ``,
-    `📊 *Signal score:* ${coin.probability}% — ${coin.band}`,
-    `_Heuristic score from 7 factors, not a guaranteed probability._`,
+    `📊 *Score:* ${coin.probability}/92 — ${coin.band}`,
+    `_Heuristic score from 7 factors — not a probability, and not backtested._`,
     ``,
     `💰 *Current Price:* \`$${p}\``,
     `📈 *24H Change:*    +${Number(coin.change24h).toFixed(2)}%`,

@@ -33,6 +33,18 @@ https://crptotradingbot.vercel.app/api/telegram-test?key=YOUR_CRON_SECRET → he
 
 The dashboard stays public at https://crptotradingbot.vercel.app/dashboard
 
-## 4. Test
+## 4. Backtest the strategy (once, then monthly)
+
+On your computer, inside the project folder:
+```bash
+npm install
+npm run backtest
+git add data/strategy-stats.json
+git commit -m "Backtest results"
+git push
+```
+BUY alerts and the dashboard's Track Record tab will then show the measured results. See `STRATEGY.md`.
+
+## 5. Test
 
 Send `/start` to @JijazyBot. Then try `buy SOL 150 2x` → `positions` → `sold SOL 150 160` → `profit`.

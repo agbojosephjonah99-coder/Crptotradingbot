@@ -1,14 +1,21 @@
 /**
  * ─── Market data (single shared copy) ────────────────────────────────────────
- * Candles:  Binance → Kraken fallback (Binance blocks some regions).
- * Price:    Binance → KuCoin → Kraken fallback.
+ * Candles:  Binance → Binance public data mirror → Kraken fallback.
+ *           (api.binance.com blocks some regions, e.g. US servers; the
+ *           data-api.binance.vision mirror serves the same public market data.)
+ * Price:    Binance → Binance mirror → KuCoin → Kraken fallback.
  *
  * Candle shape everywhere: { time (ms, candle open), open, high, low, close, volume }
+ *
+ * closedOnly: Binance includes the still-forming candle as the last row. Signals
+ * computed on it "repaint" (a BUY at 10:07 can vanish by 10:15) and can't be
+ * backtested honestly, so the scanner asks for closed candles only.
  */
 
 const axios = require('axios');
 
 const BINANCE_BASE = 'https://api.binance.com/api/v3';
+const BINANCE_DATA_BASE = 'https://data-api.binance.vision/api/v3';
 const KRAKEN_BASE  = 'https://api.kraken.com/0/public';
 const KUCOIN_BASE  = 'https://api.kucoin.com/api/v1';
 
@@ -48,7 +55,7 @@ function parseBinance(rows) {
 }
 
 /** Binance klines with paging for limit > 1000. */
-async function binanceKlines(symbol, interval, limit, startTime = null) {
+async function binanceKlines(symbol, interval, limit, startTime = null, base = BINANCE_BASE) {
   if (!INTERVAL_MS[interval]) throw new Error(`Unsupported interval: ${interval}`);
   const out = [];
   const batch = 1000;
@@ -60,7 +67,7 @@ async function binanceKlines(symbol, interval, limit, startTime = null) {
     const reqLimit = Math.min(batch, remaining);
     const params = { symbol, interval, limit: reqLimit };
     if (nextStart) params.startTime = nextStart;
-    const r = await axios.get(`${BINANCE_BASE}/klines`, { params, timeout: 12000 });
+    const r = await axios.get(`${base}/klines`, { params, timeout: 15000 });
     const page = parseBinance(r.data);
     if (!page.length) break;
     out.push(...page);
@@ -90,20 +97,32 @@ async function krakenKlines(symbol, interval, limit) {
   }));
 }
 
+function dropUnclosed(candles, interval, now = Date.now()) {
+  const ms = INTERVAL_MS[interval];
+  return candles.filter(c => c.time + ms <= now);
+}
+
 /**
  * Candles with automatic fallback.
+ * @param {object} [opts]
+ * @param {number} [opts.startTime]  ms; for long history requests
+ * @param {boolean} [opts.closedOnly] drop the still-forming candle
  * @returns {Promise<{candles: Array, exchange: string}>}
  */
-async function fetchKlinesWithSource(symbol, interval, limit, { startTime = null } = {}) {
-  try {
-    return { candles: await binanceKlines(symbol, interval, limit, startTime), exchange: 'Binance' };
-  } catch (binanceErr) {
-    try {
-      return { candles: await krakenKlines(symbol, interval, limit), exchange: 'Kraken' };
-    } catch (krakenErr) {
-      throw new Error(`No candle data for ${symbol} ${interval} (Binance: ${binanceErr.message}; Kraken: ${krakenErr.message})`);
-    }
-  }
+async function fetchKlinesWithSource(symbol, interval, limit, { startTime = null, closedOnly = false } = {}) {
+  const want = closedOnly ? limit + 1 : limit;
+  const finish = (candles, exchange) => ({
+    candles: (closedOnly ? dropUnclosed(candles, interval) : candles).slice(-limit),
+    exchange,
+  });
+  const errors = [];
+  try { return finish(await binanceKlines(symbol, interval, want, startTime), 'Binance'); }
+  catch (e) { errors.push(`Binance: ${e.message}`); }
+  try { return finish(await binanceKlines(symbol, interval, want, startTime, BINANCE_DATA_BASE), 'Binance'); }
+  catch (e) { errors.push(`Binance mirror: ${e.message}`); }
+  try { return finish(await krakenKlines(symbol, interval, want), 'Kraken'); }
+  catch (e) { errors.push(`Kraken: ${e.message}`); }
+  throw new Error(`No candle data for ${symbol} ${interval} (${errors.join('; ')})`);
 }
 
 async function fetchKlines(symbol, interval, limit, opts) {
@@ -112,11 +131,13 @@ async function fetchKlines(symbol, interval, limit, opts) {
 
 /** Latest price with fallbacks. Returns null if every source fails. */
 async function fetchPrice(symbol) {
-  try {
-    const r = await axios.get(`${BINANCE_BASE}/ticker/price`, { params: { symbol }, timeout: 6000 });
-    const p = parseFloat(r.data.price);
-    if (p > 0) return p;
-  } catch { /* fall through */ }
+  for (const base of [BINANCE_BASE, BINANCE_DATA_BASE]) {
+    try {
+      const r = await axios.get(`${base}/ticker/price`, { params: { symbol }, timeout: 6000 });
+      const p = parseFloat(r.data.price);
+      if (p > 0) return p;
+    } catch { /* fall through */ }
+  }
 
   try {
     const r = await axios.get(`${KUCOIN_BASE}/market/orderbook/level1`, { params: { symbol: toKuCoinSymbol(symbol) }, timeout: 6000 });
@@ -147,7 +168,7 @@ function normaliseSymbol(raw) {
 }
 
 module.exports = {
-  INTERVAL_MS, toKrakenPair, toKuCoinSymbol,
+  INTERVAL_MS, toKrakenPair, toKuCoinSymbol, dropUnclosed,
   fetchKlines, fetchKlinesWithSource, fetchPrice,
   configuredSymbols, normaliseSymbol,
 };

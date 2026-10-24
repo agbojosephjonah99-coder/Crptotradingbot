@@ -17,7 +17,7 @@ const { requireAdminKey } = require('../src/lib/auth');
 
 const COMMANDS = [
   { command: 'menu',        description: '📋 Open the main menu' },
-  { command: 'scan',        description: '🔍 Scan market for high-scoring coins now' },
+  { command: 'scan',        description: '🔍 Small caps with strong momentum (high risk)' },
   { command: 'moonshots',   description: '🌕 Small caps with strong momentum' },
   { command: 'newlistings', description: '🚀 Hot new coins with contract addresses' },
   { command: 'buy',         description: '💰 Track a buy — e.g. /buy SOL 92.50 2x' },

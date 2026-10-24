@@ -14,6 +14,13 @@ const {
 } = require('./indicatorService');
 const { calcATRStop, calcTakeProfits, calcRiskReward } = require('./riskService');
 const { fetchKlines } = require('../lib/market');
+const { trackRecordFor } = require('./strategyStats');
+
+/**
+ * Candle windows the live scanner evaluates. The backtester feeds evaluateSignal
+ * exactly these window sizes so backtest signals are identical to live ones.
+ */
+const WINDOWS = { h4: 260, h1: 100, m15: 50 };
 
 // ─── Core Signal Engine ───────────────────────────────────────────────────────
 
@@ -196,14 +203,24 @@ function evaluateSignal(c4h, c1h, c15m) {
   };
 }
 
-/** Fetch the three timeframes and evaluate one symbol. */
+/**
+ * Fetch the three timeframes and evaluate one symbol.
+ * Closed candles only — the signal can't change before the next 15m close
+ * (no repainting), and it matches what the backtest measured.
+ */
 async function scanSymbol(symbol) {
+  const opts = { closedOnly: true };
   const [c4h, c1h, c15m] = await Promise.all([
-    fetchKlines(symbol, '4h', 260),
-    fetchKlines(symbol, '1h', 100),
-    fetchKlines(symbol, '15m', 50),
+    fetchKlines(symbol, '4h', WINDOWS.h4, opts),
+    fetchKlines(symbol, '1h', WINDOWS.h1, opts),
+    fetchKlines(symbol, '15m', WINDOWS.m15, opts),
   ]);
-  return { symbol, ...evaluateSignal(c4h, c1h, c15m) };
+  const result = { symbol, ...evaluateSignal(c4h, c1h, c15m) };
+  // Measured backtest results for signals like this one (null until a backtest is saved)
+  if (result.signal === 'BUY') result.trackRecord = trackRecordFor(result.score);
+  const last = c15m[c15m.length - 1];
+  if (last) result.candleTime = new Date(last.time).toISOString();
+  return result;
 }
 
 /** Scan many symbols; errors are captured per symbol. Sorted BUY → WAIT → BEARISH → ERROR. */
@@ -221,4 +238,4 @@ async function scanSymbols(symbols) {
   return results;
 }
 
-module.exports = { evaluateSignal, scanSymbol, scanSymbols };
+module.exports = { evaluateSignal, scanSymbol, scanSymbols, WINDOWS };

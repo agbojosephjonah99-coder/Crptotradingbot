@@ -217,7 +217,7 @@ async function handleMessage(chatId, text, from) {
       `🤖 *Welcome to CryptoBot V2!*`,
       ``,
       `📊 *What this bot does:*`,
-      `  • Scans the market for high-probability pump coins`,
+      `  • Scans the market for strong momentum setups`,
       `  • Finds newly listed coins with contract addresses`,
       `  • Alerts you exactly when to buy and sell`,
       `  • Monitors your positions 24/7`,
@@ -378,8 +378,8 @@ async function handleMessage(chatId, text, from) {
       `🤖 *CryptoBot V2 — Commands*`,
       ``,
       `━━━ *SCAN & SIGNALS* ━━━`,
-      `\`scan\` — find high-probability pump coins now`,
-      `\`moonshots\` — coins likely to 2X-5X in 3 days`,
+      `\`scan\` — small-cap coins with strong momentum now`,
+      `\`moonshots\` — same as scan (high-risk small caps)`,
       `\`newlistings\` — new coins with contract addresses`,
       ``,
       `━━━ *YOUR TRADES* ━━━`,
@@ -400,13 +400,13 @@ async function handleMessage(chatId, text, from) {
 
   // ── SCAN ─────────────────────────────────────────────────────────────────
   if (cmd === 'scan' || cmd === 'search' || cmd === 'find') {
-    await reply(chatId, `🔍 Scanning market for high-probability coins... 30 seconds.`);
+    await reply(chatId, `🔍 Scanning small caps for momentum... about 30 seconds.`);
     try {
       const { getMoonshots } = require('../src/services/listingsService');
       const moonshots = await getMoonshots();
 
       if (moonshots.length === 0) {
-        await reply(chatId, `😴 No high-confidence picks right now. Try again in 30-60 minutes.`);
+        await reply(chatId, `😴 Nothing scores high enough right now. Try again in 30-60 minutes.`);
         return;
       }
 
@@ -429,7 +429,8 @@ async function handleMessage(chatId, text, from) {
         const lines = [
           `🌕 *${meta?.name || coin.base} (${coin.base})*`,
           ``,
-          `${bandEmoji} *Probability: ${coin.probability}% — ${coin.band}*`,
+          `${bandEmoji} *Score: ${coin.probability}/92 — ${coin.band}*`,
+          `_Heuristic score, not a probability — this scanner has not been backtested._`,
           ``,
           `💰 *Price:*     \`$${cgPrice}\``,
           `📈 *24H:*       +${coin.change24h.toFixed(2)}%`,
@@ -865,7 +866,7 @@ async function handleMessage(chatId, text, from) {
       ``,
       `━━━ *WHAT IS CRYPTOBOT V2?* ━━━`,
       ``,
-      `CryptoBot V2 is a private crypto intelligence bot that runs inside Telegram. It scans the market 24/7, finds high-probability trading setups, and sends you precise alerts telling you exactly when to buy, when to take profit, and when to cut losses.`,
+      `CryptoBot V2 is a private crypto intelligence bot that runs inside Telegram. It scans the market 24/7, finds momentum setups, and sends you alerts with an entry, a stop loss and take-profit levels. Every BUY alert shows how that kind of signal actually performed in a backtest (fees included).`,
       ``,
       `It connects to live market data, runs professional-grade technical analysis across multiple timeframes, and delivers the results straight to your Telegram. No charts. No guesswork.`,
       ].join('\n'),
@@ -873,8 +874,8 @@ async function handleMessage(chatId, text, from) {
       // ── Section 2 ──
       [`💎 *WHAT YOU STAND TO GAIN*`,
       ``,
-      `✅ *Never miss a profitable entry*`,
-      `The bot scans every 30 minutes. When a high-confidence setup appears you get an instant alert with entry price, stop loss and 3 take-profit targets.`,
+      `✅ *Get setups as they happen*`,
+      `The bot scans every 30 minutes. When a setup scores high enough you get an alert with entry price, stop loss, 3 take-profit targets — and its measured backtest record.`,
       ``,
       `✅ *Know exactly when to sell*`,
       `The bot monitors your positions and alerts you at TP1, TP2, TP3 and your custom target (2X, 3X, 5X).`,
@@ -882,11 +883,11 @@ async function handleMessage(chatId, text, from) {
       `✅ *Losses stay small*`,
       `Every trade comes with an ATR-based stop loss. If price hits it you get an immediate exit alert before the loss gets worse.`,
       ``,
-      `✅ *Institutional-grade analysis*`,
+      `✅ *Multi-indicator analysis*`,
       `ADX, Stochastic RSI, Bollinger Bands, OBV, VWAP, ATR — the same tools professional traders use.`,
       ``,
       `✅ *New coin opportunities*`,
-      `Get newly listed coins with contract addresses, probability scores and trade plans delivered to you.`,
+      `Get newly listed coins with contract addresses, a heuristic score and trade plans delivered to you.`,
       ``,
       `✅ *You stay in control*`,
       `The bot never touches your money. It is read-only intelligence. You decide every trade.`,
@@ -896,10 +897,10 @@ async function handleMessage(chatId, text, from) {
       [`📋 *THE MENU — ALL COMMANDS*`,
       ``,
       `🔍 *Scan Now*`,
-      `Scans the entire market immediately for high-probability pump coins. Returns probability score, factor breakdown, contract address and suggested buy commands.`,
+      `Scans small-cap coins for strong momentum. Returns a heuristic score, factor breakdown, contract address and suggested buy commands. High risk.`,
       ``,
       `🌕 *Moonshots*`,
-      `Same as Scan — finds coins with the best chance of 2X-5X within 3 days using 7-factor analysis.`,
+      `Same as Scan — small caps with strong momentum, scored on 7 factors. The score is not a probability and has not been backtested.`,
       ``,
       `🚀 *New Listings*`,
       `Hot newly listed coins with their contract address on every blockchain, current price, 24H stats and a CoinGecko verification link.`,
@@ -966,9 +967,11 @@ async function handleMessage(chatId, text, from) {
       ].join('\n'),
 
       // ── Section 6 ──
-      [`📊 *THE PROBABILITY SCORE*`,
+      [`📊 *THE TWO KINDS OF SCORE*`,
       ``,
-      `Every scan result shows a probability score built from 7 factors:`,
+      `*Market scanner BUY alerts* show a setup score (out of 15) AND the measured backtest record for that kind of signal: number of trades, win rate and average profit per trade in R (fees included). Trust the backtest numbers, not the score.`,
+      ``,
+      `*Moonshot / scan results* show a heuristic score (0–92) built from 7 factors:`,
       ``,
       `  Volume Quality — real or fake trading?`,
       `  Price Structure — early move or already topped?`,
@@ -983,7 +986,7 @@ async function handleMessage(chatId, text, from) {
       `🟠 50-64% = MODERATE — size down`,
       `🔴 Below 50% = Skip`,
       ``,
-      `⚠️ Even 80% does not guarantee profit. Markets can change due to news or whale activity. Always manage risk.`,
+      `⚠️ This score is NOT a probability and has not been backtested. A high score does not mean a coin is likely to rise. Always manage risk.`,
       ].join('\n'),
 
       // ── Section 7 ──
@@ -1023,7 +1026,7 @@ async function handleMessage(chatId, text, from) {
       `The unique identifier of a token on the blockchain. Always verify it on CoinGecko before buying a new coin to avoid fake tokens.`,
       ``,
       `*Can the bot guarantee profits?*`,
-      `No tool can guarantee profits in crypto. The bot improves your odds with quality setups and systematic exits. Losses are normal — the goal is winning trades to outperform losing ones over time.`,
+      `No. No tool can guarantee profits in crypto. Check the backtest numbers in each BUY alert: if the average R is below zero, the strategy lost money in testing. Losses are normal — only risk money you can afford to lose.`,
       ``,
       `*How do I check my positions?*`,
       `Tap 📊 My Positions or type \`positions\``,
@@ -1188,7 +1191,7 @@ async function handleMessage(chatId, text, from) {
       const filtered = coins.filter(c => c.probability >= 55);
 
       if (filtered.length === 0) {
-        await reply(chatId, `😴 No high-confidence coins right now. Try again in 30 minutes.`);
+        await reply(chatId, `😴 Nothing scores high enough right now. Try again in 30 minutes.`);
         return;
       }
 
@@ -1206,7 +1209,7 @@ async function handleMessage(chatId, text, from) {
         const priceStr = s.entryPrice < 0.01
           ? s.entryPrice?.toFixed(8)
           : s.entryPrice?.toFixed(4);
-        lines.push(`*${i + 1}. ${s.symbol}* — ${s.probability}% confidence (${s.band})`);
+        lines.push(`*${i + 1}. ${s.symbol}* — score ${s.probability}/92 (${s.band})`);
         lines.push(`  💰 Allocate: \`$${s.allocation}\` (${s.allocationPct}%)`);
         lines.push(`  🛡 Max loss: \`$${s.maxLoss}\` (stop loss at -15%)`);
         lines.push(`  🎯 2X target: \`$${s.target2x}\``);

@@ -176,52 +176,50 @@ function atr(candles, period = 14) {
  * +DI > -DI = uptrend | -DI > +DI = downtrend
  */
 function adx(candles, period = 14) {
-  if (candles.length < period * 2) {
-    return { adx: undefined, plusDI: undefined, minusDI: undefined, trending: false };
-  }
+  // Standard Wilder ADX, O(n). (The previous version recomputed ATR from
+  // scratch on every bar — O(n²) — and averaged DX with a plain SMA, so it
+  // drifted from charting-platform values and was too slow to backtest.)
+  const none = { adx: undefined, plusDI: undefined, minusDI: undefined, trending: false, strongTrend: false, bullishDI: false };
+  const n = candles.length;
+  if (n < period * 2 + 1) return none;
 
-  const dmP = [0], dmM = [0];
-  for (let i = 1; i < candles.length; i++) {
-    const up = candles[i].high - candles[i - 1].high;
-    const dn = candles[i - 1].low - candles[i].low;
-    dmP.push(up > dn && up > 0 ? up : 0);
-    dmM.push(dn > up && dn > 0 ? dn : 0);
-  }
+  let trS = 0, pS = 0, mS = 0;
+  const dx = [];
+  let pDI = 0, mDI = 0;
 
-  const trArr = atr(candles, period);
-  const dxVals = [];
+  for (let i = 1; i < n; i++) {
+    const c = candles[i], p = candles[i - 1];
+    const tr = Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+    const up = c.high - p.high;
+    const dn = p.low - c.low;
+    const pdm = up > dn && up > 0 ? up : 0;
+    const mdm = dn > up && dn > 0 ? dn : 0;
 
-  let smDmP = dmP.slice(1, period + 1).reduce((a, b) => a + b, 0);
-  let smDmM = dmM.slice(1, period + 1).reduce((a, b) => a + b, 0);
-  let smTR  = trArr[period] ? trArr[period] * period : 0;
-
-  for (let i = period; i < candles.length; i++) {
-    if (i > period) {
-      smDmP = smDmP - smDmP / period + dmP[i];
-      smDmM = smDmM - smDmM / period + dmM[i];
-      smTR  = smTR  - smTR  / period + (trArr[i] || 0) * period / period;
+    if (i <= period) {
+      trS += tr; pS += pdm; mS += mdm;
+      if (i < period) continue;
+    } else {
+      trS = trS - trS / period + tr;
+      pS  = pS  - pS  / period + pdm;
+      mS  = mS  - mS  / period + mdm;
     }
-    if (smTR === 0) continue;
-    const curTR = atr(candles.slice(0, i + 1), period)[i];
-    const tr14 = curTR ? curTR * period : smTR;
-    const pDI = 100 * smDmP / tr14;
-    const mDI = 100 * smDmM / tr14;
+    pDI = trS === 0 ? 0 : 100 * pS / trS;
+    mDI = trS === 0 ? 0 : 100 * mS / trS;
     const sum = pDI + mDI;
-    const dx  = sum === 0 ? 0 : 100 * Math.abs(pDI - mDI) / sum;
-    dxVals.push({ dx, pDI, mDI });
+    dx.push(sum === 0 ? 0 : 100 * Math.abs(pDI - mDI) / sum);
   }
 
-  if (dxVals.length < period) return { adx: undefined, plusDI: undefined, minusDI: undefined, trending: false };
+  if (dx.length < period) return none;
+  let adxVal = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dx.length; i++) adxVal = (adxVal * (period - 1) + dx[i]) / period;
 
-  const adxVal = dxVals.slice(-period).reduce((a, b) => a + b.dx, 0) / period;
-  const last = dxVals[dxVals.length - 1];
   return {
     adx: adxVal,
-    plusDI: last.pDI,
-    minusDI: last.mDI,
+    plusDI: pDI,
+    minusDI: mDI,
     trending: adxVal > 20,          // market is directional
     strongTrend: adxVal > 30,       // strong trend — ride it
-    bullishDI: last.pDI > last.mDI, // buyers in control
+    bullishDI: pDI > mDI,           // buyers in control
   };
 }
 

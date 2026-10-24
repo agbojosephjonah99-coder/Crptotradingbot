@@ -1,6 +1,6 @@
 {
   "name": "crypto-signal-bot-v2-enhanced",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "CryptoBot V2 — multi-timeframe signals, Telegram bot, position monitoring (advice only, never trades)",
   "main": "index.js",
   "engines": {

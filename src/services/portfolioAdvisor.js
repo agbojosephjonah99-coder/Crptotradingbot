@@ -58,7 +58,7 @@ function adviseSplit(coins, totalCapital) {
 }
 
 function getPctReasoning(prob) {
-  if (prob >= 80) return 'Highest allocation — strongest signals across all 7 factors';
+  if (prob >= 80) return 'Highest allocation — highest heuristic score (not backtested)';
   if (prob >= 65) return 'Medium allocation — most signals aligned, one or two weaknesses';
   return 'Smaller allocation — mixed signals, treat as speculative';
 }

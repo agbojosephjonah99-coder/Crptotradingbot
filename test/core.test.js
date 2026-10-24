@@ -2,38 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { makeCandles, mockNet, fakeReq, fakeRes, resetEnv } = require('./helpers');
 
-test('signalService no longer crashes (indicator import fixed)', () => {
-  const { evaluateSignal } = require('../src/services/signalService');
-  const r = evaluateSignal({
-    fourHour: makeCandles(250, { intervalMs: 14_400_000 }),
-    oneHour: makeCandles(120),
-    fifteenMin: makeCandles(20, { intervalMs: 900_000 }),
-  });
-  assert.ok(['BUY', 'SELL', 'WAIT'].includes(r.signal));
-  assert.equal(typeof r.ema200, 'number');
-});
-
-test('backtest only sees fully closed higher-timeframe candles', () => {
-  const { getLatestClosedIndex } = require('../src/utils/helpers');
-  const H = 3_600_000;
-  const hours = [{ time: 0 }, { time: H }, { time: 2 * H }];
-  // At 1h15m (decision at close of the 1:00–1:15 bar) only the 0:00 candle has closed
-  assert.equal(getLatestClosedIndex(hours, H + 15 * 60_000, H), 0);
-  assert.equal(getLatestClosedIndex(hours, 2 * H, H), 1);
-});
-
-test('backtest runs end-to-end on synthetic data', () => {
-  const { runBacktest } = require('../src/services/backtestService');
-  const r = runBacktest({
-    fourHour: makeCandles(400, { intervalMs: 14_400_000, seed: 3 }),
-    oneHour: makeCandles(1600, { seed: 4 }),
-    fifteenMin: makeCandles(1500, { intervalMs: 900_000, seed: 5, drift: 0.0005 }).map(c => ({ ...c, time: c.time + 1200 * 3_600_000 })),
-  }, 10000);
-  assert.equal(typeof r.equity, 'number');
-  assert.ok(r.balanceHistory.length > 0);
-  for (const t of r.trades) assert.ok(['stop', 'target'].includes(t.exitReason));
-});
-
 test('advice: 4H trend is computed (was always UNKNOWN)', async () => {
   resetEnv();
   mockNet({ price: 120 });

@@ -97,7 +97,7 @@ function buildListingMessage(coin, type) {
 
   // ── Probability line (for moonshots) ───────────────────────────────────
   const probLine = coin.probability
-    ? `\n📊 *Signal score:* ${coin.probability}% — ${coin.band}`
+    ? `\n📊 *Score:* ${coin.probability}/92 — ${coin.band} _(heuristic, not backtested)_`
     : '';
 
   // ── Green signals ───────────────────────────────────────────────────────

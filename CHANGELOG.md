@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.3.0 — Honest strategy
+
+### Do this after deploying
+1. On your computer: `npm install`, then `npm run backtest`. This needs internet access to Binance and takes a few minutes. Add `-- --days 365` for more trades.
+2. Commit and push the new `data/strategy-stats.json`. BUY alerts and the dashboard's Track Record tab then show the measured results.
+
+### What changed
+- **The backtest now tests the strategy the bot actually trades.** New `src/services/strategyBacktest.js` replays history through the live scanner's own `evaluateSignal()`, with the same candle windows. It trades the plan the BUY alert gives (TP1 40% → breakeven, TP2 35% → stop to TP1, TP3 25%), entering at the next candle's open.
+- **Costs included:** 0.1% fee per fill, 0.05% slippage on market fills, the stop counted first when a candle touches both stop and target, and gaps filling at the open. All adjustable with `--fee`, `--slippage`, `--risk` and `--max-hold-hours`.
+- **Honest statistics** (`src/services/strategyStats.js`): average profit per trade in R, win rate with a 95% range, profit factor, max drawdown, buy-and-hold comparison, results by setup score, warnings below 30 trades, and a plain-English verdict that says so when the strategy lost money.
+- **No more made-up confidence:**
+  - BUY alerts replace "Confidence 73% |███████░░░|" (which was just score ÷ 15) with the measured backtest line.
+  - The dashboard shows "Setup score x/15" plus the track record.
+  - Moonshot / scan / listings scores are labelled "heuristic, not backtested" everywhere, and the manual no longer promises "high-probability" or "2X–5X in 3 days".
+- **Live signals no longer repaint.** The scanner ignores the still-forming candle, so a BUY can't appear and vanish within the same 15 minutes, and live signals match what was backtested.
+- **Binance mirror fallback:** candles and prices also try `data-api.binance.vision` before Kraken. This helps Vercel's US servers, which `api.binance.com` blocks.
+- **ADX** is now the standard Wilder calculation: it matches charting platforms and is about 30× faster. Live ADX values shift slightly as a result.
+- **Dashboard:** new **Track Record** tab.
+- `/api/backtest` serves the saved results (a real backtest is too heavy for a serverless request).
+- **Removed** the old strategy (`signalService.js`), the old backtester (`backtestService.js`, `utils/helpers.js`) and the stale `backtest-results.json`, which tested a different strategy with look-ahead.
+- New `STRATEGY.md` explains the method and how to read the numbers.
+- Tests: 39 (11 new for the backtester: trade-plan maths, exact fees, stop-first, gaps, next-open entry, no look-ahead).
+
+
 ## 2.2.0 — Fix & secure
 
 ### ⚠️ Do this after deploying
