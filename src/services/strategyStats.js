@@ -51,6 +51,16 @@ function maxDrawdownPct(curve) {
   return round(mdd * 100, 2);
 }
 
+/** 95% range for the average R (mean ± 1.96 × standard error). */
+function meanRange95(xs) {
+  const n = xs.length;
+  if (n < 2) return [null, null];
+  const mean = xs.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1));
+  const half = 1.96 * sd / Math.sqrt(n);
+  return [round(mean - half, 3), round(mean + half, 3)];
+}
+
 function median(xs) {
   if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -83,6 +93,7 @@ function computeStats(trades, { equityCurve = null, initialCapital = null, final
     winRatePct: round((wins.length / n) * 100, 1),
     winRateRange95: wilson(wins.length, n),
     expectancyR: round(rs.reduce((a, b) => a + b, 0) / n, 3),
+    expectancyRange95: meanRange95(rs),
     medianR: round(median(rs), 3),
     avgTradePct: round(trades.reduce((s, t) => s + t.pnlPct, 0) / n, 3),
     profitFactor: grossLoss === 0 ? (grossWin > 0 ? null : 0) : round(grossWin / grossLoss, 2),
@@ -133,15 +144,17 @@ function buildSummary(perSymbol, meta = {}) {
     strategy: 'scanEngine (live v2scan logic) — 4H trend + 1H momentum + 15M entry',
     method: [
       'Same signal code and candle windows as the live scanner; closed candles only',
+      settings.strategy ? `Strategy "${settings.strategy.name}": decide on ${settings.strategy.decideOn} closes, stop ${settings.strategy.stopAtrMult}× 1H ATR, market filter ${settings.strategy.regime}, ≥${settings.strategy.minHoursBetweenEntries}h between entries` : null,
       'Entry at next 15m open + slippage; stop/TPs exactly as in the BUY alert',
       'TP1 40% → stop to breakeven; TP2 35% → stop to TP1; TP3 remaining 25%',
       'Stop assumed to hit first when a candle touches both; gaps fill at the open',
       `Fees ${settings.feePct}% per fill, slippage ${settings.slippagePct}% on market fills`,
       `Risk ${settings.riskPct}% of equity per trade, no leverage, one position per coin`,
-    ],
+    ].filter(Boolean),
     settings: {
       feePct: settings.feePct, slippagePct: settings.slippagePct, riskPct: settings.riskPct,
       initialCapital: settings.initialCapital, maxHoldBars: settings.maxHoldBars,
+      strategy: settings.strategy || null,
     },
     period: meta.period || perSymbol[0]?.result.period || null,
     symbols: perSymbol.map(s => s.symbol),
@@ -159,9 +172,11 @@ let cacheMtime = 0;
 
 function loadSavedStats() {
   try {
-    const st = fs.statSync(STATS_FILE);
+    // STRATEGY_STATS_FILE lets tests point at a different file
+    const file = process.env.STRATEGY_STATS_FILE || STATS_FILE;
+    const st = fs.statSync(file);
     if (!cache || st.mtimeMs !== cacheMtime) {
-      cache = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+      cache = JSON.parse(fs.readFileSync(file, 'utf8'));
       cacheMtime = st.mtimeMs;
     }
     return cache && cache.available ? cache : null;
@@ -211,7 +226,7 @@ function formatTrackRecord(tr) {
 
 module.exports = {
   MIN_TRADES, MIN_EDGE_R, STATS_FILE, verdict,
-  wilson, maxDrawdownPct, scoreBucket, computeStats, byScore, buildSummary,
+  wilson, meanRange95, maxDrawdownPct, scoreBucket, computeStats, byScore, buildSummary,
   loadSavedStats, trackRecordFor, formatTrackRecord,
   _clearCache: () => { cache = null; cacheMtime = 0; },
 };

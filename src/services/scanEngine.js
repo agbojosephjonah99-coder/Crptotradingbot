@@ -13,8 +13,10 @@ const {
   obv, vwap, volumeAvg, detectDivergence, detectPatterns, findSwingLevels,
 } = require('./indicatorService');
 const { calcATRStop, calcTakeProfits, calcRiskReward } = require('./riskService');
-const { fetchKlines } = require('../lib/market');
+const { fetchKlines, INTERVAL_MS } = require('../lib/market');
 const { trackRecordFor } = require('./strategyStats');
+const { ACTIVE } = require('../config/strategy');
+const { btcTrendLookup, regimeNeedsBtc, applyRegime } = require('./regime');
 
 /**
  * Candle windows the live scanner evaluates. The backtester feeds evaluateSignal
@@ -24,7 +26,12 @@ const WINDOWS = { h4: 260, h1: 100, m15: 50 };
 
 // ─── Core Signal Engine ───────────────────────────────────────────────────────
 
-function evaluateSignal(c4h, c1h, c15m) {
+/**
+ * @param {object} [params]
+ * @param {number} [params.stopAtrMult=1.5] stop = entry − this × 1H ATR
+ */
+function evaluateSignal(c4h, c1h, c15m, params = {}) {
+  const stopAtrMult = Number(params.stopAtrMult) > 0 ? Number(params.stopAtrMult) : 1.5;
   const n4 = c4h.length, n1 = c1h.length, n15 = c15m.length;
 
   if (n4 < 200 || n1 < 60 || n15 < 5) {
@@ -77,6 +84,9 @@ function evaluateSignal(c4h, c1h, c15m) {
     aboveVWAP: closes1h[n1 - 1] > vwapNow,
     bBandPctB: bb1h ? bb1h.percentB : undefined,
     obvTrend, atr: atrNow, divergence: div,
+    // used by the optional 'coinTrend' regime filter
+    coinTrendUp: ema50_4h !== undefined && ema200_4h !== undefined && ema50_4h > ema200_4h,
+    stopAtrMult,
     scannedAt: new Date().toISOString(),
   };
 
@@ -160,7 +170,7 @@ function evaluateSignal(c4h, c1h, c15m) {
 
     // ── Build result ──────────────────────────────────────────────────────
     const confidence = Math.min(100, Math.round((score / 15) * 100));
-    const stopLoss   = calcATRStop({ entryPrice, atrValue: atrNow, multiplier: 1.5 });
+    const stopLoss   = calcATRStop({ entryPrice, atrValue: atrNow, multiplier: stopAtrMult });
     const tps        = stopLoss ? calcTakeProfits({ entryPrice, stopLoss }) : null;
     const rr         = tps && stopLoss ? calcRiskReward({ entryPrice, stopLoss, takeProfit: tps.tp1.price }) : null;
 
@@ -208,14 +218,24 @@ function evaluateSignal(c4h, c1h, c15m) {
  * Closed candles only — the signal can't change before the next 15m close
  * (no repainting), and it matches what the backtest measured.
  */
-async function scanSymbol(symbol) {
+/** For decideOn '1h': drop 15m candles after the last one that closed on the hour. */
+function trimToHourClose(c15m) {
+  let end = c15m.length;
+  while (end > 0 && (c15m[end - 1].time + INTERVAL_MS['15m']) % INTERVAL_MS['1h'] !== 0) end--;
+  return c15m.slice(0, end);
+}
+
+async function scanSymbol(symbol, strategy = ACTIVE, ctx = {}) {
   const opts = { closedOnly: true };
-  const [c4h, c1h, c15m] = await Promise.all([
+  const [c4h, c1h, raw15m] = await Promise.all([
     fetchKlines(symbol, '4h', WINDOWS.h4, opts),
     fetchKlines(symbol, '1h', WINDOWS.h1, opts),
-    fetchKlines(symbol, '15m', WINDOWS.m15, opts),
+    fetchKlines(symbol, '15m', WINDOWS.m15 + 4, opts),
   ]);
-  const result = { symbol, ...evaluateSignal(c4h, c1h, c15m) };
+  const c15m = (strategy.decideOn === '1h' ? trimToHourClose(raw15m) : raw15m).slice(-WINDOWS.m15);
+  let result = { symbol, ...evaluateSignal(c4h, c1h, c15m, { stopAtrMult: strategy.stopAtrMult }) };
+  result = applyRegime(result, strategy.regime, ctx.btcUp);
+  result.strategy = strategy.name;
   // Measured backtest results for signals like this one (null until a backtest is saved)
   if (result.signal === 'BUY') result.trackRecord = trackRecordFor(result.score);
   const last = c15m[c15m.length - 1];
@@ -224,11 +244,20 @@ async function scanSymbol(symbol) {
 }
 
 /** Scan many symbols; errors are captured per symbol. Sorted BUY → WAIT → BEARISH → ERROR. */
-async function scanSymbols(symbols) {
+async function scanSymbols(symbols, strategy = ACTIVE) {
+  const ctx = {};
+  if (regimeNeedsBtc(strategy.regime)) {
+    try {
+      const daily = await fetchKlines('BTCUSDT', '1d', 120, { closedOnly: true });
+      ctx.btcUp = btcTrendLookup(daily)(Date.now());
+    } catch (err) {
+      console.error('[scan] BTC daily trend unavailable — BUYs blocked this run:', err.message);
+    }
+  }
   const results = [];
   for (const symbol of symbols) {
     try {
-      results.push(await scanSymbol(symbol));
+      results.push(await scanSymbol(symbol, strategy, ctx));
     } catch (err) {
       results.push({ symbol, signal: 'ERROR', error: err.message, score: 0, confidence: 0 });
     }
@@ -238,4 +267,4 @@ async function scanSymbols(symbols) {
   return results;
 }
 
-module.exports = { evaluateSignal, scanSymbol, scanSymbols, WINDOWS };
+module.exports = { evaluateSignal, scanSymbol, scanSymbols, trimToHourClose, WINDOWS };

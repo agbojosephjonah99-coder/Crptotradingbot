@@ -18,6 +18,7 @@
 const tg = require('../lib/telegram');
 const { isDuplicateSignal, markSignalFired } = require('./riskService');
 const { trackRecordFor, formatTrackRecord } = require('./strategyStats');
+const { ACTIVE } = require('../config/strategy');
 
 const actionChat  = () => process.env.TELEGRAM_CHAT_ID;
 const infoChannel = () => process.env.TELEGRAM_INFO_CHANNEL_ID;
@@ -51,8 +52,10 @@ async function _send(text) { return sendAction(text); }
 async function sendBuyAlert(result) {
   if (result.signal !== 'BUY') return;
   if (result.score < 7) return;
-  if (await isDuplicateSignal(result.symbol, 'BUY')) {
-    console.log(`[Telegram] Dedup: ${result.symbol} BUY already sent within 4h`);
+  // Same spacing between entries as the backtest assumes (strategy config)
+  const gapHours = Math.max(1, Number(ACTIVE.minHoursBetweenEntries) || 4);
+  if (await isDuplicateSignal(result.symbol, 'BUY', gapHours * 3_600_000)) {
+    console.log(`[Telegram] Dedup: ${result.symbol} BUY already sent within ${gapHours}h`);
     return;
   }
 
@@ -68,7 +71,7 @@ async function sendBuyAlert(result) {
     `🟢 *BUY SIGNAL — ${result.symbol}*`,
     ``,
     `💰 *Entry:*    \`$${Number(result.price).toFixed(4)}\``,
-    sl  ? `🛡 *Stop Loss:* \`$${Number(sl).toFixed(4)}\` _(1.5x ATR)_` : '',
+    sl  ? `🛡 *Stop Loss:* \`$${Number(sl).toFixed(4)}\` _(${result.stopAtrMult || 1.5}x ATR)_` : '',
     ``,
     tp1 ? `🎯 *TP1 (sell 40%):* \`$${Number(tp1.price).toFixed(4)}\` — ${tp1.ratio}` : '',
     tp2 ? `🎯 *TP2 (sell 35%):* \`$${Number(tp2.price).toFixed(4)}\` — ${tp2.ratio}` : '',

@@ -10,6 +10,7 @@
     "start": "node index.js",
     "scheduler": "node scheduler.js",
     "backtest": "node backtest.js",
+    "research": "node research.js",
     "test": "node --test test/*.test.js",
     "dev": "vercel dev",
     "deploy": "vercel --prod"

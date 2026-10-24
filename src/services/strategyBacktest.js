@@ -23,6 +23,8 @@
 
 const { evaluateSignal: liveEvaluate, WINDOWS } = require('./scanEngine');
 const { INTERVAL_MS } = require('../lib/market');
+const { ACTIVE } = require('../config/strategy');
+const { regimeAllows } = require('./regime');
 
 const DEFAULTS = {
   initialCapital: 10_000,
@@ -31,6 +33,9 @@ const DEFAULTS = {
   slippagePct: 0.05,    // on market fills (entry, stop exits)
   maxHoldBars: null,    // optional time stop in 15m bars (null = hold until plan exits)
   windows: WINDOWS,
+  strategy: ACTIVE,     // decideOn / stopAtrMult / regime / minHoursBetweenEntries
+  btcUpAt: null,        // fn(time) → BTC daily-trend flag; required for btc regimes
+  signalAt: null,       // research fast path: fn(i, decisionTime) → precomputed signal
 };
 
 /** Advance pointer to the last candle fully closed at `time`. */
@@ -51,6 +56,9 @@ function backtestStrategy({ c4h, c1h, c15m }, options = {}) {
   const fee = opts.feePct / 100;
   const slip = opts.slippagePct / 100;
   const M15 = INTERVAL_MS['15m'], H1 = INTERVAL_MS['1h'], H4 = INTERVAL_MS['4h'];
+  const strat = { ...ACTIVE, ...(opts.strategy || {}) };
+  const gapMs = Math.max(0, Number(strat.minHoursBetweenEntries) || 0) * H1;
+  let lastSignalTime = -Infinity;
 
   let equity = opts.initialCapital;
   const trades = [];
@@ -132,11 +140,22 @@ function backtestStrategy({ c4h, c1h, c15m }, options = {}) {
     p1h = advanceClosed(c1h, p1h, decisionTime, H1);
     p4h = advanceClosed(c4h, p4h, decisionTime, H4);
 
-    if (!pos && i + 1 < c15m.length && i + 1 >= W.m15 && p1h + 1 >= W.h1 && p4h + 1 >= W.h4) {
-      const w4 = c4h.slice(p4h + 1 - W.h4, p4h + 1);
-      const w1 = c1h.slice(p1h + 1 - W.h1, p1h + 1);
-      const w15 = c15m.slice(i + 1 - W.m15, i + 1);
-      const sig = evaluate(w4, w1, w15, { decisionTime });
+    const onSchedule = strat.decideOn !== '1h' || decisionTime % H1 === 0;
+    const spaced = decisionTime - lastSignalTime >= gapMs;
+    if (!pos && onSchedule && spaced && i + 1 < c15m.length && i + 1 >= W.m15 && p1h + 1 >= W.h1 && p4h + 1 >= W.h4) {
+      let sig;
+      if (opts.signalAt) {
+        sig = opts.signalAt(i, decisionTime);
+      } else {
+        const w4 = c4h.slice(p4h + 1 - W.h4, p4h + 1);
+        const w1 = c1h.slice(p1h + 1 - W.h1, p1h + 1);
+        const w15 = c15m.slice(i + 1 - W.m15, i + 1);
+        sig = evaluate(w4, w1, w15, { decisionTime, stopAtrMult: strat.stopAtrMult });
+      }
+      if (sig && sig.signal === 'BUY' && strat.regime && strat.regime !== 'none') {
+        const btcUp = opts.btcUpAt ? opts.btcUpAt(decisionTime) : undefined;
+        if (!regimeAllows(strat.regime, { coinTrendUp: sig.coinTrendUp, btcUp })) sig = null;
+      }
 
       if (sig && sig.signal === 'BUY' && sig.stopLoss && sig.takeProfits) {
         const next = c15m[i + 1];
@@ -148,6 +167,7 @@ function backtestStrategy({ c4h, c1h, c15m }, options = {}) {
           // Spot account, no leverage: can't buy more than equity (incl. entry fee)
           units = Math.min(units, equity / (entry * (1 + fee)));
           const cost = units * entry;
+          lastSignalTime = decisionTime;
           pos = {
             signalTime: bar.time, entryTime: next.time, entryIndex: i + 1,
             entry, stop, initialStop: stop, tps: sig.takeProfits, score: sig.score,
@@ -181,7 +201,7 @@ function backtestStrategy({ c4h, c1h, c15m }, options = {}) {
     equityCurve,
     finalEquity: round(equity, 2),
     openAtEnd,
-    settings: { ...opts, evaluate: undefined, windows: W },
+    settings: { ...opts, evaluate: undefined, signalAt: undefined, btcUpAt: undefined, windows: W, strategy: strat },
     period: c15m.length ? { from: new Date(c15m[0].time).toISOString(), to: new Date(c15m[c15m.length - 1].time + M15).toISOString() } : null,
     buyAndHoldPct: c15m.length ? round(((c15m[c15m.length - 1].close / c15m[0].open) - 1) * 100, 2) : null,
   };

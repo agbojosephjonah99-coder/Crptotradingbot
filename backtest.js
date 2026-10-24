@@ -20,6 +20,8 @@ const { fetchKlinesWithSource, configuredSymbols } = require('./src/lib/market')
 const { backtestStrategy, DEFAULTS } = require('./src/services/strategyBacktest');
 const { buildSummary, computeStats, verdict, STATS_FILE } = require('./src/services/strategyStats');
 const { WINDOWS } = require('./src/services/scanEngine');
+const { ACTIVE } = require('./src/config/strategy');
+const { btcTrendLookup, regimeNeedsBtc } = require('./src/services/regime');
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,6 +38,14 @@ const options = {
   riskPct: Number(arg('risk', DEFAULTS.riskPct)),
   initialCapital: Number(arg('capital', DEFAULTS.initialCapital)),
   maxHoldBars: arg('max-hold-hours', null) ? Number(arg('max-hold-hours')) * 4 : null,
+  // Strategy = src/config/strategy.js ACTIVE, optionally overridden for experiments
+  strategy: {
+    ...ACTIVE,
+    ...(arg('decide', null) ? { decideOn: arg('decide') } : {}),
+    ...(arg('stop-mult', null) ? { stopAtrMult: Number(arg('stop-mult')) } : {}),
+    ...(arg('regime', null) ? { regime: arg('regime') } : {}),
+    ...(arg('gap-hours', null) ? { minHoursBetweenEntries: Number(arg('gap-hours')) } : {}),
+  },
 };
 
 const pct = (x) => (x === null || x === undefined ? 'n/a' : `${x}%`);
@@ -57,7 +67,14 @@ async function load(symbol) {
 
 async function main() {
   console.log(`Backtesting the live scanner strategy on ${symbols.length} coin(s), last ${days} days`);
-  console.log(`Fees ${options.feePct}% per fill · slippage ${options.slippagePct}% · risk ${options.riskPct}% per trade\n`);
+  const st = options.strategy;
+  console.log(`Fees ${options.feePct}% per fill · slippage ${options.slippagePct}% · risk ${options.riskPct}% per trade`);
+  console.log(`Strategy: ${st.name} — decide on ${st.decideOn} · stop ${st.stopAtrMult}× 1H ATR · filter ${st.regime} · ≥${st.minHoursBetweenEntries}h between entries\n`);
+
+  if (regimeNeedsBtc(st.regime)) {
+    const { candles } = await fetchKlinesWithSource('BTCUSDT', '1d', days + 120, { closedOnly: true });
+    options.btcUpAt = btcTrendLookup(candles);
+  }
 
   const perSymbol = [];
   const errors = [];

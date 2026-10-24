@@ -152,8 +152,10 @@ test('track record text is honest about losses and small samples', () => {
 
 test('without saved results, BUY alerts say so instead of inventing a confidence %', async () => {
   resetEnv();
+  // Simulate "no backtest saved yet", whatever is in your data/ folder
+  process.env.STRATEGY_STATS_FILE = require('path').join(__dirname, 'no-such-stats-file.json');
   _clearCache();
-  assert.equal(trackRecordFor(9), null); // repo ships a placeholder file
+  assert.equal(trackRecordFor(9), null);
   const net = mockNet();
   const { sendBuyAlert } = require('../src/services/telegramService');
   await sendBuyAlert({

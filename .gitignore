@@ -7,3 +7,7 @@ signals.json
 
 # Private notes with real secrets — never commit
 PRIVATE-*
+
+# Research data cache and outputs
+data/cache/
+research-results.json
