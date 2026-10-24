@@ -55,6 +55,23 @@ npm run backtest -- --max-hold-hours 72               # add a time stop
 
 Then **commit and push `data/strategy-stats.json`** so the deployed bot shows the numbers. Re-run monthly; markets change.
 
+## Research result (October 2026)
+
+`npm run research` tested 48 variants on 12 coins over 365 days:
+- decision on 15m or 1h closes;
+- stops of 1.5×, 2.5× or 3.5× the 1H ATR;
+- no filter, a coin-trend filter, a BTC-trend filter, or both;
+- 4h or 24h between entries.
+
+It chose a variant on the first 8 months and judged it once on the last 4.
+
+- Every variant lost money on the first 8 months (best: −0.088R per trade).
+- On the unseen months, the original lost −0.113R per trade (95% range −0.20 to −0.03R).
+- The chosen variant (3.5× stop, 24h gap) made +0.028R, but its 95% range was −0.15 to +0.20R: indistinguishable from zero.
+- **Verdict: no reliable edge. BUY alerts should stay off.**
+
+To re-run: `npm run research` (add `-- --days 540` for more history). If a future variant passes, the tool prints the settings for `src/config/strategy.js`, the one file that controls the live scanner and the backtest.
+
 ## What is still NOT tested
 
 - **Moonshot / scan / listings scores (0–92).** They depend on CoinGecko and KuCoin snapshots that have no free history, so they can't be backtested here. Every message now labels them as a heuristic score, not a probability.

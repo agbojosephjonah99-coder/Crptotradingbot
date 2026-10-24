@@ -96,6 +96,9 @@ function resetEnv(extra = {}) {
   process.env.TELEGRAM_CHAT_ID = '1000';
   Object.assign(process.env, extra);
   require('../src/lib/redis')._resetMemory();
+  require('../src/services/positionStore')._resetMigrationCache();
+  require('../src/services/profitTracker')._resetMigrationCache();
+  require('../src/services/userService')._resetMigrationCache();
 }
 
 // Silence expected warnings in test output

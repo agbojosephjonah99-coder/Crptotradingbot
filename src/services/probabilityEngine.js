@@ -25,7 +25,7 @@
  *  <40%   → Skip                  (not worth the risk)
  */
 
-const axios = require('axios');
+const { getWithRetry } = require('../lib/http');
 
 const KUCOIN_BASE    = 'https://api.kucoin.com/api/v1';
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
@@ -217,7 +217,7 @@ async function analyseMomentum(symbol) {
 
   try {
     // Fetch 1H candles from KuCoin
-    const r = await axios.get(`${KUCOIN_BASE}/market/candles`, {
+    const r = await getWithRetry(`${KUCOIN_BASE}/market/candles`, {
       params: { symbol, type: '1hour', pageSize: 24 },
       timeout: 8000,
     });
@@ -323,7 +323,9 @@ function detectRedFlags(coin, meta) {
   }
 
   // No contract address = unverifiable token
-  if (contracts.length === 0 && !meta?.isNativeAsset) {
+  // contractsUnknown: metadata came from the batch endpoint, which has no
+  // contract info — don't penalise for something we simply didn't fetch.
+  if (contracts.length === 0 && !meta?.isNativeAsset && !meta?.contractsUnknown) {
     flags.push('⚠️ Contract address not found — cannot verify token legitimacy');
     penalty -= 5;
   }

@@ -53,10 +53,11 @@ test('dedup survives (stored, not in-process only)', async () => {
   resetEnv();
   const risk = require('../src/services/riskService');
   assert.equal(await risk.isDuplicateSignal('SOLUSDT', 'BUY'), false);
-  await risk.markSignalFired('SOLUSDT', 'BUY');
+  assert.equal(await risk.claimSignal('SOLUSDT', 'BUY'), true);
   assert.equal(await risk.isDuplicateSignal('SOLUSDT', 'BUY'), true);
-  const store = require('../src/lib/redis');
-  assert.ok((await store.getJSON('cryptobot:signal-fired'))['SOLUSDT:BUY']);
+  assert.equal(await risk.claimSignal('SOLUSDT', 'BUY'), false, 'second claim within cooldown is refused');
+  await risk.releaseSignal('SOLUSDT', 'BUY');
+  assert.equal(await risk.claimSignal('SOLUSDT', 'BUY'), true, 'released claim can be taken again');
 });
 
 test('v2advice endpoint accepts account/risk aliases', async () => {

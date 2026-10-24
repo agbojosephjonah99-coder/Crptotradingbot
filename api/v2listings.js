@@ -5,21 +5,21 @@
  * Now includes: Coin full name + contract address per chain (via CoinGecko)
  */
 
-const axios = require('axios');
 const {
   ema, rsi, stochRsi, bollingerBands, atr,
   obv, vwap, volumeAvg, detectPatterns,
 } = require('../src/services/indicatorService');
 const {
   calcATRStop, calcTakeProfits, calcRiskReward,
-  isDuplicateSignal, markSignalFired,
+  claimSignal, releaseSignal,
 } = require('../src/services/riskService');
 const { sendListingBuyAlert } = require('../src/services/telegramService');
 const { cors, mayAlert } = require('../src/lib/auth');
 
-const BINANCE_BASE  = 'https://api.binance.com/api/v3';
-const KRAKEN_BASE   = 'https://api.kraken.com/0/public';
-const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
+const axios = require('axios');
+const { fetchKlines, binanceGet, KRAKEN_BASE } = require('../src/lib/market');
+const { getMarketsBySymbols, getCoinDetail } = require('../src/services/listingsService');
+const { mapLimit } = require('../src/lib/concurrency');
 
 // ─── Established Coins (excluded) ────────────────────────────────────────────
 const ESTABLISHED = new Set([
@@ -47,101 +47,16 @@ const ESTABLISHED = new Set([
   'DRIFTUSDT','ZEREBROUSDT','AIXBTUSDT','FARTCOINUSDT','TRUMPUSDT',
 ]);
 
-// ─── Chain display names ──────────────────────────────────────────────────────
-const CHAIN_LABELS = {
-  ethereum:           'Ethereum (ERC-20)',
-  'binance-smart-chain': 'BNB Chain (BEP-20)',
-  solana:             'Solana (SPL)',
-  arbitrum:           'Arbitrum',
-  'optimistic-ethereum': 'Optimism',
-  base:               'Base',
-  polygon:            'Polygon',
-  avalanche:          'Avalanche (C-Chain)',
-  sui:                'Sui',
-  aptos:              'Aptos',
-  tron:               'Tron (TRC-20)',
-  ton:                'TON',
-};
-
-// ─── Fetch coin name + contract address from CoinGecko ───────────────────────
-// Called for each deep-analysed candidate (up to 15). CoinGecko free tier may rate-limit.
-async function fetchCoinMetadata(baseAsset) {
-  try {
-    // Step 1: Search CoinGecko for the coin by ticker symbol
-    const searchResp = await axios.get(`${COINGECKO_BASE}/search`, {
-      params: { query: baseAsset },
-      timeout: 8000,
-    });
-
-    const coins = searchResp.data.coins || [];
-    if (coins.length === 0) return null;
-
-    // Find the best match — exact symbol match preferred
-    const match = coins.find(c => c.symbol.toUpperCase() === baseAsset.toUpperCase())
-      || coins[0];
-
-    if (!match) return null;
-
-    // Step 2: Fetch full coin detail to get contract addresses
-    const detailResp = await axios.get(`${COINGECKO_BASE}/coins/${match.id}`, {
-      params: {
-        localization: false,
-        tickers: false,
-        market_data: false,
-        community_data: false,
-        developer_data: false,
-        sparkline: false,
-      },
-      timeout: 8000,
-    });
-
-    const coin = detailResp.data;
-    const platforms = coin.platforms || {};
-
-    // Build a clean list of contract addresses per chain
-    const contracts = Object.entries(platforms)
-      .filter(([chain, addr]) => addr && addr.length > 0)
-      .map(([chain, addr]) => ({
-        chain,
-        chainLabel: CHAIN_LABELS[chain] || chain,
-        address: addr,
-      }));
-
-    return {
-      id:          coin.id,
-      name:        coin.name,
-      symbol:      coin.symbol?.toUpperCase(),
-      description: coin.description?.en?.split('.')[0] || '',  // first sentence only
-      contracts,
-      coingeckoUrl: `https://www.coingecko.com/en/coins/${coin.id}`,
-      // Flag if no contracts found (native chain coins like SOL, BNB)
-      isNativeAsset: contracts.length === 0,
-    };
-
-  } catch (err) {
-    console.warn(`[CoinGecko] Failed for ${baseAsset}:`, err.message);
-    return null;  // Non-fatal — trade plan still works without it
-  }
-}
-
-// ─── Fetch OHLC candles ───────────────────────────────────────────────────────
+// ─── Coin metadata & candles (shared helpers with retries + fallbacks) ──────
+// Names for every candidate come from ONE batch CoinGecko call; contract
+// addresses are only fetched for coins that produce a BUY (they go in the alert).
 async function fetchCoinCandles(symbol) {
   try {
-    const [r1h, r15m] = await Promise.all([
-      axios.get(`${BINANCE_BASE}/klines`, {
-        params: { symbol, interval: '1h', limit: 100 },
-        timeout: 10000,
-      }),
-      axios.get(`${BINANCE_BASE}/klines`, {
-        params: { symbol, interval: '15m', limit: 50 },
-        timeout: 10000,
-      }),
+    const [candles1h, candles15m] = await Promise.all([
+      fetchKlines(symbol, '1h', 100, { closedOnly: true }),
+      fetchKlines(symbol, '15m', 50, { closedOnly: true }),
     ]);
-    const map = c => ({
-      time: Number(c[0]), open: Number(c[1]), high: Number(c[2]),
-      low: Number(c[3]), close: Number(c[4]), volume: Number(c[5]),
-    });
-    return { candles1h: r1h.data.map(map), candles15m: r15m.data.map(map) };
+    return { candles1h, candles15m };
   } catch {
     return null;
   }
@@ -304,8 +219,8 @@ module.exports = async (req, res) => {
   try {
     const alerting = mayAlert(req);
     const [tickerResp, exchangeResp, krakenResp] = await Promise.allSettled([
-      axios.get(`${BINANCE_BASE}/ticker/24hr`, { timeout: 15000 }),
-      axios.get(`${BINANCE_BASE}/exchangeInfo`, { timeout: 15000 }),
+      binanceGet('/ticker/24hr'),
+      binanceGet('/exchangeInfo'),
       axios.get(`${KRAKEN_BASE}/AssetPairs`,    { timeout: 10000 }),
     ]);
 
@@ -369,37 +284,29 @@ module.exports = async (req, res) => {
       .sort((a, b) => b.pumpScore - a.pumpScore)
       .slice(0, 15);
 
-    // Deep analysis — OHLC + technical + metadata
-    const results = [];
-
-    for (const coin of firstPass) {
-      // Fetch candles and coin metadata in parallel
-      const [ohlc, metadata] = await Promise.all([
-        fetchCoinCandles(coin.symbol),
-        fetchCoinMetadata(coin.baseAsset),   // ← name + contract address
-      ]);
-
-      if (!ohlc) {
-        results.push({ ...coin, signal: 'WATCH', reason: 'Could not fetch candle data', metadata });
-        continue;
-      }
+    // Deep analysis — candles + technicals (4 coins at a time), names in one batch call
+    const names = await getMarketsBySymbols(firstPass.map(c => c.baseAsset));
+    const results = await mapLimit(firstPass, 4, async (coin) => {
+      const ohlc = await fetchCoinCandles(coin.symbol);
+      const named = names.get(coin.baseAsset.toUpperCase()) || null;
+      if (!ohlc) return { ...coin, signal: 'WATCH', reason: 'Could not fetch candle data', coinName: named?.name || coin.baseAsset };
 
       const analysis = analyzeNewListing(ohlc.candles1h, ohlc.candles15m);
+      // Contract addresses only for BUYs (they're shown in the alert)
+      const metadata = analysis.signal === 'BUY'
+        ? (await getCoinDetail(named?.id || coin.baseAsset, !!named?.id)) || named
+        : named;
 
-      const result = {
+      return {
         symbol:      coin.symbol,
         baseAsset:   coin.baseAsset,
         exchange:    'Binance',
-
-        // ── Coin identity ──────────────────────────────────────────────
         coinName:    metadata?.name        || coin.baseAsset,
         coinId:      metadata?.id          || null,
         description: metadata?.description || null,
         contracts:   metadata?.contracts   || [],
-        isNativeAsset: metadata?.isNativeAsset || false,
-        coingeckoUrl: metadata?.coingeckoUrl  || null,
-
-        // ── Market data ────────────────────────────────────────────────
+        isNativeAsset: metadata?.contractsUnknown ? false : (metadata?.isNativeAsset || false),
+        coingeckoUrl: metadata?.cgUrl       || null,
         price:       coin.price,
         priceChange: coin.priceChange,
         volume:      coin.volume,
@@ -409,21 +316,19 @@ module.exports = async (req, res) => {
         pumpFactors: coin.pumpFactors,
         riskFlags:   coin.riskFlags,
         onKraken:    coin.onKraken,
-
         ...analysis,
         scannedAt: new Date().toISOString(),
       };
+    });
 
-      results.push(result);
-
-      // Telegram alert for BUY signals — only on keyed (cron) calls when
-      // CRON_SECRET is set, deduplicated for 4h across cold starts, and awaited
-      // so serverless doesn't freeze it half-sent.
-      if (alerting && analysis.signal === 'BUY' && !(await isDuplicateSignal(coin.symbol, 'LISTING_BUY'))) {
+    // Telegram alerts for BUY signals — only on keyed (cron) calls when
+    // CRON_SECRET is set, claimed atomically (no double alerts), awaited.
+    for (const result of results) {
+      if (alerting && result.signal === 'BUY' && (await claimSignal(result.symbol, 'LISTING_BUY'))) {
         try {
           await sendListingBuyAlert(result);
-          await markSignalFired(coin.symbol, 'LISTING_BUY');
         } catch (e) {
+          await releaseSignal(result.symbol, 'LISTING_BUY');
           console.error('[TG LISTING] Alert error:', e.message);
         }
       }

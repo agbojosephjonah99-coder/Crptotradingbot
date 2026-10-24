@@ -1,10 +1,20 @@
 /**
  * ─── Listings Service ─────────────────────────────────────────────────────────
  * KuCoin for market data + CoinGecko for metadata + probabilityEngine for scoring
+ *
+ * RELIABILITY (v2.5): the old version made ~90 calls one after another
+ * (2 CoinGecko + 1 KuCoin per coin × 30 coins). CoinGecko's free tier allows
+ * roughly 30 per minute, so many failed and those coins were scored as if
+ * their market cap were unknown. Now:
+ *  - one batch CoinGecko call gets price + market cap for all candidates
+ *  - contract addresses are fetched only for the coins actually shown (top 5)
+ *  - KuCoin candle calls run 5 at a time
+ *  - every call retries on 429 / 5xx, honouring Retry-After
  */
 
-const axios = require('axios');
 const { calculateProbability } = require('./probabilityEngine');
+const { getWithRetry } = require('../lib/http');
+const { mapLimit } = require('../lib/concurrency');
 
 const KUCOIN_BASE    = 'https://api.kucoin.com/api/v1';
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
@@ -34,23 +44,56 @@ const CHAIN_LABELS = {
   'optimistic-ethereum': 'Optimism',
 };
 
-// ─── CoinGecko full detail ────────────────────────────────────────────────────
+// ─── CoinGecko: batch market data for many symbols in ONE call ───────────────
+async function getMarketsBySymbols(symbols) {
+  const out = new Map();
+  const list = [...new Set(symbols.map(s => s.toLowerCase()))];
+  for (let i = 0; i < list.length; i += 50) {
+    const chunk = list.slice(i, i + 50);
+    try {
+      const r = await getWithRetry(`${COINGECKO_BASE}/coins/markets`, {
+        params: { vs_currency: 'usd', symbols: chunk.join(','), include_tokens: 'top', per_page: 250 },
+        timeout: 10000,
+      });
+      for (const c of r.data || []) {
+        const sym = String(c.symbol || '').toUpperCase();
+        // keep the largest coin if several share a ticker
+        if (!out.has(sym) || (c.market_cap || 0) > (out.get(sym).marketCap || 0)) {
+          out.set(sym, {
+            id: c.id,
+            name: c.name,
+            symbol: sym,
+            currentPrice: c.current_price ?? null,
+            priceChange24h: c.price_change_percentage_24h ?? null,
+            marketCap: c.market_cap || null,
+            volume24h: c.total_volume || null,
+            contracts: [],
+            contractsUnknown: true,
+            isNativeAsset: false,
+            cgUrl: `https://www.coingecko.com/en/coins/${c.id}`,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[Listings] CoinGecko batch failed:', err.message);
+    }
+  }
+  return out;
+}
+
+// ─── CoinGecko full detail (contracts, description) ──────────────────────────
 async function getCoinDetail(symbolOrId, isId = false) {
   try {
     let cgId = symbolOrId;
     if (!isId) {
-      const s = await axios.get(`${COINGECKO_BASE}/search`, {
-        params: { query: symbolOrId }, timeout: 6000,
-      });
-      const match = (s.data.coins || []).find(c => c.symbol.toUpperCase() === symbolOrId.toUpperCase())
-        || s.data.coins?.[0];
+      const s = await getWithRetry(`${COINGECKO_BASE}/search`, { params: { query: symbolOrId }, timeout: 6000 });
+      const match = (s.data.coins || []).find(c => c.symbol.toUpperCase() === symbolOrId.toUpperCase()) || s.data.coins?.[0];
       if (!match) return null;
       cgId = match.id;
     }
 
-    const r = await axios.get(`${COINGECKO_BASE}/coins/${cgId}`, {
-      params: { localization: false, tickers: false, market_data: true,
-                community_data: false, developer_data: false },
+    const r = await getWithRetry(`${COINGECKO_BASE}/coins/${cgId}`, {
+      params: { localization: false, tickers: false, market_data: true, community_data: false, developer_data: false },
       timeout: 8000,
     });
 
@@ -59,30 +102,48 @@ async function getCoinDetail(symbolOrId, isId = false) {
     const platforms = coin.platforms   || {};
     const contracts = Object.entries(platforms)
       .filter(([, a]) => a && a.length > 5)
-      .map(([chain, address]) => ({
-        chain, address,
-        chainLabel: CHAIN_LABELS[chain] || chain,
-      }));
+      .map(([chain, address]) => ({ chain, address, chainLabel: CHAIN_LABELS[chain] || chain }));
 
     return {
-      id:            coin.id,
-      name:          coin.name,
-      symbol:        coin.symbol?.toUpperCase(),
-      description:   (coin.description?.en || '').split('.')[0].slice(0, 120),
-      currentPrice:  md.current_price?.usd        || null,
-      priceChange24h: md.price_change_percentage_24h || null,
-      marketCap:     md.market_cap?.usd            || null,
-      volume24h:     md.total_volume?.usd          || null,
+      id:             coin.id,
+      name:           coin.name,
+      symbol:         coin.symbol?.toUpperCase(),
+      description:    (coin.description?.en || '').split('.')[0].slice(0, 120),
+      currentPrice:   md.current_price?.usd ?? null,
+      priceChange24h: md.price_change_percentage_24h ?? null,
+      marketCap:      md.market_cap?.usd || null,
+      volume24h:      md.total_volume?.usd || null,
       contracts,
-      isNativeAsset: contracts.length === 0,
-      cgUrl:         `https://www.coingecko.com/en/coins/${coin.id}`,
+      isNativeAsset:  contracts.length === 0,
+      contractsUnknown: false,
+      cgUrl:          `https://www.coingecko.com/en/coins/${coin.id}`,
     };
   } catch { return null; }
 }
 
+/** Batch metadata, falling back to per-coin lookups (max 8) if the batch call failed. */
+async function getMetaForSymbols(symbols) {
+  const metas = await getMarketsBySymbols(symbols);
+  if (metas.size === 0) {
+    const fallback = await mapLimit(symbols.slice(0, 8), 2, (s) => getCoinDetail(s));
+    symbols.slice(0, 8).forEach((s, i) => { if (fallback[i]) metas.set(s.toUpperCase(), fallback[i]); });
+  }
+  return metas;
+}
+
+/** Add contract addresses + description for the coins we actually show. */
+async function enrichWithDetails(coins, getMeta, setMeta) {
+  await mapLimit(coins, 2, async (coin) => {
+    const meta = getMeta(coin);
+    if (meta && !meta.contractsUnknown) return;
+    const detail = await getCoinDetail(meta?.id || coin.base || coin.symbol, !!meta?.id);
+    if (detail) setMeta(coin, { ...(meta || {}), ...detail });
+  });
+}
+
 // ─── KuCoin tickers ───────────────────────────────────────────────────────────
 async function getKuCoinTickers() {
-  const r = await axios.get(`${KUCOIN_BASE}/market/allTickers`, { timeout: 12000 });
+  const r = await getWithRetry(`${KUCOIN_BASE}/market/allTickers`, { timeout: 12000 });
   if (!r.data?.data?.ticker) throw new Error('KuCoin API unavailable');
 
   return r.data.data.ticker
@@ -90,12 +151,8 @@ async function getKuCoinTickers() {
       const base   = t.symbol.replace('-USDT', '');
       const vol    = parseFloat(t.volValue) || 0;
       const change = parseFloat(t.changeRate) * 100;
-      return t.symbol.endsWith('-USDT') &&
-        !ESTABLISHED.has(base) &&
-        vol    >= 200_000 &&
-        change >  0       &&
-        change <  600     &&
-        parseFloat(t.last) > 0;
+      return t.symbol.endsWith('-USDT') && !ESTABLISHED.has(base) &&
+        vol >= 200_000 && change > 0 && change < 600 && parseFloat(t.last) > 0;
     })
     .map(t => ({
       kuCoinSymbol: t.symbol,
@@ -108,47 +165,31 @@ async function getKuCoinTickers() {
       tradeCount:   parseInt(t.count || 0, 10),
     }))
     .sort((a, b) => b.volume - a.volume)
-    .slice(0, 30); // Pre-filter top 30 by volume for deep analysis
+    .slice(0, 30); // top 30 by volume go to deep analysis
 }
 
-// ─── CoinGecko trending ───────────────────────────────────────────────────────
-async function getTrendingWithDetails() {
-  const r       = await axios.get(`${COINGECKO_BASE}/search/trending`, { timeout: 8000 });
-  const coins   = (r.data.coins || []).slice(0, 5);
-  const detailed = [];
-  for (const c of coins) {
-    const detail = await getCoinDetail(c.item.id, true);
-    if (detail) detailed.push({ ...detail, trendScore: c.item.score });
-  }
-  return detailed;
+async function getTrendingSymbols() {
+  try {
+    const r = await getWithRetry(`${COINGECKO_BASE}/search/trending`, { timeout: 8000 }, { retries: 1 });
+    return r.data.coins || [];
+  } catch { return []; }
 }
 
 // ─── Main: getMoonshots ───────────────────────────────────────────────────────
 async function getMoonshots() {
-  // Get KuCoin tickers + trending symbols simultaneously
-  const [tickers, trendResp] = await Promise.all([
-    getKuCoinTickers(),
-    axios.get(`${COINGECKO_BASE}/search/trending`, { timeout: 8000 }).catch(() => ({ data: { coins: [] } })),
-  ]);
+  const [tickers, trendingCoins] = await Promise.all([getKuCoinTickers(), getTrendingSymbols()]);
+  const trendingSymbols = new Set(trendingCoins.map(c => c.item.symbol.toUpperCase()));
+  const metas = await getMetaForSymbols(tickers.map(t => t.base));
 
-  const trendingSymbols = new Set(
-    (trendResp.data.coins || []).map(c => c.item.symbol.toUpperCase())
-  );
-
-  // Deep analysis: enrich top candidates with metadata + probability
-  const results = [];
-
-  for (const coin of tickers) {
-    // Fetch CoinGecko metadata
-    const meta = await getCoinDetail(coin.base);
-
-    // Run full 7-factor probability analysis
+  const scored = await mapLimit(tickers, 5, async (coin) => {
+    const meta = metas.get(coin.base.toUpperCase()) || null;
     const prob = await calculateProbability(coin, meta, trendingSymbols);
+    return { coin, meta, prob };
+  });
 
-    // Only include if probability >= 55% (cuts out trash)
-    if (prob.probability < 55) continue;
-
-    results.push({
+  const results = scored
+    .filter(s => s.prob.probability >= 55)
+    .map(({ coin, meta, prob }) => ({
       ...coin,
       meta,
       probability:    prob.probability,
@@ -159,27 +200,28 @@ async function getMoonshots() {
       redFlags:       prob.redFlags,
       skipReason:     prob.skipReason,
       isTrending:     trendingSymbols.has(coin.base.toUpperCase()),
-    });
-  }
+    }))
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, 5);
 
-  // Sort by probability descending
-  return results.sort((a, b) => b.probability - a.probability).slice(0, 5);
+  await enrichWithDetails(results, c => c.meta, (c, m) => { c.meta = m; });
+  return results;
 }
 
 // ─── Main: getNewListingsWithMetadata ─────────────────────────────────────────
 async function getNewListingsWithMetadata() {
-  const [tickers, trending] = await Promise.all([
-    getKuCoinTickers(),
-    getTrendingWithDetails(),
-  ]);
+  const [tickers, trendingCoins] = await Promise.all([getKuCoinTickers(), getTrendingSymbols()]);
+  const hot = tickers.slice(0, 5);
+  const metas = await getMetaForSymbols(hot.map(t => t.base));
+  const hotCoins = hot.map(coin => ({ ...coin, meta: metas.get(coin.base.toUpperCase()) || null }));
+  await enrichWithDetails(hotCoins, c => c.meta, (c, m) => { c.meta = m; });
 
-  const hotCoins = [];
-  for (const coin of tickers.slice(0, 10)) {
-    const meta = await getCoinDetail(coin.base);
-    hotCoins.push({ ...coin, meta });
-  }
+  const trending = (await mapLimit(trendingCoins.slice(0, 5), 2, async (c) => {
+    const detail = await getCoinDetail(c.item.id, true);
+    return detail ? { ...detail, trendScore: c.item.score } : null;
+  })).filter(Boolean);
 
   return { hotCoins, trending };
 }
 
-module.exports = { getMoonshots, getNewListingsWithMetadata };
+module.exports = { getMoonshots, getNewListingsWithMetadata, getMarketsBySymbols, getCoinDetail };

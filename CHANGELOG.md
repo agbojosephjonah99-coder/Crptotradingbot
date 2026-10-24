@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.5.0 — Reliability
+
+### Do this after deploying
+- **Nothing is required.** Existing users, positions and trades move to the new storage format automatically, the first time each is read. The old values are kept as `…-legacy-backup` keys in Upstash.
+- Optional: open `/api/set-commands?key=…` once to add `/setstop` to the bot's menu, and `/api/health?key=…` to check every data source from Vercel.
+
+### Saved data can no longer be overwritten
+- **Positions:** one Redis hash per position, plus an index per user. Each update writes only the fields it changes. Before, every change rewrote a single JSON value holding all of a user's positions, so a buy made while the monitor was running, or a "stop hit" flag set by quickcheck at the same moment as the monitor, could silently disappear.
+- **Trades:** an append-only list, so simultaneous `sold` records are all kept.
+- **Users:** one hash field per user, so an approval and a new `/start` at the same moment both survive.
+- **Duplicate-alert protection:** atomic claims (SET NX with expiry). Two scans running at once can't both send the same BUY alert, and a failed send releases the claim so the next run retries.
+- **An update can't resurrect a position the user just removed.**
+
+### Stops follow the plan
+- After TP1, the saved stop moves to breakeven; after TP2, to TP1. The alerts already told users to do this, but the bot kept watching the original stop, so a return to entry after TP1 produced no alert. Now you get "🟡 BREAKEVEN STOP" or "🟢 PROFIT STOP".
+- Stops only ever move up.
+- **Your own stop:** `buy SOL 92.5 2x sl 88`; targets are then built from your stop.
+- **Change it later:** `setstop SOL 90`, or `setstopid <entry id> 90` when you have several entries. A stop above the current price is refused.
+
+### No more timeouts or duplicate replies
+- **Telegram webhook** replies instantly and finishes slow commands (scan, newlistings, split) in the background, using `waitUntil` from `@vercel/functions`. Repeated deliveries of the same update are ignored.
+- **Monitor** fetches market data once per coin instead of once per position, 4 coins in parallel. Quickcheck fetches prices 6 at a time. Overlapping runs of either are skipped.
+- **Moonshot / listings scans:** one batch CoinGecko call replaces ~60 single calls. Contract addresses are fetched only for the coins shown, KuCoin calls run 5 at a time, and CoinGecko/KuCoin calls retry on rate limits (429) and server errors.
+- `/api/v2listings` names all candidates in one call and fetches contract details only for BUYs.
+- All functions may run up to 60 seconds (`vercel.json` → `maxDuration`).
+
+### Data sources that work from Vercel
+- Functions now run in **Frankfurt (`fra1`)**: closer to Nigeria, and api.binance.com doesn't block it (it blocks Vercel's default US region).
+- `/api/v2listings` also falls back to the Binance public mirror.
+- **New `/api/health?key=…`** checks Binance, the Binance mirror, Kraken, KuCoin, CoinGecko, Upstash and Telegram from the function's region, and returns 503 if something critical is down.
+
+### Also included (from 2.4.0)
+- `npm run research` and `src/config/strategy.js` (see `STRATEGY.md`).
+
+- Tests: 70. Requires Node 20+ (Vercel's default).
+
+
 ## 2.3.0 — Honest strategy
 
 ### Do this after deploying

@@ -129,6 +129,15 @@ async function fetchKlines(symbol, interval, limit, opts) {
   return (await fetchKlinesWithSource(symbol, interval, limit, opts)).candles;
 }
 
+/** GET a Binance public endpoint, falling back to the data-api mirror. */
+async function binanceGet(pathname, config = {}) {
+  try {
+    return await axios.get(`${BINANCE_BASE}${pathname}`, { timeout: 15000, ...config });
+  } catch (err) {
+    return axios.get(`${BINANCE_DATA_BASE}${pathname}`, { timeout: 15000, ...config });
+  }
+}
+
 /** Latest price with fallbacks. Returns null if every source fails. */
 async function fetchPrice(symbol) {
   for (const base of [BINANCE_BASE, BINANCE_DATA_BASE]) {
@@ -168,7 +177,8 @@ function normaliseSymbol(raw) {
 }
 
 module.exports = {
-  INTERVAL_MS, toKrakenPair, toKuCoinSymbol, dropUnclosed,
+  INTERVAL_MS, toKrakenPair, toKuCoinSymbol, dropUnclosed, binanceGet,
+  BINANCE_BASE, BINANCE_DATA_BASE, KRAKEN_BASE, KUCOIN_BASE,
   fetchKlines, fetchKlinesWithSource, fetchPrice,
   configuredSymbols, normaliseSymbol,
 };

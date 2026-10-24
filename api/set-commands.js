@@ -24,6 +24,7 @@ const COMMANDS = [
   { command: 'sell',        description: '💸 Stop tracking a position — e.g. /sell SOL' },
   { command: 'sold',        description: '🧾 Record a sale — e.g. /sold SOL 92.50 110' },
   { command: 'positions',   description: '📊 View your open positions' },
+  { command: 'setstop',     description: '🛡 Change your stop — e.g. /setstop SOL 88.5' },
   { command: 'check',       description: '🔎 Instant advice on a position — e.g. /check SOL' },
   { command: 'profit',      description: '📈 Your trading stats' },
   { command: 'help',        description: '📖 Show all commands' },

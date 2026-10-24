@@ -23,8 +23,10 @@
  */
 
 const tg = require('../src/lib/telegram');
+const store = require('../src/lib/redis');
+const { deferUntilAfterResponse } = require('../src/lib/background');
 const { verifyTelegramWebhook } = require('../src/lib/auth');
-const { normaliseSymbol } = require('../src/lib/market');
+const { normaliseSymbol, fetchPrice } = require('../src/lib/market');
 const { fetchCurrentData, buildAdvice, planFromAdvice } = require('../src/services/adviceService');
 const {
   getUser, isApproved, isBlocked,
@@ -390,6 +392,8 @@ async function handleMessage(chatId, text, from) {
       `\`sell SOL\` — remove after you exit`,
       `\`positions\` — view all open trades`,
       `\`check SOL\` — instant advice`,
+      `\`buy SOL 92.50 2x sl 88\` — buy with your own stop`,
+      `\`setstop SOL 90\` — change your stop`,
       ``,
       `━━━ *AUTO ALERTS* ━━━`,
       `🔴 Stop Loss | 🟢 TP1/TP2/TP3`,
@@ -558,6 +562,17 @@ async function handleMessage(chatId, text, from) {
     const buyPrice  = parseFloat(parts[2]);
     let quantity = null, targetMultiple = null, targetPct = null;
 
+    // Optional custom stop anywhere after the price: "sl 95", "sl95", "stop=95"
+    let userStop = null;
+    for (let k = 3; k < parts.length; k++) {
+      const t = String(parts[k]).toLowerCase();
+      const glued = t.match(/^(?:sl|stop)[:=]?(\d*\.?\d+)$/);
+      if (glued) { userStop = parseFloat(glued[1]); parts.splice(k, 1); k--; continue; }
+      if ((t === 'sl' || t === 'stop') && !isNaN(parseFloat(parts[k + 1]))) {
+        userStop = parseFloat(parts[k + 1]); parts.splice(k, 2); k--;
+      }
+    }
+
     // Helper: parse a target token — supports "2x", "10%", "10.5%"
     function parseTarget(token) {
       const t = token.toString().toLowerCase().trim();
@@ -597,10 +612,15 @@ async function handleMessage(chatId, text, from) {
     const symbol      = normaliseSymbol(rawSymbol);
     const targetPrice = targetMultiple ? buyPrice * targetMultiple : null;
 
+    if (userStop !== null && !(userStop > 0 && userStop < buyPrice)) {
+      await reply(chatId, `❌ Stop loss must be below your buy price. Example: \`buy SOL 92.50 2x sl 88\``);
+      return;
+    }
+
     // Count existing entries BEFORE adding (old code counted after → off by one)
     const existing = await getPositionsBySymbol(chatId, symbol);
     const entryNum = existing.length + 1;
-    const newPos   = await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple });
+    const newPos   = await addPosition({ chatId, symbol, buyPrice, quantity, targetMultiple, stopLossPrice: userStop });
 
     // Build a human-friendly target label e.g. "10% profit" or "2X"
     const targetLabel = targetPct != null
@@ -615,6 +635,7 @@ async function handleMessage(chatId, text, from) {
       `💰 *Buy Price:* \`$${buyPrice}\``,
       quantity    ? `📦 *Quantity:* ${quantity} ${symbol.replace('USDT', '')}` : '',
       targetLabel ? `🎯 *Target:*   ${targetLabel} = \`$${targetPrice.toFixed(6)}\`` : '',
+      userStop    ? `🛡 *Your stop:* \`$${userStop}\` (${(((buyPrice - userStop) / buyPrice) * 100).toFixed(2)}% below entry)` : '',
       ``,
       `⏳ _Fetching live price and trade plan..._`,
     ].filter(Boolean).join('\n'));
@@ -627,12 +648,19 @@ async function handleMessage(chatId, text, from) {
 
       const advice = buildAdvice({
         symbol, buyPrice, currentPrice, candles1h, candles4h,
+        lockedPlan: userStop ? { stopLoss: userStop, takeProfits: null } : null,
       });
 
       // Lock the stop loss + TPs now, so the 10-min quickcheck watches the stop
       // from the start and every later check uses the same levels.
       const plan = planFromAdvice(advice);
-      if (plan) await updatePosition(chatId, newPos.positionId, plan);
+      if (plan) {
+        await updatePosition(chatId, newPos.positionId, {
+          ...plan,
+          initialStopPrice: plan.stopLossPrice,
+          ...(userStop ? { stopSource: 'user', stopStage: 'user' } : { stopSource: 'atr', stopStage: 'initial' }),
+        });
+      }
 
       const sl  = advice.tradePlan?.stopLoss;
       const tp1 = advice.tradePlan?.takeProfits?.tp1;
@@ -728,6 +756,57 @@ async function handleMessage(chatId, text, from) {
     });
     lines.push(`To remove ALL ${symbol} entries: \`sellall ${symbol}\``);
     await reply(chatId, lines.join('\n'));
+    return;
+  }
+
+  // ── SETSTOP (change the saved stop of a position) ─────────────────────────
+  if (cmd === 'setstop' || cmd === 'setstopid') {
+    const byId = cmd === 'setstopid';
+    const price = parseFloat(parts[2]);
+    if (!parts[1] || isNaN(price) || price <= 0) {
+      await reply(chatId, [
+        `❌ *Format:*`,
+        `\`setstop SOL 88.5\` — set your stop for SOL`,
+        `\`setstopid SOLUSDT:1715123456789 88.5\` — one specific entry`,
+      ].join('\n'));
+      return;
+    }
+
+    let targets;
+    if (byId) {
+      const all = await getAllPositions(chatId);
+      targets = all[parts[1]] ? [all[parts[1]]] : [];
+    } else {
+      targets = await getPositionsBySymbol(chatId, normaliseSymbol(parts[1]));
+    }
+    if (targets.length === 0) {
+      await reply(chatId, `⚠️ No matching position. Type \`positions\` to see your entries.`);
+      return;
+    }
+    if (targets.length > 1) {
+      const lines = [`📌 *You have ${targets.length} ${targets[0].symbol} entries — which one?*`, ``];
+      targets.forEach((p, i) => lines.push(`*Entry ${i + 1}* at \`$${p.buyPrice}\` → \`setstopid ${p.positionId} ${price}\``));
+      await reply(chatId, lines.join('\n'));
+      return;
+    }
+
+    const pos = targets[0];
+    const live = await fetchPrice(pos.symbol);
+    if (live && price >= live) {
+      await reply(chatId, `❌ A stop must be below the current price (\`$${live}\`). For an immediate exit, just sell on your exchange.`);
+      return;
+    }
+    await updatePosition(chatId, pos.positionId, { stopLossPrice: price, stopSource: 'user', stopStage: 'user', stopLossHit: false });
+    const vsEntry = ((price - pos.buyPrice) / pos.buyPrice) * 100;
+    await reply(chatId, [
+      `🛡 *Stop updated — ${pos.symbol}*`,
+      ``,
+      `Entry: \`$${pos.buyPrice}\``,
+      `New stop: \`$${price}\` (${vsEntry >= 0 ? '+' : ''}${vsEntry.toFixed(2)}% vs entry)`,
+      pos.stopLossPrice ? `Old stop: \`$${pos.stopLossPrice}\`` : '',
+      ``,
+      `The 10-minute price check will alert you if it's hit.`,
+    ].filter(Boolean).join('\n'));
     return;
   }
 
@@ -1307,6 +1386,58 @@ async function handleMessage(chatId, text, from) {
   await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.`);
 }
 
+// ─── Process one Telegram update ─────────────────────────────────────────────
+async function handleUpdate(body) {
+  // ── Button taps ─────────────────────────────────────────────────────────
+  if (body.callback_query) {
+    const cq     = body.callback_query;
+    const chatId = cq.message?.chat?.id?.toString();
+    const data   = cq.data || '';
+
+    await answerCallback(cq.id);
+    if (!chatId) return;
+
+    if (data.startsWith('approve:') || data.startsWith('reject:')) {
+      const [action, targetId] = data.split(':');
+      await handleApproval(action, targetId, chatId);
+      return;
+    }
+
+    const commandMap = {
+      scan:        'scan',
+      moonshots:   'moonshots',
+      newlistings: 'newlistings',
+      positions:   'positions',
+      help:        'help',
+      buy_help:    'buy_guide',
+      sell_help:   'sell_guide',
+      sold_help:   'sold_guide',
+      split_help:  'split_guide',
+      profit:      'profit',
+      manual:      'manual',
+    };
+    await handleMessage(chatId, commandMap[data] || data, cq.from);
+    return;
+  }
+
+  // ── Regular messages ────────────────────────────────────────────────────
+  const { message } = body;
+  if (!message || !message.text) return;
+  const chatId = message.chat?.id?.toString();
+  console.log(`[Webhook] From ${chatId}: ${message.text.slice(0, 80)}`);
+  await handleMessage(chatId, message.text, message.from);
+}
+
+/** Telegram re-sends an update if we're slow; process each update_id once. */
+async function firstTimeSeen(updateId) {
+  if (updateId === undefined || updateId === null) return true;
+  try {
+    return (await store.cmd('SET', `cryptobot:tgupdate:${updateId}`, '1', 'NX', 'EX', 3600)) === 'OK';
+  } catch {
+    return true; // storage down: better to risk a duplicate than drop the message
+  }
+}
+
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
@@ -1316,60 +1447,17 @@ module.exports = async (req, res) => {
     return res.status(401).json({ ok: false });
   }
 
-  try {
-    const body = req.body || {};
-
-    // ── Button taps ───────────────────────────────────────────────────────
-    if (body.callback_query) {
-      const cq     = body.callback_query;
-      const chatId = cq.message?.chat?.id?.toString();
-      const data   = cq.data || '';
-
-      await answerCallback(cq.id);
-      if (!chatId) return res.status(200).json({ ok: true });
-
-      // Admin approval buttons
-      if (data.startsWith('approve:') || data.startsWith('reject:')) {
-        const [action, targetId] = data.split(':');
-        await handleApproval(action, targetId, chatId);
-        return res.status(200).json({ ok: true });
-      }
-
-      // Menu buttons
-      const commandMap = {
-        scan:        'scan',
-        moonshots:   'moonshots',
-        newlistings: 'newlistings',
-        positions:   'positions',
-        help:        'help',
-        buy_help:    'buy_guide',
-        sell_help:   'sell_guide',
-        sold_help:   'sold_guide',
-        split_help:  'split_guide',
-        profit:      'profit',
-        manual:      'manual',
-      };
-
-      const mappedCmd = commandMap[data] || data;
-      await handleMessage(chatId, mappedCmd, cq.from);
-      return res.status(200).json({ ok: true });
-    }
-
-    // ── Regular messages ──────────────────────────────────────────────────
-    const { message } = body;
-    if (!message || !message.text) return res.status(200).json({ ok: true });
-
-    const chatId = message.chat?.id?.toString();
-    const text   = message.text;
-    const from   = message.from;
-
-    console.log(`[Webhook] From ${chatId}: ${text.slice(0, 80)}`);
-
-    await handleMessage(chatId, text, from);
-    return res.status(200).json({ ok: true });
-
-  } catch (err) {
-    console.error('[Webhook] Error:', err.stack || err.message);
-    return res.status(200).json({ ok: true });
+  const body = req.body || {};
+  if (!(await firstTimeSeen(body.update_id))) {
+    return res.status(200).json({ ok: true, duplicate: true });
   }
+
+  const work = handleUpdate(body).catch(err => console.error('[Webhook] Error:', err.stack || err.message));
+
+  // On Vercel: reply to Telegram immediately and keep working in the background,
+  // so slow commands (scan, newlistings, split) never time out or get re-sent.
+  if (deferUntilAfterResponse(work)) return res.status(200).json({ ok: true });
+
+  await work;
+  return res.status(200).json({ ok: true });
 };

@@ -112,42 +112,43 @@ function calcRiskReward({ entryPrice, stopLoss, takeProfit }) {
 // ─── Signal Deduplication ─────────────────────────────────────────────────────
 
 /**
- * Signal deduplication, persisted in Redis (cryptobot:signal-fired) so it
- * survives Vercel cold starts. The old in-memory Map reset on every cold start,
- * which let the same alert fire again. Falls back to memory without Upstash.
+ * Signal deduplication, stored in Redis so it survives Vercel cold starts.
+ * One key per symbol+signal with an expiry: cryptobot:fired:{SYMBOL}:{SIGNAL}.
+ * claimSignal() uses SET NX (atomic): if two scans run at the same moment,
+ * only one of them gets to send the alert.
  */
 const store = require('../lib/redis');
 
 const SIGNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
-const FIRED_KEY = 'cryptobot:signal-fired';
+const firedKey = (symbol, signal) => `cryptobot:fired:${symbol}:${signal}`;
 
-async function loadFired() {
-  try { return (await store.getJSON(FIRED_KEY, {})) || {}; }
-  catch { return {}; }
+async function isDuplicateSignal(symbol, signal) {
+  try { return (await store.cmd('EXISTS', firedKey(symbol, signal))) > 0; }
+  catch { return false; }
 }
 
-async function isDuplicateSignal(symbol, signal, cooldownMs = SIGNAL_COOLDOWN_MS) {
-  const fired = await loadFired();
-  const last = fired[`${symbol}:${signal}`];
-  return !!last && (Date.now() - last) < cooldownMs;
-}
-
-async function markSignalFired(symbol, signal) {
+/** Atomically reserve the right to send this alert. true = you may send it. */
+async function claimSignal(symbol, signal, cooldownMs = SIGNAL_COOLDOWN_MS) {
   try {
-    await store.update(FIRED_KEY, {}, fired => {
-      const now = Date.now();
-      fired[`${symbol}:${signal}`] = now;
-      // prune anything older than 48h
-      for (const [k, ts] of Object.entries(fired)) if (now - ts > 48 * 3600 * 1000) delete fired[k];
-      return fired;
-    });
+    return (await store.cmd('SET', firedKey(symbol, signal), String(Date.now()), 'NX', 'PX', Math.max(1000, Math.round(cooldownMs)))) === 'OK';
   } catch (err) {
-    console.error('[Risk] markSignalFired failed:', err.message);
+    console.error('[Risk] claimSignal failed (sending anyway):', err.message);
+    return true;
   }
 }
 
+/** Give a claim back (e.g. the Telegram send failed) so the next run can retry. */
+async function releaseSignal(symbol, signal) {
+  try { await store.cmd('DEL', firedKey(symbol, signal)); } catch { /* ignore */ }
+}
+
+async function markSignalFired(symbol, signal, cooldownMs = SIGNAL_COOLDOWN_MS) {
+  try { await store.cmd('SET', firedKey(symbol, signal), String(Date.now()), 'PX', Math.max(1000, Math.round(cooldownMs))); }
+  catch (err) { console.error('[Risk] markSignalFired failed:', err.message); }
+}
+
 async function clearSignalCache() {
-  await store.del(FIRED_KEY);
+  for (const k of await store.keys('cryptobot:fired:*')) await store.del(k);
 }
 
 // ─── Portfolio Heat ───────────────────────────────────────────────────────────
@@ -170,6 +171,8 @@ module.exports = {
   calcTakeProfits,
   calcRiskReward,
   isDuplicateSignal,
+  claimSignal,
+  releaseSignal,
   markSignalFired,
   clearSignalCache,
   calcPortfolioHeat,

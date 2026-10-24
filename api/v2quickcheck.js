@@ -15,6 +15,9 @@
 const { getAllUsersPositions, updatePosition } = require('../src/services/positionStore');
 const { fetchPrice } = require('../src/lib/market');
 const tg = require('../src/lib/telegram');
+const store = require('../src/lib/redis');
+const { mapLimit } = require('../src/lib/concurrency');
+const { stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
 
 const APPROACH_PCT = 5;
@@ -58,19 +61,19 @@ function evaluateQuick(pos, currentPrice) {
   }
 
   if (pos.stopLossPrice && !pos.stopLossHit && currentPrice <= pos.stopLossPrice) {
+    const w = stopHitWording(pos, pnlPct);
     return {
       event: 'STOP_LOSS',
       updates: { stopLossHit: true },
       text: [
-        `🔴 *STOP LOSS HIT — EXIT NOW — ${pos.symbol}*`,
+        w.title,
         ``,
         `💰 *Bought at:* \`$${pos.buyPrice}\``,
         `🛡 *Stop:*      \`$${fmtPrice(pos.stopLossPrice)}\``,
         `📊 *Now:*       \`$${priceStr}\``,
-        `📉 *Loss:*      ${pnlPct.toFixed(2)}%`,
+        w.result,
         ``,
-        `🔴 *Sell 100% immediately. No hesitation.*`,
-        `_A small controlled loss now prevents a catastrophic loss later._`,
+        w.action,
         ``,
         `📝 Record your exit: \`sold ${coin} ${pos.buyPrice} ${priceStr}\``,
         `⏰ ${new Date().toUTCString()}`,
@@ -107,6 +110,10 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (!requireCronKey(req, res)) return;
 
+  if (!(await store.lock('cryptobot:lock:quickcheck', 120).catch(() => true))) {
+    return res.status(200).json({ success: true, skipped: 'previous quickcheck still in progress' });
+  }
+
   try {
     const positions = await getAllUsersPositions();
     const active = positions.filter(p =>
@@ -121,9 +128,14 @@ module.exports = async (req, res) => {
     const symbolMap = {};
     for (const pos of active) (symbolMap[pos.symbol] = symbolMap[pos.symbol] || []).push(pos);
 
+    // Prices for all coins, 6 at a time
+    const symbols = Object.keys(symbolMap);
+    const prices = await mapLimit(symbols, 6, (sym) => fetchPrice(sym));
+
     const results = [];
-    for (const [symbol, list] of Object.entries(symbolMap)) {
-      const currentPrice = await fetchPrice(symbol);
+    for (const [k, symbol] of symbols.entries()) {
+      const list = symbolMap[symbol];
+      const currentPrice = prices[k];
       if (!currentPrice) { results.push({ symbol, error: 'Could not fetch price' }); continue; }
 
       for (const pos of list) {
@@ -146,6 +158,8 @@ module.exports = async (req, res) => {
   } catch (err) {
     console.error('[QuickCheck]', err.message);
     return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    await store.del('cryptobot:lock:quickcheck').catch(() => {});
   }
 };
 

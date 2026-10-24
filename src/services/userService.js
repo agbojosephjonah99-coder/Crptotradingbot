@@ -1,30 +1,67 @@
 /**
  * ─── User Service ─────────────────────────────────────────────────────────────
- * Manages approved, pending and blocked users.
- * Stored under cryptobot:users (unchanged key).
+ * Approved, pending and blocked users.
  *
- * USER STATES:
- *  pending  → requested access, awaiting admin approval
- *  approved → can use the bot fully
- *  blocked  → rejected or banned, cannot use bot
+ * STORAGE (v2.5): cryptobot:userhash — a Redis HASH, field = chat id,
+ * value = user JSON. Each change writes only that user's field, so e.g. a new
+ * /start can't wipe out an approval that happened at the same moment (the old
+ * format rewrote one JSON object holding every user).
+ * The old cryptobot:users value is migrated on first use and kept as
+ * cryptobot:users-legacy-backup.
+ *
+ * USER STATES: pending → approved | blocked
  */
 
 const store = require('../lib/redis');
 
-const USERS_KEY = 'cryptobot:users';
+const HASH = 'cryptobot:userhash';
+const LEGACY = 'cryptobot:users';
+const BACKUP = 'cryptobot:users-legacy-backup';
+let migrated = false;
 
-async function getAllUsers() {
-  try { return (await store.getJSON(USERS_KEY, {})) || {}; }
-  catch (err) { console.error('[UserService] read failed:', err.message); return {}; }
+async function migrateLegacy() {
+  if (migrated) return;
+  if ((await store.cmd('TYPE', LEGACY)) !== 'string') { migrated = true; return; }
+  if (!(await store.lock('cryptobot:migrate-lock:users', 30))) return;
+  try {
+    let users = {};
+    try { users = JSON.parse(await store.cmd('GET', LEGACY)) || {}; } catch { users = {}; }
+    const cmds = Object.entries(users).map(([id, u]) => ['HSETNX', HASH, String(id), JSON.stringify(u)]);
+    await store.pipeline(cmds);
+    await store.cmd('RENAME', LEGACY, BACKUP);
+    migrated = true;
+  } finally {
+    await store.cmd('DEL', 'cryptobot:migrate-lock:users');
+  }
 }
 
-async function saveAllUsers(users) {
-  await store.setJSON(USERS_KEY, users);
+const parse = (raw) => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } };
+
+async function getAllUsers() {
+  try {
+    await migrateLegacy();
+    const obj = store.hashToObject(await store.cmd('HGETALL', HASH));
+    const out = {};
+    for (const [id, raw] of Object.entries(obj)) { const u = parse(raw); if (u) out[id] = u; }
+    return out;
+  } catch (err) {
+    console.error('[UserService] read failed:', err.message);
+    return {};
+  }
 }
 
 async function getUser(chatId) {
-  const all = await getAllUsers();
-  return all[chatId.toString()] || null;
+  try {
+    await migrateLegacy();
+    return parse(await store.cmd('HGET', HASH, chatId.toString()));
+  } catch (err) {
+    console.error('[UserService] read failed:', err.message);
+    return null;
+  }
+}
+
+async function saveUser(user) {
+  await store.cmd('HSET', HASH, user.chatId.toString(), JSON.stringify(user));
 }
 
 function isAdminId(chatId) {
@@ -34,47 +71,44 @@ function isAdminId(chatId) {
 
 async function isApproved(chatId) {
   if (isAdminId(chatId)) return true;
-  const user = await getUser(chatId);
-  return user?.status === 'approved';
+  return (await getUser(chatId))?.status === 'approved';
 }
 
 async function isBlocked(chatId) {
-  const user = await getUser(chatId);
-  return user?.status === 'blocked';
+  return (await getUser(chatId))?.status === 'blocked';
 }
 
-// ─── Register a new user (pending approval) ───────────────────────────────────
 async function registerUser({ chatId, firstName, lastName, username, param }) {
-  const all = await getAllUsers();
-  const id  = chatId.toString();
+  const id = chatId.toString();
+  const existing = await getUser(id);
+  if (existing?.status === 'approved' || existing?.status === 'blocked') return existing;
 
-  // Don't overwrite existing approved/blocked users
-  if (all[id]?.status === 'approved' || all[id]?.status === 'blocked') {
-    return all[id];
-  }
-
-  all[id] = {
+  const user = {
     chatId:      id,
     firstName:   firstName || '',
     lastName:    lastName  || '',
     username:    username  || '',
-    source:      param     || '',   // which invite link they used
+    source:      param     || '',
     status:      'pending',
-    requestedAt: new Date().toISOString(),
+    requestedAt: existing?.requestedAt || new Date().toISOString(),
     approvedAt:  null,
   };
-
-  await saveAllUsers(all);
-  return all[id];
+  // HSETNX first: if two /start messages race, only one creates the record
+  if (!existing) {
+    const created = await store.cmd('HSETNX', HASH, id, JSON.stringify(user));
+    if (!created) return getUser(id);
+  } else {
+    await saveUser(user);
+  }
+  return user;
 }
 
 async function setStatus(chatId, status, stampField) {
-  const all = await getAllUsers();
-  const id  = chatId.toString();
-  if (!all[id]) return false;
-  all[id].status = status;
-  all[id][stampField] = new Date().toISOString();
-  await saveAllUsers(all);
+  const user = await getUser(chatId);
+  if (!user) return false;
+  user.status = status;
+  user[stampField] = new Date().toISOString();
+  await saveUser(user);
   return true;
 }
 
@@ -82,20 +116,14 @@ async function approveUser(chatId) { return setStatus(chatId, 'approved', 'appro
 async function blockUser(chatId)   { return setStatus(chatId, 'blocked',  'blockedAt'); }
 
 async function removeUser(chatId) {
-  const all = await getAllUsers();
-  const id  = chatId.toString();
-  if (!all[id]) return false;
-  delete all[id];
-  await saveAllUsers(all);
-  return true;
+  await migrateLegacy();
+  return (await store.cmd('HDEL', HASH, chatId.toString())) > 0;
 }
 
 async function getUsersByStatus(status) {
-  const all = await getAllUsers();
-  return Object.values(all).filter(u => u.status === status);
+  return Object.values(await getAllUsers()).filter(u => u.status === status);
 }
 
-/** Admin + every approved user (deduplicated). */
 async function getAllActiveChatIds() {
   const approved = await getUsersByStatus('approved');
   return [...new Set([process.env.TELEGRAM_CHAT_ID, ...approved.map(u => u.chatId)])].filter(Boolean).map(String);
@@ -112,4 +140,5 @@ module.exports = {
   getUser, getAllUsers, isApproved, isBlocked, isAdminId,
   registerUser, approveUser, blockUser, removeUser,
   getUsersByStatus, getAllActiveChatIds, formatName,
+  _resetMigrationCache: () => { migrated = false; },
 };

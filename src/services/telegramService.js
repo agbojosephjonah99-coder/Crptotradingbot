@@ -16,7 +16,7 @@
  */
 
 const tg = require('../lib/telegram');
-const { isDuplicateSignal, markSignalFired } = require('./riskService');
+const { claimSignal, releaseSignal } = require('./riskService');
 const { trackRecordFor, formatTrackRecord } = require('./strategyStats');
 const { ACTIVE } = require('../config/strategy');
 
@@ -54,7 +54,7 @@ async function sendBuyAlert(result) {
   if (result.score < 7) return;
   // Same spacing between entries as the backtest assumes (strategy config)
   const gapHours = Math.max(1, Number(ACTIVE.minHoursBetweenEntries) || 4);
-  if (await isDuplicateSignal(result.symbol, 'BUY', gapHours * 3_600_000)) {
+  if (!(await claimSignal(result.symbol, 'BUY', gapHours * 3_600_000))) {
     console.log(`[Telegram] Dedup: ${result.symbol} BUY already sent within ${gapHours}h`);
     return;
   }
@@ -89,8 +89,8 @@ async function sendBuyAlert(result) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await sendInfo(lines);
-  await markSignalFired(result.symbol, 'BUY');
+  const sent = await sendInfo(lines);
+  if (!sent) { await releaseSignal(result.symbol, 'BUY'); return; } // let the next run retry
   console.log(`[Telegram] BUY alert sent → INFO — ${result.symbol}`);
 }
 
@@ -175,7 +175,7 @@ async function sendListingBuyAlert(result) {
 async function sendBearishAlert(result) {
   if (result.signal !== 'BEARISH_ALERT') return;
   if (result.score < 3) return;
-  if (await isDuplicateSignal(result.symbol, 'BEARISH_ALERT')) return;
+  if (!(await claimSignal(result.symbol, 'BEARISH_ALERT'))) return;
 
   const lines = [
     `🔴 *BEARISH ALERT — ${result.symbol}*`,
@@ -192,8 +192,8 @@ async function sendBearishAlert(result) {
     `⏰ ${new Date().toUTCString()}`,
   ].filter(Boolean).join('\n');
 
-  await sendAction(lines);
-  await markSignalFired(result.symbol, 'BEARISH_ALERT');
+  try { await sendAction(lines); }
+  catch (err) { await releaseSignal(result.symbol, 'BEARISH_ALERT'); throw err; }
 }
 
 // ─── Connection Test ──────────────────────────────────────────────────────────

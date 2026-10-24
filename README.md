@@ -30,6 +30,7 @@ It **only gives advice and never places trades**.
 | `/api/v2advice?symbol=SOLUSDT&buyPrice=150&account=1000&risk=1` | – | no | Exit advice for one position (read-only) |
 | `/api/backtest` | – | no | Saved backtest results of the live strategy (`data/strategy-stats.json`) |
 | `/api/signal` | – | for alerts | Legacy endpoint (same output as v2scan) |
+| `/api/health` | optional (uptime monitor) | yes | Checks every data source, Upstash and Telegram from Vercel |
 | `/api/set-commands`, `/api/telegram-test` | once | always | Admin setup and diagnostics |
 | `/api/telegram-webhook` | – | Telegram secret header | Bot updates |
 
@@ -38,7 +39,7 @@ If `CRON_SECRET` is not set, endpoints stay open (with a warning in the logs) so
 
 ## Telegram commands
 
-`buy SOL 92.50 [qty] [2x|10%]` · `sell SOL` · `sold SOL 92.50 110 [qty]` (records the trade for `profit`) · `positions` · `check SOL` · `profit` · `split 50` · `scan` · `newlistings` · `menu` · `help`
+`buy SOL 92.50 [qty] [2x|10%] [sl 88]` · `setstop SOL 90` · `sell SOL` · `sold SOL 92.50 110 [qty]` (records the trade for `profit`) · `positions` · `check SOL` · `profit` · `split 50` · `scan` · `newlistings` · `menu` · `help`
 
 Admin: `pending` · `users` · `approve ID` · `block ID` · `remove ID` · `invite`
 
@@ -50,6 +51,7 @@ cp .env.example .env    # fill in
 npm start               # one scan of BINANCE_SYMBOLS (same engine as /api/v2scan)
 npm run scheduler       # repeat on CRON_SCHEDULE
 npm run backtest        # backtests the LIVE strategy (needs Binance access) → commit data/strategy-stats.json
+npm run research        # tests 48 strategy variants, chooses on 8 months, judges on 4 unseen months
 npm test                # offline unit tests
 ```
 
@@ -72,7 +74,7 @@ test/                 node:test suite (no network)
 - Backtest results depend on the period tested; re-run `npm run backtest` regularly.
 - Binance blocks some server regions (including Vercel's default US region). Candles and prices fall back to Kraken/KuCoin, but `/api/v2listings` is Binance-only.
 - Moonshot scans make many CoinGecko calls, and the free tier may rate-limit them.
-- Each user's positions are stored as one Redis value. Two writes at the same moment (for example a `buy` while the monitor runs) can still overwrite each other.
-- Long scans run inside the request, so very long coin lists may hit serverless time limits.
+- Functions are limited to 60 seconds; very long coin lists in `BINANCE_SYMBOLS` may need splitting.
+- The live strategy was tested and shown to have no edge after fees (see `STRATEGY.md`).
 
 See `CHANGELOG.md` for what changed, and `STRATEGY.md` for how the strategy is tested.

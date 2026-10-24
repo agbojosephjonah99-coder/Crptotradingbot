@@ -22,13 +22,19 @@
  *  - A jump past several milestones sends one alert and marks all of them,
  *    instead of back-filling lower milestones on later runs.
  *  - Jumping straight to TP2/TP3 marks the lower TPs as hit too.
- *  - One storage write per position per run.
+ *  - One storage write per position per run (field-level, so it can't wipe
+ *    out flags quickcheck sets at the same moment).
+ *  - Market data fetched once per coin, 4 coins in parallel; overlapping runs
+ *    are skipped instead of double-alerting.
  */
 
 const { getAllPositions, updatePosition } = require('../src/services/positionStore');
 const { getAllActiveChatIds } = require('../src/services/userService');
 const { fetchCurrentData, buildAdvice } = require('../src/services/adviceService');
 const tg = require('../src/lib/telegram');
+const store = require('../src/lib/redis');
+const { mapLimit } = require('../src/lib/concurrency');
+const { stopAfterTakeProfit, stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
 
 const HOLD_INTERVAL_HOURS = 4;
@@ -163,18 +169,18 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
 
   // ── STOP LOSS HIT ─────────────────────────────────────────────────────────
   if (sl && currentPrice <= sl) {
+    const w = stopHitWording(pos, pnlPct);
     messages.push({
       silent: false,
       text: [
-        `🔴 *STOP LOSS — EXIT NOW — ${pos.symbol}*`,
+        w.title,
         ``,
         `💰 *Bought at:* \`$${pos.buyPrice}\``,
         `🛡 *Stop:*      \`$${fmt(sl)}\``,
         `📊 *Now:*       \`$${fmt(currentPrice, 8)}\``,
-        `📉 *Loss:*      ${pnlPct.toFixed(2)}%`,
+        w.result,
         ``,
-        `🔴 *Sell 100% immediately. No hesitation.*`,
-        `A small loss now prevents a wipeout later.`,
+        w.action,
         ``,
         `📝 Record your exit: \`sold ${pos.symbol.replace('USDT', '')} ${pos.buyPrice} ${fmt(currentPrice)}\``,
         `⏰ ${now()}`,
@@ -189,7 +195,7 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
 
   // ── TP3 ───────────────────────────────────────────────────────────────────
   if (tp3 && currentPrice >= tp3.price && !pos.tp3Hit) {
-    Object.assign(updates, { tp1Hit: true, tp2Hit: true, tp3Hit: true });
+    Object.assign(updates, { tp1Hit: true, tp2Hit: true, tp3Hit: true, stopStage: 'done' });
     messages.push({ silent: false, text: [
       `🟢🟢🟢 *TP3 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
@@ -203,14 +209,14 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
 
   // ── TP2 ───────────────────────────────────────────────────────────────────
   if (tp2 && currentPrice >= tp2.price && !pos.tp2Hit) {
-    Object.assign(updates, { tp1Hit: true, tp2Hit: true });
+    Object.assign(updates, { tp1Hit: true, tp2Hit: true }, stopAfterTakeProfit(pos, 'TP2', tps));
     messages.push({ silent: false, text: [
       `🟢🟢 *TP2 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
       `📊 *Now:*       \`$${fmt(currentPrice, 4)}\``,
       `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`, ``,
       `🟢 *Sell 35% of position now.*`,
-      `🛡 Move stop loss to \`$${tp1 ? fmt(tp1.price, 4) : pos.buyPrice}\` (lock in profit)`,
+      `🛡 Move stop loss to \`$${tp1 ? fmt(tp1.price, 4) : pos.buyPrice}\` (lock in profit) — the bot now watches this new stop.`,
       watching || (tp3 ? `🎯 Next: TP3 at \`$${fmt(tp3.price, 4)}\`` : ''),
       `⏰ ${now()}`,
     ].filter(Boolean).join('\n') });
@@ -219,14 +225,14 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
 
   // ── TP1 ───────────────────────────────────────────────────────────────────
   if (tp1 && currentPrice >= tp1.price && !pos.tp1Hit) {
-    updates.tp1Hit = true;
+    Object.assign(updates, { tp1Hit: true }, stopAfterTakeProfit(pos, 'TP1', tps));
     messages.push({ silent: false, text: [
       `🟢 *TP1 HIT — ${pos.symbol}*`, ``,
       `💰 *Bought at:* \`$${pos.buyPrice}\``,
       `📊 *Now:*       \`$${fmt(currentPrice, 4)}\``,
       `📈 *Gain:*      +${pnlPct.toFixed(2)}% (${currentMultiple.toFixed(2)}X)`, ``,
       `🟢 *Sell 40% of position now.*`,
-      `🛡 Move stop loss to \`$${pos.buyPrice}\` — free trade, can't lose now.`,
+      `🛡 Move stop loss to \`$${pos.buyPrice}\` (breakeven) — the bot now watches this new stop.`,
       watching || (tp2 ? `🎯 Next: TP2 at \`$${fmt(tp2.price, 4)}\`` : ''),
       `⏰ ${now()}`,
     ].filter(Boolean).join('\n') });
@@ -266,8 +272,7 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
   return { recommendation: 'HOLD', alerted: false, updates, messages };
 }
 
-async function checkPosition(pos, ownerChatId) {
-  const market = await fetchCurrentData(pos.symbol);
+async function checkPosition(pos, ownerChatId, market) {
   const result = evaluatePosition(pos, market);
   const chatId = ownerChatId || pos.chatId;
 
@@ -275,6 +280,7 @@ async function checkPosition(pos, ownerChatId) {
     await tg.send(chatId, m.text, { silent: m.silent });
   }
 
+  // Field-level write: can't overwrite flags set at the same time by quickcheck
   await updatePosition(chatId, pos.positionId, {
     ...result.updates,
     lastChecked:        new Date().toISOString(),
@@ -284,44 +290,63 @@ async function checkPosition(pos, ownerChatId) {
   return { recommendation: result.recommendation, alerted: result.alerted };
 }
 
+const SYMBOL_CONCURRENCY = 4;
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (!requireCronKey(req, res)) return;
 
+  // One run at a time: if the previous run is still going, skip this one
+  if (!(await store.lock('cryptobot:lock:monitor', 240).catch(() => true))) {
+    return res.status(200).json({ success: true, skipped: 'previous monitor run still in progress' });
+  }
+
   try {
     const userIds = await getAllActiveChatIds();
-    const results = [];
-    let totalPositions = 0;
-
+    const jobs = [];
     for (const userId of userIds) {
-      const entries = Object.values(await getAllPositions(userId));
-      totalPositions += entries.length;
-
-      for (const pos of entries) {
-        try {
-          const result = await checkPosition(pos, userId);
-          results.push({ userId, symbol: pos.symbol, ...result });
-        } catch (err) {
-          console.error(`[Monitor] ${userId}/${pos.symbol}:`, err.message);
-          results.push({ userId, symbol: pos.symbol, error: err.message });
-        }
-      }
+      for (const pos of Object.values(await getAllPositions(userId))) jobs.push({ userId, pos });
     }
-
-    if (totalPositions === 0) {
+    if (jobs.length === 0) {
       return res.status(200).json({ success: true, message: 'No open positions across any users' });
     }
+
+    // Fetch market data ONCE per coin (not once per position), a few coins in parallel
+    const bySymbol = new Map();
+    for (const j of jobs) (bySymbol.get(j.pos.symbol) || bySymbol.set(j.pos.symbol, []).get(j.pos.symbol)).push(j);
+
+    const results = [];
+    await mapLimit([...bySymbol.entries()], SYMBOL_CONCURRENCY, async ([symbol, list]) => {
+      let market;
+      try {
+        market = await fetchCurrentData(symbol);
+      } catch (err) {
+        for (const { userId } of list) results.push({ userId, symbol, error: `market data: ${err.message}` });
+        return;
+      }
+      for (const { userId, pos } of list) {
+        try {
+          results.push({ userId, symbol, ...(await checkPosition(pos, userId, market)) });
+        } catch (err) {
+          console.error(`[Monitor] ${userId}/${symbol}:`, err.message);
+          results.push({ userId, symbol, error: err.message });
+        }
+      }
+    });
 
     return res.status(200).json({
       success:   true,
       checked:   results.length,
+      symbols:   bySymbol.size,
       results,
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    await store.del('cryptobot:lock:monitor').catch(() => {});
   }
 };
 
