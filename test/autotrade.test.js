@@ -308,3 +308,28 @@ test('monitor: TP1 reached → alert says the bot handles it, 40% sold, Binance 
   assert.deepEqual(res.body.results[0].auto, ['sell:tp1', 'place-stop']);
   assert.ok(id);
 });
+
+test('fixed-IP proxy: signed Binance requests go through FIXIE_URL; the wizard shows TRADING_IPS', async () => {
+  const { ex } = setup();
+  process.env.FIXIE_URL = 'http://fixie:p%40ss@eu.usefixie.com:80';
+  process.env.TRADING_IPS = '54.1.2.3, 54.4.5.6';
+  let seen;
+  const orig = axios.request;
+  axios.request = (cfg) => { seen = cfg.proxy; return orig(cfg); };
+  try {
+    await require('../src/services/tradingAccounts').connect('1000', { apiKey: KEY, apiSecret: SECRET });
+    assert.deepEqual(seen, { protocol: 'http', host: 'eu.usefixie.com', port: 80, auth: { username: 'fixie', password: 'p@ss' } });
+    const { net } = { net: null };
+    const sent = [];
+    const post = axios.post;
+    axios.post = async (url, body, cfg) => { if (url.includes('sendMessage')) sent.push(body); return { data: { ok: true, result: {} } }; };
+    await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'golive 3' } } }), fakeRes());
+    axios.post = post;
+    assert.match(sent.at(-1).text, /54\.1\.2\.3/);
+    assert.match(sent.at(-1).text, /54\.4\.5\.6/);
+    assert.match(sent.at(-1).text, /Restrict access to trusted IPs/);
+    assert.ok(ex.calls.length > 0);
+  } finally {
+    delete process.env.FIXIE_URL; delete process.env.TRADING_IPS;
+  }
+});

@@ -28,10 +28,10 @@ async function runPractice(allowed) {
   const cache = new Map();
   let users = 0, messages = 0;
   for (const chatId of await practice.allUsers()) {
-    if (!allowed.has(String(chatId))) continue;
+    if (!allowed.has(String(chatId)) && chatId !== 'house') continue; // 'house' = the auto-buy forward test
     try {
       const msgs = await practice.syncUser(chatId, cache);
-      for (const m of msgs) await tg.send(chatId, m, { silent: true });
+      if (chatId !== 'house') for (const m of msgs) await tg.send(chatId, m, { silent: true });
       users++; messages += msgs.length;
     } catch (err) { console.error('[QuickCheck] practice', chatId, err.message); }
   }

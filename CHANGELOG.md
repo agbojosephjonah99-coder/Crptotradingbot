@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.11.0 — Auto-buy (practice now, live only after proven results)
+
+- **The bot can choose and buy coins by itself.** Once a day just after the daily close (00:05 UTC), it checks the chosen strategy on 15 large coins (BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, TRX, NEAR, ATOM, UNI) and buys the ones that signal. Exits use a trailing stop that only moves up.
+- **New strategy families**, different from the old one rather than tweaks of it: breakouts to new highs (Donchian), trend pullbacks (EMA trend), and the strongest coins (momentum rotation). Each is tested with and without a "BTC above its 100-day average" filter: 22 variants in all.
+- **`npm run lab`** tests them honestly:
+  - closed daily candles, buying at the next day's open;
+  - 0.1% fee and 0.05% slippage on every buy and sell;
+  - stops fill at the gap price when the price opens below them;
+  - settings chosen on the older 65% of ~4 years and judged only on the newer 35%.
+
+  Verdicts are PASS, PROMISING or FAIL. It also reports a 1%-risk portfolio return, maximum drawdown and BTC buy-and-hold over the same period. The result is saved to `data/auto-strategy.json`.
+- **Practice auto-buy** (`autobuy on`, or the 🎮 Practice tab) runs with play money for anyone. Until the lab has run, it uses a labelled, untested default (20-day breakout).
+- **House forward test:** a practice account the bot always runs. Its results, from today on, are the honest real-world check.
+- **Live auto-buy is LOCKED.** The admin can only `autobuy unlock` once the lab says PASS **and** the house account has 8+ weeks, 20+ closed trades and a profit. Each user must then opt in (`autobuy live on`, with a confirm button) and have automated exits connected.
+- **Safety limits on every account:** about 1% of the account at risk per trade, no coin above 20%, at most 5 auto positions, and no new buys after a 3% fall since the previous day. Admin kill switch: `autobuy pause`.
+- **Fixed IP for real Binance trading:** set `FIXIE_URL` (and `TRADING_IPS`) in Vercel. Signed Binance requests then go through Fixie, and the go-live wizard tells users to lock their key to those IPs. This replaces the earlier "Unrestricted" advice, which Binance doesn't allow for trading keys.
+- Monitor: auto-bought positions follow their trailing stop only, with no take-profits.
+- Tests: 123.
+
 ## 2.10.0 — Practice mode and a guided "Go live"
 
 - **🎮 Practice mode:** every user gets $10,000 of play money, with nothing to set up — no Binance account, no keys. `practice buy SOL 100`, or the new 🎮 Practice tab on the dashboard.

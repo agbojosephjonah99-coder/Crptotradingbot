@@ -46,7 +46,9 @@ const accounts = require('../src/services/tradingAccounts');
 const autoTrader = require('../src/services/autoTrader');
 const subs = require('../src/services/subscriptionService');
 const practice = require('../src/services/practiceService');
+const autoBuyer = require('../src/services/autoBuyer');
 const box = require('../src/lib/secretBox');
+const { tradingIps } = require('../src/lib/binanceTrade');
 const { baseUrl } = require('../src/lib/dashAuth');
 
 // Commands that work while a subscription has ended (paid access only)
@@ -464,6 +466,12 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  // ── AUTO-BUY (practice now; live only after proven results) ─────────────
+  if (cmd === 'autobuy') {
+    await handleAutoBuy(chatId, parts.slice(1));
+    return;
+  }
+
   // ── GO LIVE (step-by-step Binance set-up) ───────────────────────────────
   if (cmd === 'golive' || cmd === 'live') {
     await handleGoLive(chatId, parts.slice(1));
@@ -516,6 +524,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`practice\` — trade with $10,000 play money at real prices`,
       `\`practice buy SOL 100\` — spend $100 of play money on SOL`,
       `\`golive\` — step-by-step: connect your real Binance account`,
+      `\`autobuy\` — let the bot pick and buy coins by itself (practice first)`,
       ``,
       `━━━ *AUTOMATED EXITS (optional)* ━━━`,
       `\`autotrade\` — let the bot place your stops and take-profits on Binance`,
@@ -1535,12 +1544,99 @@ async function handleMessage(chatId, text, from, meta = {}) {
   await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.`);
 }
 
+// ─── Auto-buy ─────────────────────────────────────────────────────────────────
+const VERDICT_ICON = { PASS: '✅ PASSED', PROMISING: '🟡 PROMISING (could be luck)', FAIL: '❌ FAILED', 'NOT TESTED': '⚪ NOT TESTED YET' };
+
+async function handleAutoBuy(chatId, args) {
+  const a = (args[0] || '').toLowerCase();
+  const b = (args[1] || '').toLowerCase();
+  try {
+    if (a === 'on') {
+      await autoBuyer.setPractice(chatId, true);
+      await reply(chatId, [
+        `🤖 *Practice auto-buy ON*`,
+        ``,
+        `Every day just after midnight (UTC) the bot checks ${autoBuyer.currentStrategy().name.toLowerCase()} signals on 15 large coins and buys the ones that qualify with your *play money* — about 1% of the account at risk per trade, at most 5 at once.`,
+        `It sells by a trailing stop that only moves up. You'll get a message for every buy and sale.`,
+        ``,
+        `\`autobuy off\` stops new buys. \`practice\` shows your results.`,
+      ].join('\n'));
+      return;
+    }
+    if (a === 'off') {
+      await autoBuyer.setPractice(chatId, false);
+      await reply(chatId, `⏸ Practice auto-buy OFF. Open practice positions keep their stops until they sell (or \`practice sell COIN\`).`);
+      return;
+    }
+    if (a === 'live') {
+      if (b === 'off') { await autoBuyer.setLive(chatId, false); await reply(chatId, `⏸ Live auto-buy OFF. No new buys; open positions keep their Binance stop orders.`); return; }
+      if (b === 'on' && (args[2] || '').toLowerCase() === 'confirm') {
+        await autoBuyer.setLive(chatId, true);
+        await reply(chatId, `🟢 *Live auto-buy ON.* The bot may now buy on your Binance account, about 1% of the account at risk per trade and 5 positions at once. \`autobuy live off\` stops it any time.`);
+        return;
+      }
+      if (b === 'on') {
+        if (!(await autoBuyer.isLiveUnlocked())) throw new autoBuyer.AutoBuyError('Live auto-buy is still locked. It unlocks only after the strategy passes the tests and the bot\'s own 8-week practice run makes money. Send `autobuy` to see progress.');
+        await send(chatId, [
+          `⚠️ *Real money — the bot will BUY for you*`,
+          ``,
+          `Each day it may buy coins on your Binance account using your USDT: about 1% of the account at risk per trade, no coin above 20%, at most 5 positions, and no buying after a 3% drop in a day.`,
+          `Losses are possible even with a tested strategy.`,
+        ].join('\n'), { inline_keyboard: [[{ text: '✅ I understand — turn on', callback_data: 'autobuy live on confirm' }], [{ text: 'Not now', callback_data: 'autobuy' }]] });
+        return;
+      }
+    }
+    // Admin controls
+    if (isAdmin(chatId) && ['unlock', 'lock', 'pause', 'resume', 'run'].includes(a)) {
+      if (a === 'unlock') { await autoBuyer.unlock(chatId); await reply(chatId, `🔓 Live auto-buy UNLOCKED. Users can now opt in with \`autobuy live on\`.`); return; }
+      if (a === 'lock') { await autoBuyer.lock(); await reply(chatId, `🔒 Live auto-buy locked. No new live buys.`); return; }
+      if (a === 'pause') { await autoBuyer.pause(true); await reply(chatId, `🛑 Auto-buy PAUSED for everyone (practice and live). \`autobuy resume\` to restart.`); return; }
+      if (a === 'resume') { await autoBuyer.pause(false); await reply(chatId, `▶️ Auto-buy resumed.`); return; }
+      if (a === 'run') {
+        await reply(chatId, `⏳ Running today's auto-buy check now…`);
+        const allowed = new Set((await subs.getChatIdsWithAccess()).map(String));
+        const r = await autoBuyer.runDaily({ allowed, force: true, send: (id, text) => tg.send(id, text) });
+        await reply(chatId, `✅ Done: ${r.signals ?? 0} signal(s), ${r.practice ?? 0} practice account(s), ${r.live ?? 0} live account(s).${r.skipped ? ` (${r.skipped})` : ''}`);
+        return;
+      }
+    }
+
+    // Status
+    const st = await autoBuyer.userStatus(chatId);
+    const s = st.strategy, f = st.forward, c = st.checks;
+    const tick = (ok) => (ok ? '✅' : '⬜');
+    const lines = [
+      `🤖 *Auto-buy* — the bot picks and buys coins by itself`,
+      ``,
+      `*Strategy:* ${esc(s.label)}`,
+      `*Tested on past data:* ${VERDICT_ICON[s.verdict] || s.verdict}${s.test ? ` — ${s.test.trades} trades on unseen data, ${s.test.expectancyR >= 0 ? '+' : ''}${s.test.expectancyR}R per trade after fees` : ''}`,
+      ``,
+      `*Forward test* (the bot's own practice account, from today on):`,
+      f.startedAt ? `${f.days} days · ${f.closedTrades} closed trades${f.winRatePct !== null ? ` · ${f.winRatePct}% wins` : ''} · ${f.equity >= f.start ? '+' : ''}${usd(f.equity - f.start)} on $10,000` : `starts at the next daily run`,
+      ``,
+      `*Live auto-buy:* ${st.unlocked ? '🔓 unlocked' : '🔒 locked'}${st.paused ? ' · 🛑 paused by admin' : ''}`,
+      !st.unlocked ? `${tick(c.research)} strategy PASSES the test  ${tick(c.days)} ${st.needs.days}+ days  ${tick(c.trades)} ${st.needs.trades}+ trades  ${tick(c.profit)} in profit` : '',
+      ``,
+      `*You:* practice auto-buy ${st.practiceOn ? '🟢 ON' : '⚪ OFF'} · live auto-buy ${st.liveOn ? '🟢 ON' : '⚪ OFF'}`,
+      st.lastRun ? `_Last check ${st.lastRun.date}: ${st.lastRun.buys.length ? st.lastRun.buys.map(x => x.coin).join(', ') : 'no buy signals'}${st.lastRun.regimeUp === false ? ' (BTC below its 100-day average)' : ''}_` : '',
+    ];
+    const kb = [[st.practiceOn ? { text: '⏸ Practice auto-buy off', callback_data: 'autobuy off' } : { text: '🟢 Practice auto-buy on', callback_data: 'autobuy on' }]];
+    if (st.unlocked) kb.push([st.liveOn ? { text: '⏸ Live auto-buy off', callback_data: 'autobuy live off' } : { text: '💰 Live auto-buy on', callback_data: 'autobuy live on' }]);
+    kb.push([{ text: '🎮 My practice account', callback_data: 'practice' }]);
+    if (isAdmin(chatId)) lines.push('', `_Admin: \`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`_`);
+    await send(chatId, lines.filter(x => x !== '').join('\n'), { inline_keyboard: kb });
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof autoBuyer.AutoBuyError ? err.message : `Auto-buy error: ${esc(err.message)}`}`);
+  }
+}
+
 // ─── Practice mode ────────────────────────────────────────────────────────────
 const usd = (n) => n == null ? '—' : `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pm = (n) => n == null ? '—' : `${n >= 0 ? '+' : ''}${usd(n)}`;
 const signed = (n, suffix = '') => n == null ? '—' : `${n >= 0 ? '+' : ''}${n}${suffix}`;
 const PRACTICE_BUTTONS = { inline_keyboard: [
   [{ text: '📊 Refresh', callback_data: 'practice' }, { text: '❓ How to buy', callback_data: 'practice help' }],
+  [{ text: '🤖 Auto-buy (bot picks the coins)', callback_data: 'autobuy' }],
   [{ text: '🚀 Ready for real money? Go live', callback_data: 'golive' }],
   [{ text: '↺ Start again with $10,000', callback_data: 'practice reset' }],
 ] };
@@ -1730,10 +1826,13 @@ async function handleGoLive(chatId, args) {
       `1. Tap your *profile icon → Account → API Management*`,
       `2. *Create API* → choose *System generated* → name it \`JijazyBot\` → confirm with your codes`,
       `3. Tap *Edit restrictions*:`,
-      `   ✅ tick *Enable Spot & Margin Trading*`,
-      `   ❌ leave *Enable Withdrawals* OFF (the bot refuses keys that can withdraw)`,
-      `   IP access: *Unrestricted*`,
+      `   • IP access: choose *Restrict access to trusted IPs only* and add:`,
+      ...(tradingIps().length ? tradingIps().map(ip => `      \`${ip}\``) : [`      _(the bot's IP addresses aren't set up yet — ask the admin)_`]),
+      `   • then ✅ tick *Enable Spot & Margin Trading*`,
+      `   • leave ❌ *Enable Withdrawals* OFF (the bot refuses keys that can withdraw)`,
       `4. *Save*. You'll see two codes: *API Key* and *Secret Key*. Copy both — the Secret Key is shown only once.`,
+      ``,
+      `_Binance only allows trading on keys locked to fixed IPs. These are the bot's own addresses, so only the bot can use your key._`,
     ].join('\n'), { inline_keyboard: [
       [{ text: 'Open API Management', url: 'https://www.binance.com/en/my/settings/api-management' }],
       [{ text: '✅ I have both codes', callback_data: 'golive 4' }],

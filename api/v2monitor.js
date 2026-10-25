@@ -37,6 +37,7 @@ const { mapLimit } = require('../src/lib/concurrency');
 const { stopAfterTakeProfit, stopHitWording } = require('../src/services/stopPlan');
 const { cors, requireCronKey } = require('../src/lib/auth');
 const autoTrader = require('../src/services/autoTrader');
+const autoBuyer = require('../src/services/autoBuyer');
 
 const AUTO_NOTE = `🤖 _Auto-exits are on — the bot places this on Binance for you. Don't also sell by hand._`;
 const SELL_EVENTS = /^(TP[123]|STOP_LOSS|TARGET_HIT)/;
@@ -91,7 +92,8 @@ function evaluatePosition(pos, market, nowMs = Date.now()) {
   });
 
   const sl  = advice.tradePlan?.stopLoss;
-  const tps = advice.tradePlan?.takeProfits;
+  // Auto-bought positions follow their strategy's trailing stop only — no take-profits
+  const tps = pos.strategy ? null : advice.tradePlan?.takeProfits;
   const tp1 = tps?.tp1, tp2 = tps?.tp2, tp3 = tps?.tp3;
 
   // Lock the plan the first time we have one
@@ -316,6 +318,9 @@ module.exports = async (req, res) => {
     // Paid access: renewal reminders, and only users with access are monitored
     const reminders = await subs.sendReminders((id, text) => tg.send(id, text)).catch(err => ({ error: err.message }));
     const userIds = await subs.getChatIdsWithAccess();
+    // Auto-buy: once a day after the daily close (practice, house forward test, live if unlocked)
+    const autobuy = await autoBuyer.runDaily({ allowed: new Set(userIds.map(String)), send: (id, text) => tg.send(id, text) })
+      .catch(err => ({ error: err.message }));
     const jobs = [];
     const autoOn = new Map();
     for (const userId of userIds) {
@@ -327,7 +332,7 @@ module.exports = async (req, res) => {
       await autoTrader.sweepOrphans(userId, positions.map(p => p.positionId)).catch(() => 0);
     }
     if (jobs.length === 0) {
-      return res.status(200).json({ success: true, message: 'No open positions across any users', reminders });
+      return res.status(200).json({ success: true, message: 'No open positions across any users', reminders, autobuy });
     }
 
     // Fetch market data ONCE per coin+exchange (not once per position), a few in parallel
@@ -363,6 +368,7 @@ module.exports = async (req, res) => {
       symbols:   bySymbol.size,
       results,
       reminders,
+      autobuy,
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {

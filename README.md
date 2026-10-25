@@ -44,6 +44,8 @@ Practice (play money, real prices): `practice` · `practice buy SOL 100 [2x] [sl
 
 Go live (guided Binance set-up): `golive`
 
+Auto-buy: `autobuy` · `autobuy on|off` (practice) · `autobuy live on|off` (locked until proven) · admin: `autobuy run|pause|resume|unlock|lock` · research: `npm run lab`
+
 Automated exits (optional, Binance): `autotrade` · `autotrade connect KEY SECRET` · `autotrade on` · `autotrade off` · `autotrade disconnect` · `autotrade resume SOL`
 
 Paid access (when PAID_ACCESS_ENABLED=true): `account` · `subscribe you@example.com` · `subscribe check`
@@ -72,7 +74,8 @@ src/services/         scanEngine (live strategy), strategyBacktest + strategySta
                       listings/probability, risk, portfolioService (dashboard),
                       tradingAccounts + autoTrader (automated exits),
                       subscriptionService (paid access, Paystack),
-                      practiceService (play-money practice mode)
+                      practiceService (play-money practice mode),
+                      autoBuyer + strategyLab + src/strategies (auto-buy)
 data/                 strategy-stats.json (saved backtest summary, shown in alerts)
 public/               Landing page + dashboard
 test/                 node:test suite (no network)

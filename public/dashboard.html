@@ -1118,15 +1118,45 @@ async function loadPractice() {
   const box = document.getElementById('practice-content');
   if (!TOKEN) { box.innerHTML = loginCard(); return; }
   box.innerHTML = `<div class="state-loading"><div class="spinner"></div><div class="state-label">Loading your practice account…</div></div>`;
-  try { renderPractice(await api('practice')); }
+  try {
+    const [pr, ab] = await Promise.all([api('practice'), api('autobuy').catch(() => null)]);
+    renderPractice(pr, ab);
+  }
   catch (e) { box.innerHTML = e.status === 402 ? renewCard(e.message) : `<div class="state-empty"><div>⚠ ${esc(e.message)}</div></div>`; }
 }
 
-function renderPractice(s) {
+const VERDICT = { PASS: '✅ Passed', PROMISING: '🟡 Promising — could be luck', FAIL: '❌ Failed', 'NOT TESTED': '⚪ Not tested yet' };
+function autoBuyCard(ab) {
+  if (!ab) return '';
+  const f = ab.forward, st = ab.strategy, c = ab.checks;
+  const tick = (ok, t) => `<span style="margin-right:12px">${ok ? '✅' : '⬜'} ${t}</span>`;
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="form-title">🤖 Auto-buy — the bot picks and buys coins itself</div>
+    <div style="font-size:12px;line-height:1.8">
+      <b>Strategy:</b> ${esc(st.label)}<br>
+      <b>Past-data test:</b> ${VERDICT[st.verdict] || esc(st.verdict)}${st.test ? ` · ${st.test.trades} unseen trades, ${st.test.expectancyR >= 0 ? '+' : ''}${st.test.expectancyR}R each after fees` : ''}<br>
+      <b>Forward test</b> (bot's own practice account): ${f.startedAt ? `${f.days} days · ${f.closedTrades} trades · ${money(f.equity - f.start)}` : 'starts at the next daily run'}<br>
+      <b>Live auto-buy:</b> ${ab.unlocked ? '🔓 unlocked' : '🔒 locked'}${ab.paused ? ' · paused' : ''}
+      ${!ab.unlocked ? `<div class="track-note" style="margin-top:4px">${tick(c.research, 'passes test')}${tick(c.days, ab.needs.days + '+ days')}${tick(c.trades, ab.needs.trades + '+ trades')}${tick(c.profit, 'in profit')}</div>` : ''}
+    </div>
+    <div class="pf-actions" style="margin-top:10px">
+      <button class="btn-sm ${ab.practiceOn ? '' : 'primary'}" onclick="setAutoBuy({ practice: ${!ab.practiceOn} })">${ab.practiceOn ? '⏸ Practice auto-buy off' : '▶ Practice auto-buy on'}</button>
+      ${ab.unlocked ? `<button class="btn-sm" onclick="setAutoBuy({ live: ${!ab.liveOn} })">${ab.liveOn ? '⏸ Live auto-buy off' : '💰 Live auto-buy on'}</button>` : ''}
+    </div>
+    <div class="track-note" style="margin-top:6px">Runs once a day after midnight UTC on ${ab.universe.length} large coins · about ${ab.limits.riskPct}% of the account at risk per trade · max ${ab.limits.maxOpen} positions · trailing stop exits.</div>
+  </div>`;
+}
+async function setAutoBuy(body) {
+  if (body.live === true && !window.confirm('Real money: the bot will BUY on your Binance account (about 1% of the account at risk per trade, max 5 positions). Turn on?')) return;
+  try { await api('autobuy-set', body); toast('Saved', 'success'); loadPractice(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
+function renderPractice(s, ab) {
   const box = document.getElementById('practice-content');
   const pos = s.positions.map(p => `<div class="pf-card">
     <div class="pf-head">
-      <div><div class="pf-coin">${esc(p.coin)}</div><div class="pf-sub">Bought ${new Date(p.openedAt).toLocaleDateString()} · ${money(p.cost)}</div>
+      <div><div class="pf-coin">${esc(p.coin)}${p.auto ? ' <span style="font-size:11px">🤖</span>' : ''}</div><div class="pf-sub">Bought ${new Date(p.openedAt).toLocaleDateString()} · ${money(p.cost)}</div>
         <div style="margin-top:6px"><span class="pf-status ${p.tp1Hit ? 'good' : ''}">${p.tp2Hit ? 'TP2 reached' : p.tp1Hit ? 'TP1 reached' : 'Open'}</span></div></div>
       <div class="pf-pnl"><div class="pf-pnl-pct ${cls(p.pnlPct)}">${signedPct(p.pnlPct)}</div><div class="pf-pnl-usd">${money(p.pnlUsd)}</div></div>
     </div>
@@ -1141,7 +1171,7 @@ function renderPractice(s) {
     <div class="pf-actions"><button class="btn-sm" onclick="practiceSell('${esc(p.id)}','${esc(p.coin)}')">💸 Sell now</button></div>
   </div>`).join('');
   const rows = s.trades.map(t => `<tr><td>${esc(t.symbol.replace(/USDT$/, ''))}</td><td>${new Date(t.closedAt).toLocaleDateString()}</td><td>${money(t.cost)}</td><td>${money(t.proceeds)}</td><td>${money(t.fees)}</td><td class="${cls(t.pnlDollar)}">${money(t.pnlDollar)} (${signedPct(t.pnlPct)})</td></tr>`).join('');
-  box.innerHTML = `
+  box.innerHTML = autoBuyCard(ab) + `
     <div class="stats-bar" style="display:flex">
       <div class="stat"><div class="stat-label">Total value</div><div class="stat-value">${money(s.equity)}</div></div>
       <div class="stat"><div class="stat-label">Since start</div><div class="stat-value ${s.returnUsd >= 0 ? 'buy' : 'sell'}">${money(s.returnUsd)} <span style="font-size:11px">${signedPct(s.returnPct)}</span></div></div>

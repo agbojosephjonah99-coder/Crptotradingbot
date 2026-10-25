@@ -88,6 +88,8 @@ module.exports = async (req, res) => {
     autoExits: {
       available: require('../src/lib/secretBox').isConfigured(),
       dryRun: String(process.env.AUTOTRADE_DRY_RUN || '').toLowerCase() === 'true',
+      fixedIpProxy: !!(process.env.FIXIE_URL || process.env.TRADING_PROXY_URL),
+      tradingIps: require('../src/lib/binanceTrade').tradingIps(),
     },
     checkedAt: new Date().toISOString(),
   });

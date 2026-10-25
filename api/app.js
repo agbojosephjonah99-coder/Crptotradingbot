@@ -21,6 +21,8 @@
  *   POST practice-buy        { symbol, amount, stop?, target? }
  *   POST practice-sell       { positionId }
  *   POST practice-reset
+ *   GET  autobuy             auto-buy status (strategy, test verdict, forward test, my settings)
+ *   POST autobuy-set         { practice?: bool, live?: bool }
  *   GET  subscription        paid-access status
  *   POST subscribe           { email } → Paystack payment link
  *
@@ -34,6 +36,7 @@ const users = require('../src/services/userService');
 const portfolio = require('../src/services/portfolioService');
 const subs = require('../src/services/subscriptionService');
 const practice = require('../src/services/practiceService');
+const autoBuyer = require('../src/services/autoBuyer');
 const { baseUrl } = require('../src/lib/dashAuth');
 
 const ACTIONS = {
@@ -60,6 +63,12 @@ const ACTIONS = {
   'practice-buy':       { method: 'POST', run: (chatId, body) => practice.buy(chatId, body) },
   'practice-sell':      { method: 'POST', run: (chatId, body) => practice.sellNow(chatId, { positionId: body.positionId }) },
   'practice-reset':     { method: 'POST', run: (chatId) => practice.reset(chatId) },
+  autobuy:              { method: 'GET',  run: (chatId) => autoBuyer.userStatus(chatId) },
+  'autobuy-set':        { method: 'POST', run: async (chatId, body) => {
+    if (body.practice !== undefined) await autoBuyer.setPractice(chatId, !!body.practice);
+    if (body.live !== undefined) await autoBuyer.setLive(chatId, !!body.live);
+    return autoBuyer.userStatus(chatId);
+  } },
   subscription:         { method: 'GET',  run: (chatId) => subs.status(chatId) },
   subscribe:            { method: 'POST', run: (chatId, body) => subs.startCheckout(chatId, { email: body.email, callbackUrl: `${baseUrl()}/paid` }) },
 };
@@ -123,7 +132,7 @@ module.exports = async (req, res) => {
     const data = await action.run(chatId, parseBody(req));
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    if (err instanceof portfolio.UserError || err instanceof subs.PaymentError || err instanceof practice.PracticeError) return res.status(400).json({ success: false, error: err.message });
+    if (err instanceof portfolio.UserError || err instanceof subs.PaymentError || err instanceof practice.PracticeError || err instanceof autoBuyer.AutoBuyError) return res.status(400).json({ success: false, error: err.message });
     console.error(`[app:${name}]`, err.stack || err.message);
     return res.status(500).json({ success: false, error: 'Something went wrong — try again' });
   }

@@ -1,6 +1,6 @@
 {
   "name": "crypto-signal-bot-v2-enhanced",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "description": "CryptoBot V2 — multi-timeframe signals, Telegram bot, position monitoring (alerts; optional automated exits on Binance — never buys)",
   "main": "index.js",
   "engines": {
@@ -11,6 +11,7 @@
     "scheduler": "node scheduler.js",
     "backtest": "node backtest.js",
     "research": "node research.js",
+    "lab": "node lab.js",
     "test": "node --test test/*.test.js",
     "dev": "vercel dev",
     "deploy": "vercel --prod"

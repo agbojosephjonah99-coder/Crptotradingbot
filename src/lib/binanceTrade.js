@@ -21,6 +21,25 @@ class BinanceError extends Error {
 
 const isDryRun = () => String(process.env.AUTOTRADE_DRY_RUN || '').toLowerCase() === 'true';
 
+/**
+ * Binance only accepts trading keys locked to fixed IP addresses. Vercel has
+ * none, so signed (account / order) requests go through a fixed-IP proxy when
+ * FIXIE_URL (or TRADING_PROXY_URL) is set, e.g. http://fixie:PASS@host.usefixie.com:80.
+ * Prices and charts don't need it and go direct.
+ */
+function proxyConfig() {
+  const raw = process.env.TRADING_PROXY_URL || process.env.FIXIE_URL;
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    return { protocol: u.protocol.replace(':', ''), host: u.hostname, port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80),
+      ...(u.username ? { auth: { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } } : {}) };
+  } catch { return undefined; }
+}
+
+/** The fixed IPs users must allow on their Binance key (Vercel setting TRADING_IPS="1.2.3.4,5.6.7.8"). */
+const tradingIps = () => (process.env.TRADING_IPS || '').split(/[,\s]+/).filter(x => /^\d{1,3}(\.\d{1,3}){3}$/.test(x));
+
 function client({ apiKey, apiSecret, testnet }) {
   const base = testnet ? TESTNET : LIVE;
 
@@ -28,7 +47,8 @@ function client({ apiKey, apiSecret, testnet }) {
     const q = new URLSearchParams({ ...stringify(params), recvWindow: '10000', timestamp: String(Date.now()) });
     q.append('signature', crypto.createHmac('sha256', apiSecret).update(q.toString()).digest('hex'));
     try {
-      const r = await axios.request({ method, url: `${base}${path}?${q.toString()}`, headers: { 'X-MBX-APIKEY': apiKey }, timeout: 10000 });
+      const proxy = proxyConfig();
+      const r = await axios.request({ method, url: `${base}${path}?${q.toString()}`, headers: { 'X-MBX-APIKEY': apiKey }, timeout: 15000, ...(proxy ? { proxy } : {}) });
       return r.data;
     } catch (err) {
       const d = err?.response?.data;
@@ -74,6 +94,11 @@ function client({ apiKey, apiSecret, testnet }) {
       const p = { symbol, side: 'SELL', type: 'MARKET', quantity, newClientOrderId: clientId, newOrderRespType: 'FULL' };
       return isDryRun() ? Promise.resolve(fake(p)) : signed('POST', '/api/v3/order', p);
     },
+    /** Market BUY spending `quoteQty` USDT. Used only by live auto-buy (locked until proven). */
+    marketBuy(symbol, quoteQty, clientId) {
+      const p = { symbol, side: 'BUY', type: 'MARKET', quoteOrderQty: quoteQty, newClientOrderId: clientId, newOrderRespType: 'FULL' };
+      return isDryRun() ? Promise.resolve(fake({ ...p, quantity: '0' })) : signed('POST', '/api/v3/order', p);
+    },
     stopLossSell(symbol, quantity, stopPrice, limitPrice, clientId) {
       const p = { symbol, side: 'SELL', type: 'STOP_LOSS_LIMIT', timeInForce: 'GTC', quantity, stopPrice, price: limitPrice, newClientOrderId: clientId };
       return isDryRun() ? Promise.resolve(fake(p)) : signed('POST', '/api/v3/order', p);
@@ -108,4 +133,4 @@ function toFixedStep(value, step) {
   return Number(value).toFixed(decimals);
 }
 
-module.exports = { client, floorToStep, toFixedStep, BinanceError, isDryRun, LIVE, TESTNET };
+module.exports = { client, floorToStep, toFixedStep, BinanceError, isDryRun, proxyConfig, tradingIps, LIVE, TESTNET };

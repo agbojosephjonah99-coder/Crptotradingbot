@@ -59,7 +59,7 @@ Send `/start` to @JijazyBot. Then try `buy SOL 150 2x` → `positions` → `sold
 2. Go to https://testnet.binance.vision, log in with GitHub, and click **Generate HMAC_SHA256 Key**. Testnet accounts come with fake balances.
 3. In Telegram: `autotrade connect API_KEY API_SECRET`, then `autotrade on`.
 4. Add a position with a quantity, for a coin you hold on the testnet: `buy BTC 65000 0.01`. The bot replies "Stop placed on Binance (testnet)".
-5. Real money, only when you're happy: create a binance.com API key with **Enable Spot & Margin Trading** ON and **withdrawals OFF**. Vercel's IP addresses change, so the key can't be limited to one IP; Binance may put extra limits on unrestricted keys, so check its API Management page. Then `autotrade connect live KEY SECRET` and `autotrade on I UNDERSTAND REAL MONEY`.
+5. Real money: Binance only allows trading on keys locked to fixed IPs, and Vercel has none, so set up the fixed-IP proxy first (step 8). Then users follow `golive`.
 
 ## 7. Paid access (optional)
 
@@ -72,3 +72,22 @@ Send `/start` to @JijazyBot. Then try `buy SOL 150 2x` → `positions` → `sold
    - `PAID_ACCESS_ENABLED` = `true` (only when you're ready, because unpaid users lose access straight away; give existing users time first with `grant ID 30`)
 3. Redeploy, open `/api/set-commands?key=…` once (adds `/account` and `/subscribe` to the menu), and send `subs` to see everyone's status.
 4. Test: from a non-admin account, `subscribe you@example.com` → pay with a Paystack test card → you're sent back to Telegram with "Payment received". Then swap to your `sk_live_…` key.
+
+## 8. Fixed IP for real Binance trading (Fixie)
+
+Binance deletes trading keys that aren't locked to specific IP addresses. Vercel's addresses change, so the bot sends its Binance account and order requests through Fixie, which has two fixed IPs. Prices and charts don't go through it.
+
+1. Sign up at https://usefixie.com and create a proxy (EU region if offered; the free plan is enough for testing).
+2. Vercel → Environment Variables:
+   - `FIXIE_URL` = the proxy URL Fixie shows (`http://fixie:…@….usefixie.com:80`)
+   - `TRADING_IPS` = Fixie's two outbound IPs, comma-separated, e.g. `54.1.2.3,54.4.5.6`
+3. Redeploy. `/api/health` shows `"fixedIpProxy": true` and the IPs. Step 3 of `golive` now tells every user to restrict their key to exactly these IPs.
+
+About 1,500 proxy requests per open live position per month. Upgrade the Fixie plan as live users grow.
+
+## 9. Auto-buy
+
+- `npm run lab` (in the Codespace) tests 22 strategy variants on ~4 years of daily data and writes `data/auto-strategy.json`. Commit it.
+- Practice auto-buy works straight away for anyone (`autobuy on`). The bot's own "house" practice account always runs it. That's the forward test.
+- Live auto-buy stays locked until the lab gives a PASS **and** the house account has run 8+ weeks with 20+ closed trades in profit. Then `autobuy unlock` (admin), and each user opts in with `autobuy live on`.
+- Kill switch: `autobuy pause` / `autobuy resume`. Test run: `autobuy run`.
