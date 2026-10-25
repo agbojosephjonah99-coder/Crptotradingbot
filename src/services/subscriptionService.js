@@ -33,12 +33,94 @@ const DAY = 86_400_000;
 
 class PaymentError extends Error {}
 
-const enabled = () => String(process.env.PAID_ACCESS_ENABLED || '').toLowerCase() === 'true';
+// ─── Settings: set by the admin in the bot (💳 Subscriptions), env vars as defaults
+// cryptobot:settings HASH paidAccess '1'|'0', price, currency, days
+const SETTINGS = 'cryptobot:settings';
+let cache = { at: 0, v: {} };
+
+/** Refresh settings from storage (cached 15 s). Every entry point calls this first. */
+async function loadSettings({ force = false } = {}) {
+  if (!force && Date.now() - cache.at < 15_000) return cache.v;
+  try { cache = { at: Date.now(), v: store.hashToObject(await store.cmd('HGETALL', SETTINGS)) }; } catch { /* keep last */ }
+  return cache.v;
+}
+const _resetSettingsCache = () => { cache = { at: 0, v: {} }; };
+
+function enabled() {
+  if (cache.v.paidAccess === '1') return true;
+  if (cache.v.paidAccess === '0') return false;
+  return String(process.env.PAID_ACCESS_ENABLED || '').toLowerCase() === 'true';
+}
 function plan() {
-  const price = Number(process.env.SUBSCRIPTION_PRICE) > 0 ? Number(process.env.SUBSCRIPTION_PRICE) : 5000;
-  const days = Number(process.env.SUBSCRIPTION_DAYS) > 0 ? Math.round(Number(process.env.SUBSCRIPTION_DAYS)) : 30;
-  const currency = (process.env.SUBSCRIPTION_CURRENCY || 'NGN').toUpperCase();
+  const v = cache.v;
+  const num = (x) => (Number(x) > 0 ? Number(x) : null);
+  const price = num(v.price) ?? num(process.env.SUBSCRIPTION_PRICE) ?? 5000;
+  const days = Math.round(num(v.days) ?? num(process.env.SUBSCRIPTION_DAYS) ?? 30);
+  const currency = String(v.currency || process.env.SUBSCRIPTION_CURRENCY || 'NGN').toUpperCase();
   return { price, currency, days, amountMinor: Math.round(price * 100) };
+}
+
+async function setPaidAccess(on) {
+  await store.cmd('HSET', SETTINGS, 'paidAccess', on ? '1' : '0');
+  await loadSettings({ force: true });
+  return enabled();
+}
+
+const CURRENCIES = ['NGN', 'GHS', 'ZAR', 'KES', 'USD'];
+async function setPlan({ price, days, currency } = {}) {
+  const fields = [];
+  if (price !== undefined) { const p = Number(String(price).replace(/[,₦$]/g, '')); if (!(p > 0)) throw new PaymentError('Price must be a positive number, e.g. 5000'); fields.push('price', String(p)); }
+  if (days !== undefined) { const d = Math.round(Number(days)); if (!(d >= 1 && d <= 3660)) throw new PaymentError('Days must be between 1 and 3660'); fields.push('days', String(d)); }
+  if (currency !== undefined) { const c = String(currency).toUpperCase(); if (!CURRENCIES.includes(c)) throw new PaymentError(`Currency must be one of ${CURRENCIES.join(', ')} (what Paystack supports)`); fields.push('currency', c); }
+  if (fields.length) await store.cmd('HSET', SETTINGS, ...fields);
+  await loadSettings({ force: true });
+  return plan();
+}
+
+/** "31/12/2026", "31-12-2026", "2026-12-31", "31 Dec 2026" → end of that day, Lagos time. */
+function parseDate(text) {
+  const t = String(text || '').trim();
+  let y, m, d;
+  let r = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (r) [, y, m, d] = r.map(Number);
+  else if ((r = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/))) [, d, m, y] = r.map(Number);
+  else if ((r = t.match(/^(\d{1,2})\s+([a-z]{3})[a-z]*\.?\s+(\d{4})$/i))) {
+    const mi = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(r[2].toLowerCase());
+    if (mi < 0) return null;
+    d = Number(r[1]); m = mi + 1; y = Number(r[3]);
+  } else return null;
+  if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2020 && y <= 2100)) return null;
+  const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T23:59:59+01:00`;
+  const check = new Date(Date.UTC(y, m - 1, d));
+  if (check.getUTCMonth() !== m - 1 || check.getUTCDate() !== d) return null; // e.g. 31/02
+  return new Date(iso);
+}
+
+/** Give access until an exact date (replaces whatever they had). */
+async function setUntil(chatId, date, { grantedBy = null } = {}) {
+  const dt = date instanceof Date ? date : parseDate(date);
+  if (!dt || isNaN(dt)) throw new PaymentError('Send a date like 31/12/2026');
+  if (dt.getTime() <= Date.now()) throw new PaymentError('That date is in the past');
+  await store.cmd('HSET', subKey(chatId), 'paidUntil', dt.toISOString(), ...(grantedBy ? ['grantedBy', String(grantedBy)] : []));
+  return dt.toISOString();
+}
+
+/** Give days to every approved user who has no active subscription (before switching paid access on). */
+async function giveAllWithout(days, { grantedBy = null } = {}) {
+  let n = 0;
+  for (const u of await users.getUsersByStatus('approved')) {
+    if (users.isAdminId(u.chatId)) continue;
+    if ((await getSub(u.chatId)).active) continue;
+    await extend(u.chatId, days, { grantedBy });
+    n++;
+  }
+  return n;
+}
+
+async function countWithoutAccess() {
+  let n = 0;
+  for (const u of await users.getUsersByStatus('approved')) if (!users.isAdminId(u.chatId) && !(await getSub(u.chatId)).active) n++;
+  return n;
 }
 const priceLabel = () => { const p = plan(); return `${p.currency} ${p.price.toLocaleString('en-US')} / ${p.days} days`; };
 
@@ -58,11 +140,13 @@ async function getSub(chatId) {
 
 /** Can this user use the bot right now? */
 async function hasAccess(chatId) {
+  await loadSettings();
   if (!enabled() || users.isAdminId(chatId)) return true;
   return (await getSub(chatId)).active;
 }
 
 async function status(chatId) {
+  await loadSettings();
   const s = await getSub(chatId);
   return {
     required: enabled() && !users.isAdminId(chatId),
@@ -78,6 +162,7 @@ async function status(chatId) {
 
 /** Approved users (and the admin) who currently have access — for alerts. */
 async function getChatIdsWithAccess() {
+  await loadSettings();
   const ids = await users.getAllActiveChatIds();
   if (!enabled()) return ids;
   const out = [];
@@ -98,6 +183,7 @@ const validEmail = (e) => /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,}$/i.test(String
 
 /** Create a Paystack payment link for one period. */
 async function startCheckout(chatId, { email, callbackUrl }) {
+  await loadSettings();
   const s = await getSub(chatId);
   email = String(email || s.email || '').trim().toLowerCase();
   if (!validEmail(email)) throw new PaymentError('Send your email for the receipt, e.g. `subscribe you@example.com`');
@@ -122,6 +208,7 @@ async function startCheckout(chatId, { email, callbackUrl }) {
  * @returns {{credited: boolean, already?: boolean, chatId?: string, paidUntil?: string, reason?: string}}
  */
 async function confirmPayment(reference) {
+  await loadSettings();
   reference = String(reference || '').trim();
   if (!/^[A-Za-z0-9_.=-]{6,100}$/.test(reference)) return { credited: false, reason: 'bad reference' };
   const owner = await store.cmd('GET', `cryptobot:payref:${reference}`);
@@ -180,6 +267,7 @@ async function handleWebhook(rawBody, signature) {
  * @param send (chatId, text) => Promise
  */
 async function sendReminders(send) {
+  await loadSettings();
   if (!enabled()) return { reminded: 0, expired: 0 };
   let reminded = 0, expired = 0;
   for (const u of await users.getUsersByStatus('approved')) {
@@ -206,7 +294,7 @@ async function listSubscribers() {
 }
 
 module.exports = {
-  PaymentError, enabled, plan, priceLabel, getSub, hasAccess, status, getChatIdsWithAccess,
+  PaymentError, enabled, plan, priceLabel, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
   startCheckout, confirmPayment, extend, revoke, handleWebhook, sendReminders, listSubscribers, validEmail,
 };
 

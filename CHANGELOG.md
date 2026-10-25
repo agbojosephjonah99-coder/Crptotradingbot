@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.18.0 — Subscriptions panel for the admin
+
+- **💳 Subscriptions** (admin menu button, or `subs`). Everything is in the bot, with no Vercel variables needed:
+  - **Paid access ON/OFF** with one button. Before switching on, it shows how many approved users have no subscription and offers "🎁 Give them 7 days, then turn on". It also warns if Paystack isn't set up yet.
+  - **Plan & price:** set the price (type it), length (1 week / 1 month / 3 months, or `subs days N`) and currency (NGN, GHS, ZAR, KES, USD).
+  - **Give a subscription:** choose a user, then 1 week / 1 month / 3 months / 6 months / 1 year, or **📅 until a date you choose**. Dates are accepted as 31/12/2026, 2026-12-31 or 31 Dec 2026, and access ends at midnight Lagos time. Impossible dates (31/02) are refused. The user is told "You've been given access until …".
+  - **End a subscription** (immediately) and **List subscribers** (with end dates).
+- `grant ID 31/12/2026` now works as well as `grant ID 30`.
+- Settings are stored in the database. The old Vercel variables are only defaults.
+- Tests: 139.
+
 ## 2.17.1 — Catch "buy PEPE 50" mistakes
 
 - `buy COIN PRICE` logs a buy you already made, where PRICE is per coin. If the price is more than 2× away from the market (e.g. `buy PEPE 50` when PEPE is $0.0000098), the bot now stops and asks. It explains the difference and offers buttons:

@@ -87,7 +87,7 @@ const MENU_ROWS = [
 ];
 const ADMIN_ROWS = [
   [b('⏳ Pending', 'pending'),   b('👥 Users', 'users')],
-  [b('💳 Subscribers', 'subs'),  b('🔗 Invite Links', 'invite')],
+  [b('💳 Subscriptions', 'subs'),  b('🔗 Invite Links', 'invite')],
 ];
 const INLINE_MENU = { inline_keyboard: MENU_ROWS };
 const menuFor = (chatId) => ({ inline_keyboard: isAdmin(chatId) ? [...MENU_ROWS, ...ADMIN_ROWS] : MENU_ROWS });
@@ -315,6 +315,26 @@ async function handleMessage(chatId, text, from, meta = {}) {
   // ── ADMIN ONLY COMMANDS ──────────────────────────────────────────────────
   if (isAdmin(chatId)) {
 
+    // Waiting for a date / price typed after tapping a 💳 Subscriptions button?
+    const pending = await store.getJSON(`cryptobot:admin:await:${chatId}`, null);
+    if (pending && !text.trim().startsWith('/') && !/^[a-z]+(\s|$)/i.test(text.trim())) {
+      await store.del(`cryptobot:admin:await:${chatId}`);
+      try {
+        if (pending.action === 'givedate') {
+          const until = await subs.setUntil(pending.target, text.trim(), { grantedBy: chatId });
+          await giftDone(chatId, pending.target, until);
+        } else if (pending.action === 'price') {
+          const p = await subs.setPlan({ price: text.trim() });
+          await send(chatId, `✅ Price set: *${subs.priceLabel()}*`, { inline_keyboard: [[b('💳 Back to Subscriptions', 'subs')]] });
+        }
+      } catch (err) {
+        await store.setJSON(`cryptobot:admin:await:${chatId}`, pending);
+        await store.cmd('EXPIRE', `cryptobot:admin:await:${chatId}`, 600);
+        await reply(chatId, `❌ ${esc(err.message)} — try again, or tap 💳 Subscriptions to cancel.`);
+      }
+      return;
+    }
+
     if (cmd === 'invite') {
       const BOT_USERNAME = process.env.BOT_USERNAME || 'JijazyBot';
       await reply(chatId, [
@@ -400,10 +420,13 @@ async function handleMessage(chatId, text, from, meta = {}) {
     }
 
     if (cmd === 'grant' && isChatId(parts[1])) {
-      const days = parseInt(parts[2], 10) || subs.plan().days;
-      const until = await subs.extend(parts[1], days, { grantedBy: chatId });
-      await reply(chatId, `🎁 Gave \`${parts[1]}\` ${days} days — active until ${new Date(until).toUTCString()}.`);
-      await send(parts[1], `🎁 *You've been given ${days} days of access* — active until ${new Date(until).toUTCString()}.`).catch(() => {});
+      // grant ID 30  (days)   ·   grant ID 31/12/2026  (until a date)
+      const arg = parts.slice(2).join(' ');
+      try {
+        const until = subs.parseDate(arg) ? await subs.setUntil(parts[1], arg, { grantedBy: chatId })
+          : await subs.extend(parts[1], parseInt(arg, 10) || subs.plan().days, { grantedBy: chatId });
+        await giftDone(chatId, parts[1], until);
+      } catch (err) { await reply(chatId, `❌ ${esc(err.message)}`); }
       return;
     }
 
@@ -413,15 +436,8 @@ async function handleMessage(chatId, text, from, meta = {}) {
       return;
     }
 
-    if (cmd === 'subs' || cmd === 'subscribers') {
-      const list = await subs.listSubscribers();
-      const lines = [`💳 *Subscriptions* — paid access is ${subs.enabled() ? '*ON*' : '*OFF* (set PAID_ACCESS_ENABLED=true)'} · ${subs.priceLabel()}`, ``];
-      for (const { user, sub } of list) {
-        lines.push(`${sub.active ? '🟢' : '⚪'} ${nameOf(user)} — ${sub.active ? `until ${new Date(sub.paidUntil).toUTCString()} (${sub.daysLeft}d)` : sub.paidUntil ? 'ended' : 'never paid'}`);
-      }
-      if (!list.length) lines.push('No approved users yet.');
-      lines.push('', '`grant ID DAYS` · `revoke ID`');
-      await replyChunked(chatId, lines.join('\n'));
+    if (cmd === 'subs' || cmd === 'subscribers' || cmd === 'subscriptions') {
+      await handleSubsAdmin(chatId, parts.slice(1));
       return;
     }
 
@@ -581,7 +597,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`dashboard\` — your web dashboard · \`dashboard logout\` — sign out everywhere`,
       subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : `\`account\` — your access`,
       `\`manual\` — the full user guide`,
-      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` · \`grant ID DAYS\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`` : '',
+      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` (panel: on/off, plan, give) · \`grant ID DAYS\` or \`grant ID 31/12/2026\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`` : '',
     ].filter(x => x !== '').join('\n'));
     return;
   }
@@ -2131,6 +2147,147 @@ async function handleWizardKey(chatId, value, meta) {
   return false;
 }
 
+// ─── 💳 Subscriptions (admin panel) ──────────────────────────────────────────
+const fmtDay = (iso) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Africa/Lagos' });
+
+async function giftDone(adminId, target, until) {
+  const u = await getUser(target);
+  await send(adminId, `🎁 ${nameOf(u || { chatId: target })} has access until *${fmtDay(until)}*.`, { inline_keyboard: [[b('💳 Back to Subscriptions', 'subs')]] });
+  await send(target, `🎁 *You've been given access to the bot until ${fmtDay(until)}.*\n\nTap *📋 MENU* to get started.`).catch(() => {});
+}
+
+async function handleSubsAdmin(chatId, args) {
+  const a = (args[0] || '').toLowerCase();
+  const awaitKey = `cryptobot:admin:await:${chatId}`;
+  try {
+    if (a === 'toggle') {
+      const turningOn = !subs.enabled();
+      if (turningOn && (args[1] || '') !== 'confirm') {
+        const without = await subs.countWithoutAccess();
+        await send(chatId, [
+          `💳 *Turn paid access ON?*`,
+          ``,
+          `Approved users will need an active subscription (${subs.priceLabel()}) to use the bot. You never pay.`,
+          without ? `⚠️ *${without} user${without === 1 ? ' has' : 's have'} no subscription* and will lose access straight away.` : `✅ Every approved user already has an active subscription.`,
+          !process.env.PAYSTACK_SECRET_KEY ? `⚠️ Paystack isn't set up (PAYSTACK_SECRET_KEY), so users can't pay yet — only subscriptions you give will work.` : '',
+        ].filter(Boolean).join('\n'), { inline_keyboard: [
+          ...(without ? [[b(`🎁 Give those ${without} users 7 days, then turn on`, 'subs giveall 7')]] : []),
+          [b('✅ Turn on now', 'subs toggle confirm')],
+          [b('Cancel', 'subs')],
+        ] });
+        return;
+      }
+      await subs.setPaidAccess(turningOn);
+      await reply(chatId, turningOn ? `🟢 *Paid access is ON.* Users without a subscription are asked to \`subscribe\`.` : `⚪ *Paid access is OFF.* Everyone approved can use the bot for free.`);
+      return handleSubsAdmin(chatId, []);
+    }
+    if (a === 'giveall') {
+      const days = parseInt(args[1], 10) || 7;
+      const n = await subs.giveAllWithout(days, { grantedBy: chatId });
+      await subs.setPaidAccess(true);
+      await reply(chatId, `🎁 Gave ${n} user${n === 1 ? '' : 's'} ${days} days. 🟢 Paid access is now ON.`);
+      return handleSubsAdmin(chatId, []);
+    }
+    if (a === 'plan') {
+      const p = subs.plan();
+      await send(chatId, [
+        `💵 *Your plan:* ${subs.priceLabel()}`,
+        ``,
+        `Tap to change, or type:`,
+        `\`subs price 5000\` · \`subs days 30\` · \`subs currency NGN\``,
+      ].join('\n'), { inline_keyboard: [
+        [b('✏️ Set the price', 'subs price')],
+        [b(`${p.days === 7 ? '✅ ' : ''}1 week`, 'subs days 7'), b(`${p.days === 30 ? '✅ ' : ''}1 month`, 'subs days 30'), b(`${p.days === 90 ? '✅ ' : ''}3 months`, 'subs days 90')],
+        subs.CURRENCIES.map(c => b(`${p.currency === c ? '✅ ' : ''}${c}`, `subs currency ${c}`)),
+        [b('💳 Back to Subscriptions', 'subs')],
+      ] });
+      return;
+    }
+    if (a === 'price') {
+      if (args[1]) { await subs.setPlan({ price: args[1] }); return handleSubsAdmin(chatId, ['plan']); }
+      await store.setJSON(awaitKey, { action: 'price' }); await store.cmd('EXPIRE', awaitKey, 600);
+      await reply(chatId, `✏️ Send the new price per period as a number, e.g. \`5000\` (currency: ${subs.plan().currency}).`);
+      return;
+    }
+    if (a === 'days' && args[1]) { await subs.setPlan({ days: args[1] }); return handleSubsAdmin(chatId, ['plan']); }
+    if (a === 'currency' && args[1]) { await subs.setPlan({ currency: args[1] }); return handleSubsAdmin(chatId, ['plan']); }
+
+    if (a === 'give') {
+      const target = args[1];
+      if (!target) {
+        const list = await getUsersByStatus('approved');
+        if (!list.length) { await reply(chatId, `No approved users yet.`); return; }
+        const rows = list.slice(0, 40).map(u => [b(formatName(u).slice(0, 40), `subs give ${u.chatId}`)]);
+        await send(chatId, `🎁 *Give a subscription* — who to?`, { inline_keyboard: [...rows, [b('Cancel', 'subs')]] });
+        return;
+      }
+      if (!isChatId(target)) { await reply(chatId, `❌ Unknown user.`); return; }
+      const how = (args[2] || '').toLowerCase();
+      if (how === 'date') {
+        await store.setJSON(awaitKey, { action: 'givedate', target }); await store.cmd('EXPIRE', awaitKey, 600);
+        await reply(chatId, `📅 Send the date their access should end, e.g. \`31/12/2026\`. It ends at midnight (Lagos time) that day.`);
+        return;
+      }
+      if (/^\d+$/.test(how)) { await giftDone(chatId, target, await subs.extend(target, Number(how), { grantedBy: chatId })); return; }
+      const u = await getUser(target);
+      const cur = await subs.getSub(target);
+      await send(chatId, [
+        `🎁 *${nameOf(u || { chatId: target })}*`,
+        cur.active ? `Has access until ${fmtDay(cur.paidUntil)} — extra time is added on top.` : `No active subscription.`,
+        ``,
+        `How long?`,
+      ].join('\n'), { inline_keyboard: [
+        [b('1 week', `subs give ${target} 7`), b('1 month', `subs give ${target} 30`), b('3 months', `subs give ${target} 90`)],
+        [b('6 months', `subs give ${target} 182`), b('1 year', `subs give ${target} 365`)],
+        [b('📅 Until a date I choose…', `subs give ${target} date`)],
+        [b('Cancel', 'subs')],
+      ] });
+      return;
+    }
+    if (a === 'end') {
+      const target = args[1];
+      if (!target) {
+        const rows = [];
+        for (const { user, sub } of await subs.listSubscribers()) if (sub.active) rows.push([b(`⛔ ${formatName(user).slice(0, 34)} (${fmtDay(sub.paidUntil)})`, `subs end ${user.chatId}`)]);
+        await send(chatId, rows.length ? `⛔ *End whose subscription?* (It ends immediately.)` : `No active subscriptions.`, { inline_keyboard: [...rows, [b('Cancel', 'subs')]] });
+        return;
+      }
+      await subs.revoke(target);
+      await reply(chatId, `⛔ Subscription ended for \`${target}\`.`);
+      return handleSubsAdmin(chatId, []);
+    }
+    if (a === 'list') {
+      const lines = [`👥 *Subscribers*`, ``];
+      for (const { user, sub } of await subs.listSubscribers()) {
+        lines.push(`${sub.active ? '🟢' : '⚪'} ${nameOf(user)} — ${sub.active ? `until ${fmtDay(sub.paidUntil)} (${sub.daysLeft}d)` : sub.paidUntil ? `ended ${fmtDay(sub.paidUntil)}` : 'never subscribed'}`);
+      }
+      if (lines.length === 2) lines.push('No approved users yet.');
+      await replyChunked(chatId, lines.join('\n'));
+      return;
+    }
+
+    // The panel
+    await store.del(awaitKey).catch(() => {});
+    const list = await subs.listSubscribers();
+    const active = list.filter(x => x.sub.active).length;
+    const on = subs.enabled();
+    await send(chatId, [
+      `💳 *Subscriptions*`,
+      ``,
+      `*Paid access:* ${on ? '🟢 ON — users need a subscription' : '⚪ OFF — the bot is free for approved users'}`,
+      `*Plan:* ${subs.priceLabel()}`,
+      `*Active subscriptions:* ${active} of ${list.length} approved user${list.length === 1 ? '' : 's'}`,
+      `*Payments (Paystack):* ${process.env.PAYSTACK_SECRET_KEY ? '✅ set up' : '⚠️ not set up — users can\'t pay yet'}`,
+    ].join('\n'), { inline_keyboard: [
+      [b(on ? '⚪ Turn paid access OFF' : '🟢 Turn paid access ON', 'subs toggle')],
+      [b('💵 Plan & price', 'subs plan'), b('🎁 Give a subscription', 'subs give')],
+      [b('👥 List subscribers', 'subs list'), b('⛔ End a subscription', 'subs end')],
+    ] });
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof subs.PaymentError ? err.message : esc(err.message)}`);
+  }
+}
+
 // ─── Paid access: subscribe / check / status ─────────────────────────────────
 async function handleSubscribe(chatId, args) {
   const sub = (args[0] || '').toLowerCase();
@@ -2292,6 +2449,7 @@ async function handleAutotrade(chatId, args, meta = {}) {
 
 // ─── Process one Telegram update ─────────────────────────────────────────────
 async function handleUpdate(body) {
+  await subs.loadSettings().catch(() => {});
   // ── Button taps ─────────────────────────────────────────────────────────
   if (body.callback_query) {
     const cq     = body.callback_query;

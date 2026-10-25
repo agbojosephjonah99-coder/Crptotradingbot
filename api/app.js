@@ -116,6 +116,7 @@ function parseBody(req) {
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   // Same-origin dashboard only: no CORS headers on purpose.
+  await subs.loadSettings().catch(() => {});
   const name = String(req.query?.action || '');
   if (PUBLIC[name]) return PUBLIC[name](req, res);
   const action = ACTIONS[name];

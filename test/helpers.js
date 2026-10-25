@@ -99,6 +99,7 @@ function resetEnv(extra = {}) {
   require('../src/services/positionStore')._resetMigrationCache();
   require('../src/services/profitTracker')._resetMigrationCache();
   require('../src/services/userService')._resetMigrationCache();
+  require('../src/services/subscriptionService')._resetSettingsCache();
 }
 
 // Silence expected warnings in test output

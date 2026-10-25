@@ -63,15 +63,18 @@ Send `/start` to @JijazyBot. Then try `buy SOL 150 2x` → `positions` → `sold
 
 ## 7. Paid access (optional)
 
-1. Paystack → Settings → API Keys & Webhooks:
-   - copy the **Secret key** (start with `sk_test_…` to try it with test cards);
-   - set **Webhook URL** to `https://crptotradingbot.vercel.app/paystack-webhook`.
-2. Vercel → Environment Variables:
-   - `PAYSTACK_SECRET_KEY` = your secret key
-   - `SUBSCRIPTION_PRICE` = e.g. `5000` · `SUBSCRIPTION_CURRENCY` = `NGN` · `SUBSCRIPTION_DAYS` = `30`
-   - `PAID_ACCESS_ENABLED` = `true` (only when you're ready, because unpaid users lose access straight away; give existing users time first with `grant ID 30`)
-3. Redeploy, open `/api/set-commands?key=…` once (adds `/account` and `/subscribe` to the menu), and send `subs` to see everyone's status.
-4. Test: from a non-admin account, `subscribe you@example.com` → pay with a Paystack test card → you're sent back to Telegram with "Payment received". Then swap to your `sk_live_…` key.
+Everything is done in the bot: **📋 MENU → 💳 Subscriptions** (admin only), or send `subs`.
+- **Paid access ON/OFF:** one button. Before switching on, it tells you how many users have no subscription and offers to give them 7 days first.
+- **💵 Plan & price:** price, length (1 week / 1 month / 3 months, or `subs days N`) and currency (NGN, GHS, ZAR, KES, USD).
+- **🎁 Give a subscription:** pick a user, then 1 week, 1 month, 3 months, 6 months, 1 year, or **📅 Until a date I choose** (type e.g. `31/12/2026`; access ends at midnight Lagos time). Or type `grant ID 31/12/2026` / `grant ID 30`.
+- **⛔ End a subscription** and **👥 List subscribers**.
+
+For users to pay by themselves, Paystack must be set up:
+1. Paystack → Settings → API Keys & Webhooks: copy the **Secret key** (`sk_test_…` to try with test cards) and set the **Webhook URL** to `https://crptotradingbot.vercel.app/paystack-webhook`.
+2. Vercel → Environment Variables: `PAYSTACK_SECRET_KEY` = your secret key. Redeploy.
+3. Test from a non-admin account: `subscribe you@example.com` → pay with a test card → back in Telegram with "Payment received". Then switch to your `sk_live_…` key.
+
+(The old `PAID_ACCESS_ENABLED` / `SUBSCRIPTION_*` Vercel variables still work as defaults, but the panel's settings take priority.)
 
 ## 8. Fixed IP for real Binance trading (Fixie)
 

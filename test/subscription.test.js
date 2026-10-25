@@ -184,3 +184,54 @@ test('app API: expired users get 402 except for account and payment actions', as
   assert.match(pay.body.data.url, /checkout\.paystack\.com/);
   assert.equal((await call('subscribe', { email: 'nope' })).statusCode, 400);
 });
+
+test('admin panel: turn paid access on with a button (warns + offers 7 free days), set the plan, give until a date', async () => {
+  resetEnv({ PAYSTACK_SECRET_KEY: SK });
+  delete process.env.PAID_ACCESS_ENABLED;
+  const net = mockNet({ price: 100 });
+  await approvedUser('2000');
+  await approvedUser('3000');
+  const subs = require('../src/services/subscriptionService');
+  const tap = (data) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data, from: {}, message: { message_id: 1, chat: { id: 1000 }, text: 'x' } } } }), fakeRes());
+  const type = (text) => say('1000', text);
+
+  await type('subs');
+  assert.match(net.sent.at(-1).text, /Paid access:\* ⚪ OFF/);
+  await tap('subs toggle');
+  assert.match(net.sent.at(-1).text, /2 users have no subscription/);
+  assert.equal(subs.enabled(), false, 'not switched on until confirmed');
+  await tap('subs giveall 7');
+  assert.equal(subs.enabled(), true);
+  assert.equal((await subs.getSub('2000')).daysLeft, 7);
+
+  // Plan
+  await tap('subs days 90');
+  await type('subs price 12000');
+  await tap('subs currency USD');
+  assert.equal(subs.priceLabel(), 'USD 12,000 / 90 days');
+
+  // Give until a typed date
+  await tap('subs give 3000');
+  assert.match(net.sent.at(-1).text, /How long\?/);
+  await tap('subs give 3000 date');
+  await type('31/12/2099');
+  assert.equal((await subs.getSub('3000')).paidUntil, '2099-12-31T22:59:59.000Z');
+  assert.ok(net.sent.some(m => m.chat_id == '3000' && /given access to the bot until 31 Dec 2099/.test(m.text)));
+
+  // A bad date is refused and can be retried
+  await tap('subs give 3000 date');
+  await type('31/02/2099');
+  assert.match(net.sent.at(-1).text, /date like 31\/12\/2026/);
+  await type('01/01/2100');
+  assert.equal((await subs.getSub('3000')).paidUntil, '2100-01-01T22:59:59.000Z');
+
+  // grant with a date works too; end a subscription
+  await type('grant 2000 15/06/2099');
+  assert.equal((await subs.getSub('2000')).paidUntil, '2099-06-15T22:59:59.000Z');
+  await tap('subs end 2000');
+  assert.equal((await subs.getSub('2000')).active, false);
+
+  // Off again with one tap
+  await tap('subs toggle');
+  assert.equal(subs.enabled(), false);
+});
