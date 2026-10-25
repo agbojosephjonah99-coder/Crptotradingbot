@@ -66,41 +66,37 @@ const PERSISTENT_MENU = {
   input_field_placeholder:  'Tap MENU or type a command...',
 };
 
-// ─── Inline command buttons ───────────────────────────────────────────────────
-const INLINE_MENU = {
-  inline_keyboard: [
-    [
-      { text: '🔍 Scan Now',       callback_data: 'scan'        },
-      { text: '🌕 Moonshots',      callback_data: 'moonshots'   },
-    ],
-    [
-      { text: '🚀 New Listings',   callback_data: 'newlistings' },
-      { text: '📊 My Positions',   callback_data: 'positions'   },
-    ],
-    [
-      { text: '💰 Buy a Coin',     callback_data: 'buy_help'    },
-      { text: '💸 Record a Sale',  callback_data: 'sold_help'   },
-    ],
-    [
-      { text: '💼 Split Capital',  callback_data: 'split_help'  },
-      { text: '📈 My Profits',     callback_data: 'profit'      },
-    ],
-    [
-      { text: '🎮 Practice',       callback_data: 'practice'    },
-      { text: '🚀 Go live',        callback_data: 'golive'      },
-    ],
-    [
-      { text: '💰 My Binance balance', callback_data: 'balance' },
-    ],
-    [
-      { text: '🖥 My Dashboard',   callback_data: 'dashboard'   },
-    ],
-    [
-      { text: '📖 Help',           callback_data: 'help'        },
-      { text: '📚 User Manual',    callback_data: 'manual'      },
-    ],
-  ],
-};
+// ─── Inline command buttons (every feature, grouped) ─────────────────────────
+const b = (text, data) => ({ text, callback_data: data });
+const MENU_ROWS = [
+  // Your trades
+  [b('📊 My Positions', 'positions'),     b('💰 Add a Buy', 'buy_help')],
+  [b('🧾 Record a Sale', 'sold_help'),     b('🗑 Stop Tracking', 'sell_help')],
+  [b('🛡 Change a Stop', 'setstop_help'),  b('🔎 Check a Coin', 'check_help')],
+  [b('📈 My Profits', 'profit'),           b('💼 Split Capital', 'split_help')],
+  // Automation & practice
+  [b('🤖 Auto-trading', 'golive'),         b('🛒 Auto-buy', 'autobuy')],
+  [b('💰 Binance Balance', 'balance'),     b('🎮 Practice', 'practice')],
+  // Market
+  [b('🔍 Scan Now', 'scan'),               b('🌕 Moonshots', 'moonshots')],
+  [b('🚀 New Listings', 'newlistings'),    b('🖥 My Dashboard', 'dashboard')],
+  // Account & help
+  [b('💳 My Account', 'account'),          b('📖 All Commands', 'help')],
+  [b('📚 User Manual', 'manual')],
+];
+const ADMIN_ROWS = [
+  [b('⏳ Pending', 'pending'),   b('👥 Users', 'users')],
+  [b('💳 Subscribers', 'subs'),  b('🔗 Invite Links', 'invite')],
+];
+const INLINE_MENU = { inline_keyboard: MENU_ROWS };
+const menuFor = (chatId) => ({ inline_keyboard: isAdmin(chatId) ? [...MENU_ROWS, ...ADMIN_ROWS] : MENU_ROWS });
+
+const MENU_TEXT = (admin) => [
+  `*📋 Menu* — tap any button`,
+  ``,
+  `*Row 1–4:* your trades · *5–6:* auto-trading, practice & balance`,
+  `*7–8:* market scans & dashboard · *9–10:* account & help${admin ? `\n*Last rows:* admin` : ''}`,
+].join('\n');
 
 // ─── Send helpers (shared Telegram client, Markdown-safe) ───────────────────
 async function send(chatId, text, markup) {
@@ -108,11 +104,11 @@ async function send(chatId, text, markup) {
 }
 
 async function reply(chatId, text, showInline = false) {
-  return send(chatId, text, showInline ? INLINE_MENU : PERSISTENT_MENU);
+  return send(chatId, text, showInline ? menuFor(chatId) : PERSISTENT_MENU);
 }
 
 async function replyChunked(chatId, text, showInline = false) {
-  return tg.sendLong(chatId, text, { markup: showInline ? INLINE_MENU : PERSISTENT_MENU });
+  return tg.sendLong(chatId, text, { markup: showInline ? menuFor(chatId) : PERSISTENT_MENU });
 }
 
 const answerCallback = tg.answerCallback;
@@ -440,7 +436,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
   // ── MENU ─────────────────────────────────────────────────────────────────
   if (cmd === 'menu' || text.trim() === '📋 MENU') {
-    await send(chatId, `*What would you like to do?*\n\nTap a button below:`, INLINE_MENU);
+    await send(chatId, MENU_TEXT(isAdmin(chatId)), menuFor(chatId));
     return;
   }
 
@@ -522,43 +518,39 @@ async function handleMessage(chatId, text, from, meta = {}) {
   // ── HELP ─────────────────────────────────────────────────────────────────
   if (cmd === 'help') {
     await reply(chatId, [
-      `🤖 *CryptoBot V2 — Commands*`,
-      ``,
-      `━━━ *SCAN & SIGNALS* ━━━`,
-      `\`scan\` — small-cap coins with strong momentum now`,
-      `\`moonshots\` — same as scan (high-risk small caps)`,
-      `\`newlistings\` — new coins with contract addresses`,
+      `🤖 *All commands* — or just tap *📋 MENU*`,
       ``,
       `━━━ *YOUR TRADES* ━━━`,
-      `\`buy SOL 92.50\` — track a buy`,
-      `\`buy SOL 92.50 10%\` — alert at 10% profit`,
-      `\`buy SOL 92.50 2x\` — alert at 2X`,
-      `\`buy SOL 92.50 5x\` — alert at 5X`,
-      `\`sell SOL\` — remove after you exit`,
-      `\`positions\` — view all open trades`,
-      `\`dashboard\` — open your personal web dashboard`,
-      `\`check SOL\` — instant advice`,
-      `\`buy SOL 92.50 2x sl 88\` — buy with your own stop`,
+      `\`buy SOL 92.50\` — track a buy · add a quantity: \`buy SOL 92.50 2\``,
+      `\`buy SOL 92.50 2x\` / \`10%\` — with a target · \`sl 88\` — your own stop`,
       `\`buy PEPE 0.0000098 ex mexc\` — coin on another exchange`,
-      `   (Binance, Bybit, OKX, Gate, MEXC, KuCoin, Kraken)`,
-      `\`setstop SOL 90\` — change your stop`,
+      `\`positions\` — your open trades · \`check SOL\` — live advice`,
+      `\`setstop SOL 90\` — change a stop`,
+      `\`sold SOL 92.50 110\` — record a sale (tracks profit)`,
+      `\`sell SOL\` — stop tracking (nothing recorded)`,
+      `\`profit\` — your stats · \`split 100\` — split capital across top coins`,
       ``,
-      subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : '',
-      subs.enabled() ? `` : '',
-      `━━━ *PRACTICE & GO LIVE* ━━━`,
-      `\`practice\` — trade with $10,000 play money at real prices`,
-      `\`practice buy SOL 100\` — spend $100 of play money on SOL`,
-      `\`golive\` — step-by-step: connect your real Binance account`,
-      `\`balance\` — what's in your Binance Spot wallet`,
-      `\`autobuy\` — let the bot pick and buy coins by itself (practice first)`,
+      `━━━ *AUTO-TRADING (real money)* ━━━`,
+      `\`golive\` — connect Binance step by step, then turn on auto-trading`,
+      `\`golive off\` — stop the bot buying and selling`,
+      `\`balance\` — your Binance Spot wallet`,
+      `\`autobuy\` — the bot's buying strategy, test results and settings`,
       ``,
-      `━━━ *AUTOMATED EXITS (optional)* ━━━`,
-      `\`autotrade\` — let the bot place your stops and take-profits on Binance`,
+      `━━━ *PRACTICE (play money)* ━━━`,
+      `\`practice\` — your $10,000 practice account`,
+      `\`practice buy SOL 100\` · \`practice sell SOL\` · \`practice reset\``,
+      `\`autobuy on\` / \`off\` — let the bot buy with your play money`,
       ``,
-      `━━━ *AUTO ALERTS* ━━━`,
-      `🔴 Stop Loss | 🟢 TP1/TP2/TP3`,
-      `🎯 2X/5X Target | ⚪ Hold`,
-    ].join('\n'));
+      `━━━ *MARKET* ━━━`,
+      `\`scan\` · \`moonshots\` — small caps with strong momentum (high risk)`,
+      `\`newlistings\` — new coins with contract addresses`,
+      ``,
+      `━━━ *ACCOUNT* ━━━`,
+      `\`dashboard\` — your web dashboard · \`dashboard logout\` — sign out everywhere`,
+      subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : `\`account\` — your access`,
+      `\`manual\` — the full user guide`,
+      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` · \`grant ID DAYS\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`` : '',
+    ].filter(x => x !== '').join('\n'));
     return;
   }
 
@@ -1550,6 +1542,27 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  if (cmd === 'setstop_guide') {
+    await reply(chatId, [
+      `🛡 *Change the stop on a position*`,
+      ``,
+      `\`setstop SOL 88.5\` — new stop for SOL`,
+      `\`setstopid SOLUSDT:1715123456789 88.5\` — one specific entry (IDs are in \`positions\`)`,
+      ``,
+      `The stop must be below the current price. With auto-trading on, the bot moves your Binance stop order too.`,
+    ].join('\n'));
+    return;
+  }
+
+  if (cmd === 'check_guide') {
+    const coins = [...new Set(Object.values(await getAllPositions(chatId)).map(p => p.symbol.replace(/USDT$/, '')))];
+    if (!coins.length) { await reply(chatId, `🔎 *Check a coin*\n\nYou have no open positions yet. Add one: \`buy SOL 150\``); return; }
+    const rows = [];
+    for (let i = 0; i < coins.length && i < 24; i += 3) rows.push(coins.slice(i, i + 3).map(c => b(`🔎 ${c}`, `check ${c}`)));
+    await send(chatId, `🔎 *Check a coin* — live price, P&L and advice. Tap one:`, { inline_keyboard: rows });
+    return;
+  }
+
   if (cmd === 'split_guide') {
     await reply(chatId, [
       `💼 *Split Capital Across Best Coins*`,
@@ -2163,7 +2176,7 @@ async function handleUpdate(body) {
     if (!chatId) return;
 
     // Tapping a button in the main menu removes the menu message (keeps the chat tidy)
-    if (cq.message?.message_id && /^What would you like to do\?/.test(cq.message.text || '')) {
+    if (cq.message?.message_id && /^(📋 Menu|What would you like to do\?)/.test(cq.message.text || '')) {
       await tg.call('deleteMessage', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
     }
 
@@ -2183,6 +2196,8 @@ async function handleUpdate(body) {
       sell_help:   'sell_guide',
       sold_help:   'sold_guide',
       split_help:  'split_guide',
+      setstop_help: 'setstop_guide',
+      check_help:  'check_guide',
       profit:      'profit',
       manual:      'manual',
     };

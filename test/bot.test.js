@@ -76,7 +76,7 @@ test('/command@BotName works in groups', async () => {
   resetEnv();
   const net = mockNet({ price: 101 });
   await say('/help@TestBot');
-  assert.match(net.sent[0].text, /Commands/);
+  assert.match(net.sent[0].text, /All commands/);
 });
 
 test('unapproved users are blocked from commands', async () => {

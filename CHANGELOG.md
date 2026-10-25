@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.14.0 — A menu with everything
+
+- **📋 MENU now has a button for every feature,** grouped:
+  - **Your trades:** My Positions · Add a Buy · Record a Sale · Stop Tracking · Change a Stop · Check a Coin · My Profits · Split Capital
+  - **Automation:** Auto-trading · Auto-buy · Binance Balance · Practice
+  - **Market:** Scan Now · Moonshots · New Listings · My Dashboard
+  - **Account:** My Account · All Commands · User Manual
+  - **Admin (only you see these):** Pending · Users · Subscribers · Invite Links
+- "Check a Coin" shows your own coins as buttons, so there's nothing to type. "Change a Stop" explains `setstop`.
+- `help` is rewritten as "All commands", grouped the same way, with an admin section only you see.
+- The menu message is still removed after you tap one of its buttons.
+- Tests: 129.
+
 ## 2.13.0 — Auto-trading button, daily profit, tidier chat, readable dashboard
 
 - **One button after connecting Binance: "🤖 Turn on auto-trading".** It turns on selling (stop orders, take-profits, trailing stops) **and** buying (the daily auto-buy), once the admin has opened buying. `golive off` turns both off and cancels the bot's stop orders. `golive` shows whether auto-trading is on, selling only, or off.

@@ -209,3 +209,26 @@ test('wizard step 3 lists each IP on its own line with "one at a time"; a key mi
     await assert.rejects(require('../src/services/tradingAccounts').connect('1000', { apiKey: KEY, apiSecret: SECRET, live: true }), /ALL the bot's IPs/);
   } finally { delete process.env.TRADING_IPS; delete process.env.FIXIE_URL; }
 });
+
+test('menu: every feature has a button; admin rows only for the admin; menu text matches the delete rule', async () => {
+  const { net: n } = setup(100);
+  const say = (id, text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id }, from: {}, text } } }), fakeRes());
+  await say(1000, 'menu');
+  const admin = n.sent.at(-1);
+  const data = admin.reply_markup.inline_keyboard.flat().map(x => x.callback_data);
+  for (const d of ['positions', 'buy_help', 'sold_help', 'sell_help', 'setstop_help', 'check_help', 'profit', 'split_help', 'golive', 'autobuy', 'balance', 'practice', 'scan', 'moonshots', 'newlistings', 'dashboard', 'account', 'help', 'manual', 'pending', 'users', 'subs', 'invite']) {
+    assert.ok(data.includes(d), `menu has ${d}`);
+  }
+  assert.match(admin.text, /^\*📋 Menu\*/);
+
+  const users = require('../src/services/userService');
+  await users.registerUser({ chatId: '2000', firstName: 'Ada' });
+  await users.approveUser('2000');
+  await say(2000, 'menu');
+  const userData = n.sent.at(-1).reply_markup.inline_keyboard.flat().map(x => x.callback_data);
+  assert.ok(!userData.includes('pending') && !userData.includes('subs'), 'no admin buttons for users');
+
+  await require('../src/services/positionStore').addPosition({ chatId: '1000', symbol: 'SOLUSDT', buyPrice: 100, exchange: 'binance' });
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data: 'check_help', from: {}, message: { message_id: 9, chat: { id: 1000 }, text: '📋 Menu — tap any button' } } } }), fakeRes());
+  assert.deepEqual(n.sent.at(-1).reply_markup.inline_keyboard.flat().map(x => x.callback_data), ['check SOL']);
+});
