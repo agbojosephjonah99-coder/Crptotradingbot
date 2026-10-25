@@ -188,3 +188,24 @@ test('app API: practice summary / buy / sell / reset', async () => {
   assert.equal((await call('practice-sell', { positionId: id })).statusCode, 200);
   assert.equal((await call('practice-reset', {})).body.data.cash, 10_000);
 });
+
+test('wizard step 3 lists each IP on its own line with "one at a time"; a key missing one IP is refused', async () => {
+  const { net: n } = setup(100);
+  process.env.TRADING_IPS = '54.1.2.3,54.4.5.6';
+  process.env.FIXIE_URL = 'http://fixie:x@eu.usefixie.com:80';
+  try {
+    await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'golive 3' } } }), fakeRes());
+    const t = n.sent.at(-1).text;
+    assert.match(t, /Paste IP 1: `54\.1\.2\.3` → tap \*Confirm\*/);
+    assert.match(t, /Paste IP 2: `54\.4\.5\.6`/);
+    assert.match(t, /ONE AT A TIME — no commas/);
+
+    // Every other request is rejected (key only allows one of the two IPs)
+    let k = 0;
+    axios.request = async ({ url }) => {
+      if (url.includes('/api/v3/account')) { if (k++ % 2) { const e = new Error('x'); e.response = { status: 401, data: { code: -2015, msg: 'Invalid API-key, IP, or permissions for action.' } }; throw e; } return { data: { canTrade: true, balances: [] } }; }
+      return { data: { enableWithdrawals: false, enableSpotAndMarginTrading: true } };
+    };
+    await assert.rejects(require('../src/services/tradingAccounts').connect('1000', { apiKey: KEY, apiSecret: SECRET, live: true }), /ALL the bot's IPs/);
+  } finally { delete process.env.TRADING_IPS; delete process.env.FIXIE_URL; }
+});

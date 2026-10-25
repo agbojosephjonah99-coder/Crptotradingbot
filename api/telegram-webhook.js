@@ -1826,9 +1826,14 @@ async function handleGoLive(chatId, args) {
       `1. Tap your *profile icon → Account → API Management*`,
       `2. *Create API* → choose *System generated* → name it \`JijazyBot\` → confirm with your codes`,
       `3. Tap *Edit restrictions*:`,
-      `   • IP access: choose *Restrict access to trusted IPs only* and add:`,
-      ...(tradingIps().length ? tradingIps().map(ip => `      \`${ip}\``) : [`      _(the bot's IP addresses aren't set up yet — ask the admin)_`]),
-      `   • then ✅ tick *Enable Spot & Margin Trading*`,
+      `   • IP access: choose *Restrict access to trusted IPs only*`,
+      ...(tradingIps().length
+        ? [
+          ...tradingIps().map((ip, k) => `   • Paste IP ${k + 1}: \`${ip}\` → tap *Confirm*`),
+          `     _(tap an IP above to copy it. Add them ONE AT A TIME — no commas. You need ${tradingIps().length === 1 ? 'it' : `all ${tradingIps().length}`}: with one missing, about half the bot's orders would be rejected.)_`,
+        ]
+        : [`     _(the bot's IP addresses aren't set up yet — ask the admin)_`]),
+      `   • Check ${tradingIps().length > 1 ? 'both IPs show' : 'the IP shows'} in the list, then ✅ tick *Enable Spot & Margin Trading*`,
       `   • leave ❌ *Enable Withdrawals* OFF (the bot refuses keys that can withdraw)`,
       `4. *Save*. You'll see two codes: *API Key* and *Secret Key*. Copy both — the Secret Key is shown only once.`,
       ``,

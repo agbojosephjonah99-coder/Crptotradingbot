@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.11.1 — Clearer IP step
+
+- Go-live step 3 now lists each IP on its own line: "Paste IP 1 → tap Confirm, Paste IP 2 → tap Confirm". It says to add them one at a time (no commas), that every IP is needed, and to check they all show before ticking Spot trading.
+- Connecting a real key now checks it 5 times through the fixed-IP proxy. A key missing one of the bot's IPs is refused with a plain explanation, instead of failing randomly later.
+- Lab: a strategy that made a little money but not enough now says so, instead of "lost money".
+
 ## 2.11.0 — Auto-buy (practice now, live only after proven results)
 
 - **The bot can choose and buy coins by itself.** Once a day just after the daily close (00:05 UTC), it checks the chosen strategy on 15 large coins (BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, TRX, NEAR, ATOM, UNI) and buys the ones that signal. Exits use a trailing stop that only moves up.

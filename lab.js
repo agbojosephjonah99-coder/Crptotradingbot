@@ -60,11 +60,11 @@ const r = (x) => (x === null || x === undefined ? '—' : `${x >= 0 ? '+' : ''}$
   for (const f of out.families) {
     if (!f.chosen) { console.log(`${f.name.padEnd(20)}${'—'.padEnd(36)}${f.why}`); continue; }
     const t = f.test;
-    console.log(`${f.name.padEnd(20)}${f.chosen.id.padEnd(36)}${String(t.trades).padStart(6)}  ${String(t.winRatePct ?? '—').padStart(5)}  ${r(t.expectancyR).padStart(7)}  ${JSON.stringify(t.expectancyRange95).padEnd(17)}  ${String(t.profitFactor ?? '—').padStart(4)}  ${pct(f.portfolioTest.returnPct).padStart(8)} (max DD ${f.portfolioTest.maxDrawdownPct}%)  ${f.verdict}`);
+    console.log(`${f.name.padEnd(24)}${f.chosen.id.padEnd(32)}${String(t.trades).padStart(6)}  ${String(t.winRatePct ?? '—').padStart(5)}  ${r(t.expectancyR).padStart(7)}  ${JSON.stringify(t.expectancyRange95).padEnd(17)}  ${String(t.profitFactor ?? '—').padStart(4)}  ${pct(f.portfolioTest.returnPct).padStart(8)} (max DD ${f.portfolioTest.maxDrawdownPct}%)  ${f.verdict}`);
   }
   console.log(`\nBTC buy & hold over the unseen period: ${pct(out.btcBuyHoldTestPct)}`);
   if (out.pick) {
-    console.log(`\nPICKED (best on the training data): ${out.pick.name} — ${out.pick.label}`);
+    console.log(`\nPICKED (best on the training data): ${out.pick.label}`);
     console.log(`VERDICT: ${out.verdict} — ${out.pick.why}`);
   } else {
     console.log('\nVERDICT: FAIL — no strategy had enough trades');

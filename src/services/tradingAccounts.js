@@ -63,6 +63,19 @@ async function connect(chatId, { apiKey, apiSecret, live = false }) {
   }
   if (account.canTrade === false) throw new TradingError('This key can\'t trade. Enable "Spot & Margin Trading" for it on Binance.');
 
+  // Behind the fixed-IP proxy, requests leave from either of its IPs at random.
+  // Repeat the check a few times so a key missing one IP is caught now, not mid-trade.
+  if (live && require('../lib/binanceTrade').proxyConfig()) {
+    for (let k = 0; k < 5; k++) {
+      try { await c.account(); } catch (err) {
+        if (err instanceof BinanceError && err.code === -2015) {
+          throw new TradingError('Your key works from one of the bot\'s IP addresses but not the other. On Binance, edit the key and make sure ALL the bot\'s IPs are in the list (add them one at a time), then try again.');
+        }
+        throw new TradingError(`Binance error: ${err.message}`);
+      }
+    }
+  }
+
   if (live) {
     const r = await c.apiRestrictions().catch(err => { throw new TradingError(`Couldn't read the key's permissions: ${err.message}`); });
     if (r?.enableWithdrawals) throw new TradingError('Refused: this key can WITHDRAW funds. Create a key with withdrawals disabled — the bot never needs them.');

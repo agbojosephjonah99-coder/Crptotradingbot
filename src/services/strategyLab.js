@@ -96,7 +96,9 @@ function verdictOf(st) {
   const lo = st.expectancyRange95?.[0];
   if (st.expectancyR > 0.05 && (st.profitFactor ?? 0) > 1.2 && lo !== null && lo > 0) return { verdict: 'PASS', why: 'made money after costs on data it never saw, and the result is unlikely to be luck' };
   if (st.expectancyR > 0.05 && (st.profitFactor ?? 0) > 1.1) return { verdict: 'PROMISING', why: 'made money after costs on unseen data, but the result could still be luck' };
-  return { verdict: 'FAIL', why: 'lost money after costs on data it never saw' };
+  return { verdict: 'FAIL', why: st.expectancyR > 0
+    ? `made only ${st.expectancyR}R per trade after costs on data it never saw (profit factor ${st.profitFactor}) — too little to rely on`
+    : 'lost money after costs on data it never saw' };
 }
 
 /**
