@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.19.0 — Flutterwave payments
+
+- **Flutterwave** added next to Paystack (Standard checkout, v3 API): cards, bank transfer and USSD.
+  - If both are set up, `subscribe` asks "How would you like to pay?" with 💳 Pay with Flutterwave / 💳 Pay with Paystack. If only one is set up, the bot goes straight to it. The email is asked once and reused.
+  - The same safety rules apply: a payment only counts after **Flutterwave's verify API** confirms it was successful, for the right amount (in naira) and currency, for a payment link this bot made for that user. Each payment is credited once, even if the return link, the webhook and `subscribe check` all arrive.
+  - Webhook at `/flutterwave-webhook`. If `FLW_SECRET_HASH` is set, requests without the matching `verif-hash` header are ignored.
+  - The return link `/paid` works for both providers.
+- The admin panel shows which payment providers are set up.
+- New Vercel variables: `FLW_SECRET_KEY`, `FLW_SECRET_HASH` (see SETUP.md step 7).
+- Tests: 141.
+
 ## 2.18.0 — Subscriptions panel for the admin
 
 - **💳 Subscriptions** (admin menu button, or `subs`). Everything is in the bot, with no Vercel variables needed:

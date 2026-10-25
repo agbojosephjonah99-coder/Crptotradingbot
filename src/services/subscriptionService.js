@@ -4,7 +4,7 @@
  * active subscription to use the bot and dashboard and to get position alerts.
  * The admin never pays. The admin can give free time with `grant`.
  *
- * Payments: Paystack. A payment only counts after Paystack's verify API says
+ * Payments: Paystack and/or Flutterwave (whichever has a secret key set). A payment only counts after Paystack's verify API says
  * it succeeded for the right amount and currency (the webhook and the return
  * link are just triggers to check). Each payment reference is credited once.
  *
@@ -156,7 +156,8 @@ async function status(chatId) {
     daysLeft: s.daysLeft,
     email: s.email,
     price: priceLabel(),
-    paymentsReady: !!process.env.PAYSTACK_SECRET_KEY,
+    paymentsReady: providers().length > 0,
+    providers: providers(),
   };
 }
 
@@ -179,27 +180,77 @@ function paystack(method, path, data) {
     .catch(err => { throw new PaymentError(`Paystack: ${err?.response?.data?.message || err.message}`); });
 }
 
+// ─── Flutterwave (v3 Standard checkout) ──────────────────────────────────────
+const FLW = 'https://api.flutterwave.com/v3';
+function flutterwave(method, path, data) {
+  const key = process.env.FLW_SECRET_KEY;
+  if (!key) throw new PaymentError('Flutterwave is not set up yet (admin: add FLW_SECRET_KEY).');
+  return axios.request({ method, url: `${FLW}${path}`, data, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 15000 })
+    .then(r => r.data)
+    .catch(err => { throw new PaymentError(`Flutterwave: ${err?.response?.data?.message || err.message}`); });
+}
+
+const PROVIDER_NAMES = { flutterwave: 'Flutterwave', paystack: 'Paystack' };
+/** Payment providers that are set up, in the order offered to users. */
+function providers() {
+  const out = [];
+  if (process.env.FLW_SECRET_KEY) out.push('flutterwave');
+  if (process.env.PAYSTACK_SECRET_KEY) out.push('paystack');
+  return out;
+}
+const providerOf = (reference) => (String(reference).startsWith('cbf_') ? 'flutterwave' : 'paystack');
+
 const validEmail = (e) => /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,}$/i.test(String(e || '').trim());
 
 /** Create a Paystack payment link for one period. */
-async function startCheckout(chatId, { email, callbackUrl }) {
+async function startCheckout(chatId, { email, callbackUrl, provider = null }) {
   await loadSettings();
   const s = await getSub(chatId);
   email = String(email || s.email || '').trim().toLowerCase();
   if (!validEmail(email)) throw new PaymentError('Send your email for the receipt, e.g. `subscribe you@example.com`');
+  const available = providers();
+  if (!available.length) throw new PaymentError('Payments are not set up yet — ask the admin.');
+  const via = provider && available.includes(provider) ? provider : available[0];
   const p = plan();
-  const reference = `cb_${chatId}_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
-  const r = await paystack('POST', '/transaction/initialize', {
-    email, amount: p.amountMinor, currency: p.currency, reference,
-    callback_url: callbackUrl,
-    metadata: { chatId: String(chatId), days: p.days, custom_fields: [{ display_name: 'Telegram ID', variable_name: 'chat_id', value: String(chatId) }] },
-  });
-  if (!r?.status || !r.data?.authorization_url) throw new PaymentError('Paystack did not return a payment link — try again.');
+  const tail = `${chatId}_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+  let reference, url;
+
+  if (via === 'flutterwave') {
+    reference = `cbf_${tail}`;
+    const r = await flutterwave('POST', '/payments', {
+      tx_ref: reference, amount: p.price, currency: p.currency, redirect_url: callbackUrl,
+      customer: { email }, meta: { chatId: String(chatId), days: p.days },
+      customizations: { title: 'Crypto bot subscription', description: `${p.days} days of access` },
+    });
+    url = r?.data?.link;
+    if (r?.status !== 'success' || !url) throw new PaymentError('Flutterwave did not return a payment link — try again.');
+  } else {
+    reference = `cb_${tail}`;
+    const r = await paystack('POST', '/transaction/initialize', {
+      email, amount: p.amountMinor, currency: p.currency, reference,
+      callback_url: callbackUrl,
+      metadata: { chatId: String(chatId), days: p.days, custom_fields: [{ display_name: 'Telegram ID', variable_name: 'chat_id', value: String(chatId) }] },
+    });
+    url = r?.data?.authorization_url;
+    if (!r?.status || !url) throw new PaymentError('Paystack did not return a payment link — try again.');
+  }
   await store.pipeline([
     ['SET', `cryptobot:payref:${reference}`, String(chatId), 'EX', 7 * 86400],
     ['HSET', subKey(chatId), 'email', email, 'lastRef', reference],
   ]);
-  return { url: r.data.authorization_url, reference, price: priceLabel() };
+  return { url, reference, provider: via, providerName: PROVIDER_NAMES[via], price: priceLabel() };
+}
+
+/** Ask the provider what happened to a payment → { ok, paidMajor, currency, paidAt, chatIdInMeta, status } */
+async function verifyWithProvider(reference) {
+  if (providerOf(reference) === 'flutterwave') {
+    const r = await flutterwave('GET', `/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`);
+    const d = r?.data || {};
+    return { ok: d.status === 'successful' && d.tx_ref === reference, status: d.status, paidMajor: Number(d.amount), currency: d.currency, paidAt: d.created_at, chatIdInMeta: d.meta?.chatId };
+  }
+  const r = await paystack('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
+  const d = r?.data || {};
+  return { ok: d.status === 'success', status: d.status, paidMajor: Number(d.amount) / 100, currency: d.currency, paidAt: d.paid_at, chatIdInMeta: d.metadata?.chatId };
 }
 
 /**
@@ -214,14 +265,13 @@ async function confirmPayment(reference) {
   const owner = await store.cmd('GET', `cryptobot:payref:${reference}`);
   if (!owner) return { credited: false, reason: 'unknown reference' };
 
-  const r = await paystack('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
-  const d = r?.data || {};
-  if (d.status !== 'success') return { credited: false, chatId: owner, reason: `payment ${d.status || 'not found'}` };
+  const v = await verifyWithProvider(reference);
+  if (!v.ok) return { credited: false, chatId: owner, reason: `payment ${v.status || 'not found'}` };
   const p = plan();
-  if (String(d.currency).toUpperCase() !== p.currency || Number(d.amount) < p.amountMinor) {
-    return { credited: false, chatId: owner, reason: `paid ${d.currency} ${Number(d.amount) / 100}, expected ${p.currency} ${p.price}` };
+  if (String(v.currency).toUpperCase() !== p.currency || !(v.paidMajor >= p.price - 1e-9)) {
+    return { credited: false, chatId: owner, reason: `paid ${v.currency} ${v.paidMajor}, expected ${p.currency} ${p.price}` };
   }
-  if (d.metadata?.chatId && String(d.metadata.chatId) !== String(owner)) return { credited: false, reason: 'reference belongs to another user' };
+  if (v.chatIdInMeta && String(v.chatIdInMeta) !== String(owner)) return { credited: false, reason: 'reference belongs to another user' };
 
   // Credit once, even if the webhook, the return link and `subscribe check` all arrive together
   if ((await store.cmd('SET', `cryptobot:paidref:${reference}`, '1', 'NX')) !== 'OK') {
@@ -229,8 +279,8 @@ async function confirmPayment(reference) {
   }
   const paidUntil = await extend(owner, p.days, { reference });
   await store.cmd('RPUSH', 'cryptobot:payments', JSON.stringify({
-    reference, chatId: owner, amount: Number(d.amount) / 100, currency: d.currency, days: p.days,
-    paidAt: d.paid_at || new Date().toISOString(), paidUntil,
+    reference, provider: providerOf(reference), chatId: owner, amount: v.paidMajor, currency: v.currency, days: p.days,
+    paidAt: v.paidAt || new Date().toISOString(), paidUntil,
   }));
   return { credited: true, chatId: owner, paidUntil };
 }
@@ -260,6 +310,24 @@ async function handleWebhook(rawBody, signature) {
   // nothing is credited unless Paystack's verify API confirms the payment.
   if (!event || event.event !== 'charge.success' || !event.data?.reference) return { ignored: true, sigOk };
   return { sigOk, ...(await confirmPayment(event.data.reference)) };
+}
+
+/**
+ * Flutterwave webhook. If FLW_SECRET_HASH is set (Flutterwave dashboard →
+ * Webhooks → Secret hash), the `verif-hash` header must match. Either way,
+ * nothing is credited unless Flutterwave's verify API confirms the payment.
+ */
+async function handleFlutterwaveWebhook(body, verifHash) {
+  const expected = process.env.FLW_SECRET_HASH;
+  if (expected) {
+    const ok = !!verifHash && verifHash.length === expected.length && crypto.timingSafeEqual(Buffer.from(verifHash), Buffer.from(expected));
+    if (!ok) return { ignored: true, reason: 'bad verif-hash' };
+  }
+  let event = body;
+  if (typeof body === 'string') { try { event = JSON.parse(body); } catch { event = null; } }
+  const ref = event?.data?.tx_ref || event?.txRef;
+  if (!ref || !String(ref).startsWith('cbf_')) return { ignored: true };
+  return confirmPayment(ref);
 }
 
 /**
@@ -294,7 +362,7 @@ async function listSubscribers() {
 }
 
 module.exports = {
-  PaymentError, enabled, plan, priceLabel, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
+  PaymentError, enabled, plan, priceLabel, providers, PROVIDER_NAMES, handleFlutterwaveWebhook, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
   startCheckout, confirmPayment, extend, revoke, handleWebhook, sendReminders, listSubscribers, validEmail,
 };
 

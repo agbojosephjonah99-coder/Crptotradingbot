@@ -69,7 +69,15 @@ Everything is done in the bot: **📋 MENU → 💳 Subscriptions** (admin only)
 - **🎁 Give a subscription:** pick a user, then 1 week, 1 month, 3 months, 6 months, 1 year, or **📅 Until a date I choose** (type e.g. `31/12/2026`; access ends at midnight Lagos time). Or type `grant ID 31/12/2026` / `grant ID 30`.
 - **⛔ End a subscription** and **👥 List subscribers**.
 
-For users to pay by themselves, Paystack must be set up:
+For users to pay by themselves, set up **Flutterwave** and/or **Paystack**. With both, users choose; with one, it's used automatically.
+
+**Flutterwave:**
+1. Flutterwave dashboard → Settings → **API Keys**: copy the **Secret key** (`FLWSECK_TEST-…` for test mode).
+2. Settings → **Webhooks**: URL `https://crptotradingbot.vercel.app/flutterwave-webhook`, and type a **Secret hash** (any long random text).
+3. Vercel → Environment Variables: `FLW_SECRET_KEY` = the secret key, `FLW_SECRET_HASH` = the same secret hash. Redeploy.
+4. Test from a non-admin account with a Flutterwave test card, then switch to your live key (`FLWSECK-…`).
+
+**Paystack:**
 1. Paystack → Settings → API Keys & Webhooks: copy the **Secret key** (`sk_test_…` to try with test cards) and set the **Webhook URL** to `https://crptotradingbot.vercel.app/paystack-webhook`.
 2. Vercel → Environment Variables: `PAYSTACK_SECRET_KEY` = your secret key. Redeploy.
 3. Test from a non-admin account: `subscribe you@example.com` → pay with a test card → back in Telegram with "Payment received". Then switch to your `sk_live_…` key.

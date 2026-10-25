@@ -29,6 +29,7 @@
  *
  * Public (no login; Paystack calls these):
  *   POST paystack-webhook    (/paystack-webhook) payment events → verified with Paystack's API
+ *   POST flutterwave-webhook (/flutterwave-webhook) payment events → verified with Flutterwave's API
  *   GET  paystack-callback   (/paid) where Paystack sends the payer back → Telegram
  */
 
@@ -72,7 +73,7 @@ const ACTIONS = {
     return autoBuyer.userStatus(chatId);
   } },
   subscription:         { method: 'GET',  run: (chatId) => subs.status(chatId) },
-  subscribe:            { method: 'POST', run: (chatId, body) => subs.startCheckout(chatId, { email: body.email, callbackUrl: `${baseUrl()}/paid` }) },
+  subscribe:            { method: 'POST', run: (chatId, body) => subs.startCheckout(chatId, { email: body.email, provider: body.provider, callbackUrl: `${baseUrl()}/paid` }) },
 };
 
 // Usable while a subscription has ended (so the user can see status and pay)
@@ -91,8 +92,20 @@ const PUBLIC = {
       return res.status(500).json({ ok: false }); // Paystack retries later
     }
   },
+  'flutterwave-webhook': async (req, res) => {
+    if (req.method !== 'POST') return res.status(405).json({ ok: false });
+    try {
+      const r = await subs.handleFlutterwaveWebhook(req.body, req.headers?.['verif-hash']);
+      if (r.credited) await subs.notifyCredited(r);
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error('[flutterwave-webhook]', err.message);
+      return res.status(500).json({ ok: false }); // Flutterwave retries later
+    }
+  },
   'paystack-callback': async (req, res) => {
-    const reference = req.query?.reference || req.query?.trxref;
+    // Shared return link for both providers: Paystack sends ?reference=, Flutterwave ?tx_ref=
+    const reference = req.query?.reference || req.query?.trxref || req.query?.tx_ref;
     let start = 'paid';
     try {
       const r = await subs.confirmPayment(reference);

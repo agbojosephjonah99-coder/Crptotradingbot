@@ -285,7 +285,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
         `🔒 *Your subscription has ended.*`,
         ``,
         `Renew to use the bot again — ${subs.priceLabel()}:`,
-        `\`subscribe you@example.com\` (your email is for the Paystack receipt)`,
+        `\`subscribe you@example.com\` (your email is for the payment receipt)`,
         ``,
         `\`account\` shows your status.`,
       ].join('\n'));
@@ -2169,7 +2169,7 @@ async function handleSubsAdmin(chatId, args) {
           ``,
           `Approved users will need an active subscription (${subs.priceLabel()}) to use the bot. You never pay.`,
           without ? `⚠️ *${without} user${without === 1 ? ' has' : 's have'} no subscription* and will lose access straight away.` : `✅ Every approved user already has an active subscription.`,
-          !process.env.PAYSTACK_SECRET_KEY ? `⚠️ Paystack isn't set up (PAYSTACK_SECRET_KEY), so users can't pay yet — only subscriptions you give will work.` : '',
+          !subs.providers().length ? `⚠️ No payment provider is set up (FLW_SECRET_KEY or PAYSTACK_SECRET_KEY), so users can't pay yet — only subscriptions you give will work.` : '',
         ].filter(Boolean).join('\n'), { inline_keyboard: [
           ...(without ? [[b(`🎁 Give those ${without} users 7 days, then turn on`, 'subs giveall 7')]] : []),
           [b('✅ Turn on now', 'subs toggle confirm')],
@@ -2277,7 +2277,7 @@ async function handleSubsAdmin(chatId, args) {
       `*Paid access:* ${on ? '🟢 ON — users need a subscription' : '⚪ OFF — the bot is free for approved users'}`,
       `*Plan:* ${subs.priceLabel()}`,
       `*Active subscriptions:* ${active} of ${list.length} approved user${list.length === 1 ? '' : 's'}`,
-      `*Payments (Paystack):* ${process.env.PAYSTACK_SECRET_KEY ? '✅ set up' : '⚠️ not set up — users can\'t pay yet'}`,
+      `*Payments:* ${subs.providers().length ? subs.providers().map(pv => `✅ ${subs.PROVIDER_NAMES[pv]}`).join(' · ') : '⚠️ not set up — users can\'t pay yet (add FLW_SECRET_KEY or PAYSTACK_SECRET_KEY)'}`,
     ].join('\n'), { inline_keyboard: [
       [b(on ? '⚪ Turn paid access OFF' : '🟢 Turn paid access ON', 'subs toggle')],
       [b('💵 Plan & price', 'subs plan'), b('🎁 Give a subscription', 'subs give')],
@@ -2300,11 +2300,11 @@ async function handleSubscribe(chatId, args) {
         const r = await subs.confirmPayment(s.lastRef);
         if (r.credited) { await subs.notifyCredited(r); return; }
         if (!r.already && !s.active) {
-          await reply(chatId, `⏳ Paystack hasn't confirmed your payment yet (${esc(r.reason || 'pending')}). If you've paid, send \`subscribe check\` again in a minute.`);
+          await reply(chatId, `⏳ The payment provider hasn't confirmed your payment yet (${esc(r.reason || 'pending')}). If you've paid, send \`subscribe check\` again in a minute.`);
           return;
         }
       } catch (err) {
-        await reply(chatId, `⚠️ Couldn't check with Paystack right now: ${esc(err.message)}`);
+        await reply(chatId, `⚠️ Couldn't check your payment right now: ${esc(err.message)}`);
         return;
       }
     }
@@ -2330,11 +2330,27 @@ async function handleSubscribe(chatId, args) {
   if (isAdmin(chatId)) { await reply(chatId, `👑 You're the admin — you never pay.`); return; }
 
   try {
-    const link = await subs.startCheckout(chatId, { email: args[0], callbackUrl: `${baseUrl()}/paid` });
+    // subscribe [email]  ·  subscribe via flutterwave|paystack (after choosing)
+    const via = (args[0] || '').toLowerCase() === 'via' ? (args[1] || '').toLowerCase() : null;
+    const email = via ? null : args[0];
+    const available = subs.providers();
+    if (!via && available.length > 1) {
+      const saved = (await subs.getSub(chatId)).email;
+      const e = String(email || saved || '').trim().toLowerCase();
+      if (!subs.validEmail(e)) throw new subs.PaymentError('Send your email for the receipt, e.g. `subscribe you@example.com`');
+      if (e !== saved) await store.cmd('HSET', `cryptobot:sub:${chatId}`, 'email', e);
+      await send(chatId, [
+        `💳 *Subscribe — ${subs.priceLabel()}*`,
+        ``,
+        `How would you like to pay? Both accept Nigerian cards, bank transfer and USSD.`,
+      ].join('\n'), { inline_keyboard: available.map(pv => [{ text: `💳 Pay with ${subs.PROVIDER_NAMES[pv]}`, callback_data: `subscribe via ${pv}` }]) });
+      return;
+    }
+    const link = await subs.startCheckout(chatId, { email, provider: via, callbackUrl: `${baseUrl()}/paid` });
     await send(chatId, [
       `💳 *Subscribe — ${link.price}*`,
       ``,
-      `Tap the button to pay securely with Paystack (card, bank transfer or USSD).`,
+      `Tap the button to pay securely with ${link.providerName} (card, bank transfer or USSD).`,
       `When it's done you'll be brought back here and your access starts straight away.`,
       ``,
       `_Paid but nothing happened? Send_ \`subscribe check\`.`,

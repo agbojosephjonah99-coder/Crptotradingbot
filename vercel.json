@@ -4,7 +4,8 @@
   "cleanUrls": true,
   "rewrites": [
     { "source": "/paid", "destination": "/api/app?action=paystack-callback" },
-    { "source": "/paystack-webhook", "destination": "/api/app?action=paystack-webhook" }
+    { "source": "/paystack-webhook", "destination": "/api/app?action=paystack-webhook" },
+    { "source": "/flutterwave-webhook", "destination": "/api/app?action=flutterwave-webhook" }
   ],
   "functions": {
     "api/**/*.js": {

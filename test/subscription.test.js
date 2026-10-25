@@ -235,3 +235,82 @@ test('admin panel: turn paid access on with a button (warns + offers 7 free days
   await tap('subs toggle');
   assert.equal(subs.enabled(), false);
 });
+
+/** Fake Flutterwave v3: /payments returns a link; verify_by_reference returns the stored transaction. */
+function fakeFlutterwave({ amount = 5000, currency = 'NGN' } = {}) {
+  const fw = { tx: new Map(), created: [] };
+  const prev = axios.request;
+  axios.request = async (cfg) => {
+    if (!cfg.url.startsWith('https://api.flutterwave.com/')) return prev(cfg);
+    assert.equal(cfg.headers.Authorization, 'Bearer FLWSECK_TEST-x');
+    if (cfg.url.endsWith('/v3/payments')) {
+      fw.created.push(cfg.data);
+      fw.tx.set(cfg.data.tx_ref, { status: 'pending', tx_ref: cfg.data.tx_ref, amount, currency, meta: cfg.data.meta });
+      return { data: { status: 'success', data: { link: `https://checkout.flutterwave.com/v3/hosted/pay/${cfg.data.tx_ref}` } } };
+    }
+    const m = cfg.url.match(/verify_by_reference\?tx_ref=(.+)$/);
+    if (m) { const t = fw.tx.get(decodeURIComponent(m[1])); if (!t) { const e = new Error('404'); e.response = { status: 404, data: { message: 'No transaction was found' } }; throw e; } return { data: { status: 'success', data: t } }; }
+    throw new Error('unmocked flutterwave ' + cfg.url);
+  };
+  fw.pay = (ref) => { fw.tx.get(ref).status = 'successful'; };
+  return fw;
+}
+
+test('Flutterwave: users choose a provider; payment verified with Flutterwave\'s API, credited once (return link + webhook)', async () => {
+  resetEnv({ PAID_ACCESS_ENABLED: 'true', PAYSTACK_SECRET_KEY: SK, FLW_SECRET_KEY: 'FLWSECK_TEST-x', FLW_SECRET_HASH: 'myhash', SUBSCRIPTION_PRICE: '5000' });
+  const net = mockNet({ price: 100 });
+  fakePaystack();
+  const fw = fakeFlutterwave();
+  await approvedUser();
+  const subs = require('../src/services/subscriptionService');
+  const tap = (data) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data, from: {}, message: { message_id: 1, chat: { id: 2000 }, text: 'x' } } } }), fakeRes());
+
+  await say('2000', 'subscribe ada@example.com');
+  const choice = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data);
+  assert.deepEqual(choice, ['subscribe via flutterwave', 'subscribe via paystack']);
+  await tap('subscribe via flutterwave');
+  assert.match(net.sent.at(-1).reply_markup.inline_keyboard[0][0].url, /checkout\.flutterwave\.com/);
+  const [created] = fw.created;
+  assert.equal(created.amount, 5000, 'Flutterwave takes naira, not kobo');
+  assert.equal(created.customer.email, 'ada@example.com', 'saved email reused');
+  const ref = created.tx_ref;
+  assert.match(ref, /^cbf_2000_/);
+
+  // A forged webhook (wrong hash) is ignored
+  const bad = fakeRes();
+  await require('../api/app')(fakeReq({ method: 'POST', query: { action: 'flutterwave-webhook' }, body: { event: 'charge.completed', data: { tx_ref: ref } }, headers: { 'verif-hash': 'nope' } }), bad);
+  assert.equal(await subs.hasAccess('2000'), false);
+
+  // Unpaid → not credited; paid → back via /paid with ?tx_ref=
+  assert.equal((await subs.confirmPayment(ref)).credited, false);
+  fw.pay(ref);
+  const res = fakeRes();
+  await require('../api/app')(fakeReq({ query: { action: 'paystack-callback', status: 'successful', tx_ref: ref, transaction_id: '123' } }), res);
+  assert.equal(res.statusCode, 302);
+  assert.equal(await subs.hasAccess('2000'), true);
+  const until = (await subs.getSub('2000')).paidUntil;
+
+  // Webhook for the same payment (correct hash) → no double credit
+  const ok = fakeRes();
+  await require('../api/app')(fakeReq({ method: 'POST', query: { action: 'flutterwave-webhook' }, body: { event: 'charge.completed', data: { tx_ref: ref } }, headers: { 'verif-hash': 'myhash' } }), ok);
+  assert.equal(ok.statusCode, 200);
+  assert.equal((await subs.getSub('2000')).paidUntil, until);
+
+  // Wrong amount on a new payment → refused
+  await tap('subscribe via flutterwave');
+  const ref2 = fw.created.at(-1).tx_ref;
+  fw.tx.get(ref2).amount = 50; fw.pay(ref2);
+  assert.match((await subs.confirmPayment(ref2)).reason, /expected NGN 5000/);
+});
+
+test('only Flutterwave set up → no choice, straight to the Flutterwave link', async () => {
+  resetEnv({ PAID_ACCESS_ENABLED: 'true', FLW_SECRET_KEY: 'FLWSECK_TEST-x' });
+  delete process.env.PAYSTACK_SECRET_KEY;
+  const net = mockNet({ price: 100 });
+  fakePaystack();
+  fakeFlutterwave();
+  await approvedUser();
+  await say('2000', 'subscribe ada@example.com');
+  assert.match(net.sent.at(-1).reply_markup.inline_keyboard[0][0].url, /checkout\.flutterwave\.com/);
+  assert.match(net.sent.at(-1).text, /Flutterwave/);
+});
