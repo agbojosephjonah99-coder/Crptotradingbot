@@ -14,6 +14,7 @@
  *   POST sold        { positionId, sellPrice, quantity? }
  *   POST remove      { positionId }
  *   GET  trading             automated-exit status (never returns keys)
+ *   GET  balance             the user's Binance Spot wallet, valued in USD
  *   POST trading-connect     { apiKey, apiSecret, live? }
  *   POST trading-mode        { enabled, confirm? }   confirm phrase needed for live
  *   POST trading-disconnect
@@ -56,6 +57,7 @@ const ACTIONS = {
   sold:      { method: 'POST', run: (chatId, body) => portfolio.recordSale(chatId, body) },
   remove:    { method: 'POST', run: (chatId, body) => portfolio.removePosition(chatId, body) },
   trading:              { method: 'GET',  run: (chatId) => portfolio.tradingStatus(chatId) },
+  balance:              { method: 'GET',  run: (chatId) => portfolio.tradingBalance(chatId) },
   'trading-connect':    { method: 'POST', run: (chatId, body) => portfolio.tradingConnect(chatId, body) },
   'trading-mode':       { method: 'POST', run: (chatId, body) => portfolio.tradingMode(chatId, body) },
   'trading-disconnect': { method: 'POST', run: (chatId) => portfolio.tradingDisconnect(chatId) },

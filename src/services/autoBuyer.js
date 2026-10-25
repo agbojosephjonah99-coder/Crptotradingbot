@@ -132,7 +132,7 @@ async function setPractice(chatId, on) {
 }
 async function setLive(chatId, on) {
   if (on) {
-    if (!(await isLiveUnlocked())) throw new AutoBuyError('Live auto-buy is still locked — it unlocks only after the strategy passes the tests and 8 weeks of profitable practice. See `autobuy`.');
+    if (!(await isLiveUnlocked())) throw new AutoBuyError('Live auto-buy hasn\'t been opened by the admin yet. See `autobuy` for the forward-test progress.');
     const st = await accounts.getStatus(chatId);
     if (!st.connected || !st.enabled) throw new AutoBuyError('Connect your Binance account and turn on automated exits first: `golive`.');
   }
@@ -160,15 +160,30 @@ async function gateStatus() {
     strategy, forward: { startedAt: acct?.createdAt || null, days, closedTrades: trades.length, pnlUsd: pnl, equity, start: acct?.start ?? practice.START,
       winRatePct: trades.length ? r2(trades.filter(t => t.pnlDollar > 0).length / trades.length * 100) : null },
     checks, eligible: Object.values(checks).every(Boolean), unlocked: await isLiveUnlocked(), paused: await isPaused(),
+    unlockedEarly: (await flags()).early === '1',
     needs: { days: G.forwardDays, trades: G.forwardTrades },
   };
 }
 
+/** What's still missing from the forward test, in plain words. */
+function missing(g) {
+  return Object.entries(g.checks).filter(([, ok]) => !ok).map(([k]) => ({
+    research: 'the strategy needs a PASS from `npm run lab`',
+    days: `${g.needs.days}+ days of forward testing (now ${g.forward.days})`,
+    trades: `${g.needs.trades}+ closed trades (now ${g.forward.closedTrades})`,
+    profit: 'a profit after fees',
+  }[k]));
+}
+
+/**
+ * The admin opens live auto-buy. Allowed before the forward test is complete
+ * (the admin's choice, e.g. to test it on their own money first) — but it's
+ * recorded as early, and everyone sees the forward-test status before opting in.
+ */
 async function unlock(adminId) {
   const g = await gateStatus();
-  if (!g.eligible) throw new AutoBuyError('Not yet: ' + Object.entries(g.checks).filter(([, ok]) => !ok).map(([k]) => ({ research: 'the strategy needs a PASS from `npm run lab`', days: `the forward test needs ${g.needs.days} days (now ${g.forward.days})`, trades: `it needs ${g.needs.trades} closed trades (now ${g.forward.closedTrades})`, profit: 'it must be in profit after fees' }[k])).join('; '));
-  await store.cmd('HSET', K.flags, 'liveUnlocked', '1', 'unlockedAt', new Date().toISOString(), 'unlockedBy', String(adminId));
-  return g;
+  await store.cmd('HSET', K.flags, 'liveUnlocked', '1', 'unlockedAt', new Date().toISOString(), 'unlockedBy', String(adminId), 'early', g.eligible ? '0' : '1');
+  return { ...g, early: !g.eligible, missing: missing(g) };
 }
 async function lock() { await store.cmd('HSET', K.flags, 'liveUnlocked', '0'); }
 async function pause(on) { await store.cmd('HSET', K.flags, 'paused', on ? '1' : '0'); }
@@ -305,5 +320,5 @@ const usd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits
 
 module.exports = {
   AutoBuyError, HOUSE, currentStrategy, loadResearch, computeSignals, trailFor, size, runDaily,
-  setPractice, setLive, gateStatus, unlock, lock, pause, isPaused, isLiveUnlocked, userStatus,
+  setPractice, setLive, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
 };

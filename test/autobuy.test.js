@@ -86,21 +86,25 @@ test('admin pause stops all auto-buying', async () => {
   assert.equal((await ab.runDaily({ force: true })).skipped, 'paused by admin');
 });
 
-test('live auto-buy is locked: unlock refused until research PASS + 8 weeks + 20 trades + profit', async () => {
+test('live auto-buy: closed until the admin opens it; an early opening is recorded and shown; the full gate is tracked', async () => {
   const file = path.join(os.tmpdir(), `strategy-pass-${Date.now()}.json`);
   fs.writeFileSync(file, JSON.stringify({ verdict: 'PASS', period: {}, pick: { family: 'donchian', params: { entryN: 20, exitN: 10, regime: true }, id: 'donchian:20-10:btc', label: 'test', name: 'Breakout', why: 'ok', test: { trades: 40, expectancyR: 0.3 } } }));
   const { ab } = setup({ strategyFile: file });
   const store = require('../src/lib/redis');
 
-  await assert.rejects(ab.unlock('1000'), /Not yet/);
-  await assert.rejects(ab.setLive('2000', true), /still locked/);
+  await assert.rejects(ab.setLive('2000', true), /hasn't been opened/);
+  const early = await ab.unlock('1000');
+  assert.equal(early.early, true, 'admin can open it before the forward test is done…');
+  assert.ok(early.missing.some(m => /days of forward testing/.test(m)), '…and is told exactly what is still missing');
+  assert.equal((await ab.gateStatus()).unlockedEarly, true);
+  await ab.lock();
 
   // Simulate a profitable 60-day forward test with 20 closed trades
   await store.cmd('HSET', 'cryptobot:practice:house', 'cash', '11000', 'start', '10000', 'createdAt', new Date(Date.now() - 60 * DAY).toISOString(), 'resets', '0');
   for (let k = 0; k < 20; k++) await store.cmd('RPUSH', 'cryptobot:practicetrades:house', JSON.stringify({ pnlDollar: 50 }));
   const g = await ab.gateStatus();
   assert.deepEqual(g.checks, { research: true, days: true, trades: true, profit: true });
-  await ab.unlock('1000');
+  assert.equal((await ab.unlock('1000')).early, false);
   assert.equal(await ab.isLiveUnlocked(), true);
   await assert.rejects(ab.setLive('2000', true), /Connect your Binance account/, 'each user still needs their own connected account');
 });
@@ -155,11 +159,51 @@ test('bot: autobuy status, on/off, live stays locked', async () => {
   const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
   await say('autobuy');
   assert.match(net.sent.at(-1).text, /NOT TESTED YET/);
-  assert.match(net.sent.at(-1).text, /Live auto-buy:\* 🔒 locked/);
+  assert.match(net.sent.at(-1).text, /Live auto-buy:\* 🔒 not open yet/);
   await say('autobuy on');
   assert.match(net.sent.at(-1).text, /Practice auto-buy ON/);
   await say('autobuy live on');
-  assert.match(net.sent.at(-1).text, /still locked/);
+  assert.match(net.sent.at(-1).text, /hasn't been opened/);
+});
+
+test('admin opens auto-buy early; golive "Turn on auto-trading" turns on buying AND selling, with an unproven warning', async () => {
+  const { net } = setup();
+  const axios = require('axios');
+  axios.request = async ({ url }) => (url.includes('apiRestrictions') ? { data: { enableWithdrawals: false } } : { data: { canTrade: true, balances: [{ asset: 'USDT', free: '100', locked: '0' }] } });
+  await require('../src/services/tradingAccounts').connect('1000', { apiKey: KEY, apiSecret: SECRET, live: true });
+  const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
+  await say('autobuy unlock');
+  assert.match(net.sent.at(-1).text, /Opened \*early\*/);
+  await say('golive on');
+  assert.match(net.sent.at(-1).text, /Buys:\* once a day/);
+  assert.match(net.sent.at(-1).text, /Not proven yet/);
+  await say('golive on confirm');
+  assert.match(net.sent.find(m => /Auto-trading is ON/.test(m.text)).text, /buys the coins that signal/);
+  const st = await require('../src/services/autoBuyer').userStatus('1000');
+  assert.equal(st.liveOn, true);
+  assert.equal((await require('../src/services/tradingAccounts').getStatus('1000')).enabled, true);
+  await say('golive off');
+  assert.equal((await require('../src/services/autoBuyer').userStatus('1000')).liveOn, false);
+});
+
+test('menu message is deleted when one of its buttons is tapped', async () => {
+  const { net } = setup();
+  const axios = require('axios');
+  const deleted = [];
+  const post = axios.post;
+  axios.post = async (url, body, cfg) => (url.endsWith('/deleteMessage') ? (deleted.push(body.message_id), { data: { ok: true, result: true } }) : post(url, body, cfg));
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q1', data: 'practice', from: {}, message: { message_id: 55, chat: { id: 1000 }, text: 'What would you like to do?\n\nTap a button below:' } } } }), fakeRes());
+  assert.deepEqual(deleted, [55]);
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q2', data: 'practice', from: {}, message: { message_id: 56, chat: { id: 1000 }, text: 'Practice account …' } } } }), fakeRes());
+  assert.deepEqual(deleted, [55], 'other messages with buttons are kept');
+  assert.ok(net.sent.length > 0);
+});
+
+test('closed trades show today\'s running profit', () => {
+  const { todayLine } = require('../src/services/profitTracker');
+  const now = new Date().toISOString();
+  const line = todayLine([{ closedAt: now, pnlDollar: 12.5 }, { closedAt: now, pnlDollar: -2.5 }, { closedAt: '2020-01-01T00:00:00Z', pnlDollar: 99 }]);
+  assert.match(line, /2 closed trades · 1 won · \+\$10\.00/);
 });
 
 test('strategy lab: on random prices nothing passes', () => {

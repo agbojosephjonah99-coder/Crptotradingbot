@@ -121,4 +121,19 @@ async function getMonthlyStats(chatId) {
   };
 }
 
-module.exports = { recordTrade, getAllTrades, getMonthlyStats, calcStats, previousMonth, _resetMigrationCache: () => checked.clear() };
+/** Closed trades and P&L for today (UTC). Works for real and practice trade lists. */
+function todaySummary(trades, now = new Date()) {
+  const day = now.toISOString().slice(0, 10);
+  const t = trades.filter(x => String(x.closedAt || '').slice(0, 10) === day);
+  const pnl = t.reduce((s, x) => s + (x.pnlDollar || 0), 0);
+  return { count: t.length, wins: t.filter(x => (x.pnlDollar ?? x.pnlPct) > 0).length, pnlUsd: Math.round(pnl * 100) / 100, withoutQty: t.filter(x => x.pnlDollar === null || x.pnlDollar === undefined).length };
+}
+
+function todayLine(trades) {
+  const d = todaySummary(trades);
+  if (!d.count) return '';
+  const money = `${d.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(d.pnlUsd).toFixed(2)}`;
+  return `📅 *Today so far:* ${d.count} closed trade${d.count === 1 ? '' : 's'} · ${d.wins} won · ${money}${d.withoutQty ? ` _(${d.withoutQty} without a quantity not counted in $)_` : ''}`;
+}
+
+module.exports = { todaySummary, todayLine, recordTrade, getAllTrades, getMonthlyStats, calcStats, previousMonth, _resetMigrationCache: () => checked.clear() };

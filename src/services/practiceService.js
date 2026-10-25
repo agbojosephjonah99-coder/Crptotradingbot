@@ -237,7 +237,7 @@ async function syncUser(chatId, cache = new Map()) {
       }
       const trade = sales.length ? await closeIfDone(chatId, p, price) : null;
       if (trade) {
-        msgs.push(`🎮 *Practice trade closed — ${coinOf(p.symbol)}:* ${trade.pnlDollar >= 0 ? '+' : ''}${usd(trade.pnlDollar)} (${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%) after ${usd(trade.fees)} fees.`);
+        msgs.push(`🎮 *Practice trade closed — ${coinOf(p.symbol)}:* ${trade.pnlDollar >= 0 ? '+' : ''}${usd(trade.pnlDollar)} (${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%) after ${usd(trade.fees)} fees.\n${profit.todayLine(await getTrades(chatId)).replace('Today so far', 'Practice today')}`);
       } else {
         await savePos(chatId, p);
       }

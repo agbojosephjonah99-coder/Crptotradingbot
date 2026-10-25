@@ -40,7 +40,7 @@ const {
   getAllPositions, getPositionsBySymbol, addPosition, updatePosition,
   removePositionById, removeAllBySymbol,
 } = require('../src/services/positionStore');
-const { recordTrade, getMonthlyStats } = require('../src/services/profitTracker');
+const { recordTrade, getMonthlyStats, getAllTrades, todayLine } = require('../src/services/profitTracker');
 const { adviseSplit, compoundingAdvice, targetProgress } = require('../src/services/portfolioAdvisor');
 const accounts = require('../src/services/tradingAccounts');
 const autoTrader = require('../src/services/autoTrader');
@@ -88,6 +88,9 @@ const INLINE_MENU = {
     [
       { text: '🎮 Practice',       callback_data: 'practice'    },
       { text: '🚀 Go live',        callback_data: 'golive'      },
+    ],
+    [
+      { text: '💰 My Binance balance', callback_data: 'balance' },
     ],
     [
       { text: '🖥 My Dashboard',   callback_data: 'dashboard'   },
@@ -466,6 +469,28 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  // ── BALANCE (the user's own Binance Spot wallet) ────────────────────────
+  if (cmd === 'balance' || cmd === 'wallet' || cmd === 'bal') {
+    try {
+      const b = await accounts.getBalances(chatId);
+      const n = (x) => String(+Number(x).toFixed(8));
+      const lines = [
+        `💰 *Your Binance balance*${b.testnet ? ' (testnet — fake money)' : ''}`,
+        ``,
+        `*Total:* ${usd(b.totalUsd)}`,
+        ``,
+        ...b.assets.map(a => `• *${a.asset}*: ${n(a.free + a.locked)}${a.usd !== null && !['USDT', 'USDC', 'FDUSD'].includes(a.asset) ? ` ≈ ${usd(a.usd)}` : ''}${a.locked > 0 ? `  _(${n(a.locked)} held by open orders)_` : ''}`),
+        b.hiddenDust ? `_+ ${b.hiddenDust} tiny balance${b.hiddenDust === 1 ? '' : 's'} under $1_` : '',
+        ``,
+        `_Spot wallet only. Coins in Funding or Earn aren't counted — move USDT to Spot for the bot to use it._`,
+      ].filter(x => x !== '');
+      await send(chatId, lines.join('\n'), { inline_keyboard: [[{ text: '↻ Refresh', callback_data: 'balance' }, { text: '📊 My positions', callback_data: 'positions' }]] });
+    } catch (err) {
+      await reply(chatId, `❌ ${err instanceof accounts.TradingError ? err.message : esc(err.message)}`);
+    }
+    return;
+  }
+
   // ── AUTO-BUY (practice now; live only after proven results) ─────────────
   if (cmd === 'autobuy') {
     await handleAutoBuy(chatId, parts.slice(1));
@@ -524,6 +549,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`practice\` — trade with $10,000 play money at real prices`,
       `\`practice buy SOL 100\` — spend $100 of play money on SOL`,
       `\`golive\` — step-by-step: connect your real Binance account`,
+      `\`balance\` — what's in your Binance Spot wallet`,
       `\`autobuy\` — let the bot pick and buy coins by itself (practice first)`,
       ``,
       `━━━ *AUTOMATED EXITS (optional)* ━━━`,
@@ -1398,6 +1424,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
         `New capital:       $${compound.newCapital}`,
       ].join('\n') : '',
       ``,
+      todayLine(await getAllTrades(chatId)),
       `Type \`profit\` to see your full stats.`,
     ].filter(Boolean).join('\n');
 
@@ -1545,6 +1572,13 @@ async function handleMessage(chatId, text, from, meta = {}) {
 }
 
 // ─── Auto-buy ─────────────────────────────────────────────────────────────────
+/** One line warning users when the forward test isn't complete yet. */
+async function forwardWarning() {
+  const g = await autoBuyer.gateStatus();
+  if (g.eligible) return `✅ Forward test complete: ${g.forward.days} days, ${g.forward.closedTrades} trades, in profit.`;
+  return `⚠️ *Not proven yet:* the bot's own practice run has ${g.forward.days} of ${g.needs.days} days and ${g.forward.closedTrades} of ${g.needs.trades} trades${g.forward.closedTrades ? `, ${g.forward.equity >= g.forward.start ? 'in profit' : 'currently at a loss'}` : ''}.`;
+}
+
 const VERDICT_ICON = { PASS: '✅ PASSED', PROMISING: '🟡 PROMISING (could be luck)', FAIL: '❌ FAILED', 'NOT TESTED': '⚪ NOT TESTED YET' };
 
 async function handleAutoBuy(chatId, args) {
@@ -1576,19 +1610,29 @@ async function handleAutoBuy(chatId, args) {
         return;
       }
       if (b === 'on') {
-        if (!(await autoBuyer.isLiveUnlocked())) throw new autoBuyer.AutoBuyError('Live auto-buy is still locked. It unlocks only after the strategy passes the tests and the bot\'s own 8-week practice run makes money. Send `autobuy` to see progress.');
+        if (!(await autoBuyer.isLiveUnlocked())) throw new autoBuyer.AutoBuyError(isAdmin(chatId) ? 'Live auto-buy hasn\'t been opened yet. Send `autobuy unlock` to open it (you\'ll see what the forward test still needs).' : 'Live auto-buy hasn\'t been opened by the admin yet. Send `autobuy` to see the forward-test progress.');
         await send(chatId, [
           `⚠️ *Real money — the bot will BUY for you*`,
           ``,
           `Each day it may buy coins on your Binance account using your USDT: about 1% of the account at risk per trade, no coin above 20%, at most 5 positions, and no buying after a 3% drop in a day.`,
+          await forwardWarning(),
           `Losses are possible even with a tested strategy.`,
-        ].join('\n'), { inline_keyboard: [[{ text: '✅ I understand — turn on', callback_data: 'autobuy live on confirm' }], [{ text: 'Not now', callback_data: 'autobuy' }]] });
+        ].filter(Boolean).join('\n'), { inline_keyboard: [[{ text: '✅ I understand — turn on', callback_data: 'autobuy live on confirm' }], [{ text: 'Not now', callback_data: 'autobuy' }]] });
         return;
       }
     }
     // Admin controls
     if (isAdmin(chatId) && ['unlock', 'lock', 'pause', 'resume', 'run'].includes(a)) {
-      if (a === 'unlock') { await autoBuyer.unlock(chatId); await reply(chatId, `🔓 Live auto-buy UNLOCKED. Users can now opt in with \`autobuy live on\`.`); return; }
+      if (a === 'unlock') {
+        const g = await autoBuyer.unlock(chatId);
+        await reply(chatId, [
+          `🔓 *Live auto-buy OPEN.*`,
+          g.early ? `⚠️ Opened *early* — the forward test isn't finished. Still missing: ${g.missing.join('; ')}. Everyone sees this before they switch it on.` : `✅ The forward test is complete.`,
+          ``,
+          `Turn it on for your own account: \`autobuy live on\` (or the button after \`golive\`). Users opt in the same way. \`autobuy lock\` closes it again.`,
+        ].join('\n'));
+        return;
+      }
       if (a === 'lock') { await autoBuyer.lock(); await reply(chatId, `🔒 Live auto-buy locked. No new live buys.`); return; }
       if (a === 'pause') { await autoBuyer.pause(true); await reply(chatId, `🛑 Auto-buy PAUSED for everyone (practice and live). \`autobuy resume\` to restart.`); return; }
       if (a === 'resume') { await autoBuyer.pause(false); await reply(chatId, `▶️ Auto-buy resumed.`); return; }
@@ -1614,8 +1658,8 @@ async function handleAutoBuy(chatId, args) {
       `*Forward test* (the bot's own practice account, from today on):`,
       f.startedAt ? `${f.days} days · ${f.closedTrades} closed trades${f.winRatePct !== null ? ` · ${f.winRatePct}% wins` : ''} · ${f.equity >= f.start ? '+' : ''}${usd(f.equity - f.start)} on $10,000` : `starts at the next daily run`,
       ``,
-      `*Live auto-buy:* ${st.unlocked ? '🔓 unlocked' : '🔒 locked'}${st.paused ? ' · 🛑 paused by admin' : ''}`,
-      !st.unlocked ? `${tick(c.research)} strategy PASSES the test  ${tick(c.days)} ${st.needs.days}+ days  ${tick(c.trades)} ${st.needs.trades}+ trades  ${tick(c.profit)} in profit` : '',
+      `*Live auto-buy:* ${st.unlocked ? (st.unlockedEarly && !st.eligible ? '🔓 open early (forward test not finished)' : '🔓 open') : '🔒 not open yet'}${st.paused ? ' · 🛑 paused by admin' : ''}`,
+      !st.eligible ? `${tick(c.research)} strategy PASSES the test  ${tick(c.days)} ${st.needs.days}+ days  ${tick(c.trades)} ${st.needs.trades}+ trades  ${tick(c.profit)} in profit` : '',
       ``,
       `*You:* practice auto-buy ${st.practiceOn ? '🟢 ON' : '⚪ OFF'} · live auto-buy ${st.liveOn ? '🟢 ON' : '⚪ OFF'}`,
       st.lastRun ? `_Last check ${st.lastRun.date}: ${st.lastRun.buys.length ? st.lastRun.buys.map(x => x.coin).join(', ') : 'no buy signals'}${st.lastRun.regimeUp === false ? ' (BTC below its 100-day average)' : ''}_` : '',
@@ -1756,8 +1800,10 @@ async function handleGoLive(chatId, args) {
   if (step === '' || step === 'start') {
     const st = await accounts.getStatus(chatId);
     if (st.connected && !st.testnet) {
-      await send(chatId, `✅ Your real Binance account is already connected (key ${st.keyHint}). Automated exits: ${st.enabled ? '🟢 ON' : '⚪ OFF'}.`,
-        { inline_keyboard: [[{ text: st.enabled ? '⏸ Turn off' : '🟢 Turn on automated exits', callback_data: st.enabled ? 'autotrade off' : 'golive on' }]] });
+      const buyingOn = (await autoBuyer.userStatus(chatId)).liveOn;
+      const on = st.enabled && buyingOn;
+      await send(chatId, `✅ Your real Binance account is connected (key ${st.keyHint}).\nAuto-trading: ${on ? '🟢 ON — the bot buys and sells' : st.enabled ? '🟡 selling only (stops and take-profits)' : '⚪ OFF'}.`,
+        { inline_keyboard: [[on ? { text: '⏸ Turn off auto-trading', callback_data: 'golive off' } : { text: '🤖 Turn on auto-trading', callback_data: 'golive on' }], [{ text: '💰 My balance', callback_data: 'balance' }]] });
       return;
     }
     let practiceLine = `💡 *Tip:* practise first with play money — \`practice\`.`;
@@ -1857,18 +1903,31 @@ async function handleGoLive(chatId, args) {
     return;
   }
 
+  if (step === 'off') {
+    await autoBuyer.setLive(chatId, false).catch(() => {});
+    await accounts.setEnabled(chatId, false).catch(() => {});
+    const n = await autoTrader.cancelAll(chatId);
+    await reply(chatId, `⏸ *Auto-trading OFF.* No buying or selling by the bot${n ? `; ${n} stop order${n === 1 ? '' : 's'} cancelled on Binance` : ''}. Your coins stay in your account. Alerts carry on as normal.`);
+    return;
+  }
+
   if (step === 'on') {
     const st = await accounts.getStatus(chatId);
     if (!st.connected) { await handleGoLive(chatId, ['4']); return; }
-    if ((args[1] || '').toLowerCase() !== 'confirm' && !st.testnet) {
+    const open = await autoBuyer.isLiveUnlocked();
+    if ((args[1] || '').toLowerCase() !== 'confirm') {
       await send(chatId, [
         `⚠️ *Last check — real money*`,
         ``,
-        `With automated exits on, the bot *sells on your Binance account* at each position's stop and take-profits (40% / 35% / the rest).`,
-        `It never buys and can't withdraw. You can turn it off any time with \`autotrade off\`.`,
+        `With auto-trading on, the bot works on *your Binance account*:`,
+        open ? `🛒 *Buys:* once a day it may buy coins with your USDT — about 1% of the account at risk per trade, no coin above 20%, at most 5 at once.`
+          : `🛒 *Buys:* not open yet — the admin opens buying once the strategy has proven itself. Until then the bot only sells.`,
+        `🛡 *Sells:* a stop order on Binance for every position, and sales at take-profits / the trailing stop.`,
+        open ? await forwardWarning() : '',
+        `It can't withdraw. Turn it off any time with \`golive off\`.`,
         ``,
         `Losses are possible. Turn it on?`,
-      ].join('\n'), { inline_keyboard: [
+      ].filter(Boolean).join('\n'), { inline_keyboard: [
         [{ text: '✅ Yes, I understand — turn on', callback_data: 'golive on confirm' }],
         [{ text: 'Not now', callback_data: 'golive cancel' }],
       ] });
@@ -1876,16 +1935,19 @@ async function handleGoLive(chatId, args) {
     }
     try {
       await accounts.setEnabled(chatId, true, { confirmLive: accounts.LIVE_CONFIRM });
+      let buying = false;
+      if (open) { await autoBuyer.setLive(chatId, true); buying = true; }
       await reply(chatId, [
-        `🟢 *Automated exits are ON*`,
+        `🟢 *Auto-trading is ON*`,
         ``,
-        `Now add positions for coins you buy on Binance, *with the quantity*:`,
-        `\`buy SOL 150 2\` (bought 2 SOL at $150)`,
-        `The bot puts a stop order on Binance straight away and sells at the take-profits for you.`,
+        buying ? `🛒 The bot checks the market once a day (just after 1am Lagos time) and buys the coins that signal, then manages the exits. You'll get a message for every buy, every sale, and your profit for the day.`
+          : isAdmin(chatId) ? `🛡 Selling is on. Buying isn't open yet — send \`autobuy unlock\` to open it (you'll see what the forward test still needs), then \`autobuy live on\`.`
+          : `🛡 Selling is on. Buying opens once the admin switches it on — you'll be able to turn it on from \`autobuy\`.`,
+        `💰 Check your money any time: \`balance\``,
       ].join('\n'));
       await autoTrader.syncUser(chatId);
     } catch (err) {
-      await reply(chatId, `❌ ${err instanceof accounts.TradingError ? err.message : esc(err.message)}`);
+      await reply(chatId, `❌ ${err instanceof accounts.TradingError || err instanceof autoBuyer.AutoBuyError ? err.message : esc(err.message)}`);
     }
     return;
   }
@@ -1918,8 +1980,8 @@ async function handleWizardKey(chatId, value, meta) {
         const usdt = await c.freeBalance('USDT');
         balance = `\n💵 USDT in your Spot wallet: ${usdt.toFixed(2)}${usdt < 10 ? '\n⚠️ That\'s very little — remember to move USDT from Funding to Spot (step 2).' : ''}`;
       } catch { /* balance is just a nice-to-have */ }
-      await send(chatId, `🔐 *Binance connected!* Key ${'…' + apiKey.slice(-4)}, withdrawals blocked.${balance}\n\nLast step: turn on automated exits.`,
-        { inline_keyboard: [[{ text: '🟢 Turn on automated exits', callback_data: 'golive on' }]] });
+      await send(chatId, `🔐 *Binance connected!* Key ${'…' + apiKey.slice(-4)}, withdrawals blocked.${balance}\n\nLast step: turn on auto-trading — the bot buys and sells for you.`,
+        { inline_keyboard: [[{ text: '🤖 Turn on auto-trading', callback_data: 'golive on' }]] });
     } catch (err) {
       await store.cmd('SET', wizardKey(chatId), JSON.stringify({ step: 'key' }), 'EX', 900);
       const why = err instanceof accounts.TradingError ? err.message : err.message;
@@ -2099,6 +2161,11 @@ async function handleUpdate(body) {
 
     await answerCallback(cq.id);
     if (!chatId) return;
+
+    // Tapping a button in the main menu removes the menu message (keeps the chat tidy)
+    if (cq.message?.message_id && /^What would you like to do\?/.test(cq.message.text || '')) {
+      await tg.call('deleteMessage', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+    }
 
     if (data.startsWith('approve:') || data.startsWith('reject:')) {
       const [action, targetId] = data.split(':');

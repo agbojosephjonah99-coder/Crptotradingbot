@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.13.0 — Auto-trading button, daily profit, tidier chat, readable dashboard
+
+- **One button after connecting Binance: "🤖 Turn on auto-trading".** It turns on selling (stop orders, take-profits, trailing stops) **and** buying (the daily auto-buy), once the admin has opened buying. `golive off` turns both off and cancels the bot's stop orders. `golive` shows whether auto-trading is on, selling only, or off.
+- **The admin can open live auto-buy before the forward test finishes** (`autobuy unlock`), for example to prove it on your own account first. It's recorded as "open early", and anyone switching it on sees exactly how far the forward test has got ("Not proven yet: 3 of 56 days…").
+- **Today's profit after every closed trade:** auto-closed trades, `sold` records and practice trades now end with "📅 Today so far: 3 closed trades · 2 won · +$14.20".
+- **The menu message disappears** when one of its buttons is tapped, so the chat doesn't fill up with old menus. Other messages with buttons are kept.
+- **Dashboard easier to read:**
+  - a clean sans-serif font (Inter) instead of monospace everywhere;
+  - text sizes raised (nothing below 12px);
+  - labels and secondary text with much higher contrast, from about 2:1 to 6:1+;
+  - tiny prices shown in full (0.0000098, no "…") and big prices with 2 decimals;
+  - a quieter background grid.
+
+  The "Auto-exits" tab is now "Auto-trading".
+- Tests: 128.
+
+## 2.12.0 — Check your Binance balance in the bot
+
+- New `balance` command and a 💰 My Binance balance button in the menu. They show the user's Spot wallet: total in USD, every coin worth $1 or more, and how much is held by open orders (e.g. the bot's stop orders).
+- The dashboard's 🤖 Auto-exits tab shows the same balance table, with a refresh button.
+- It reads through the fixed-IP proxy like every other account request (one request per check).
+
 ## 2.11.1 — Clearer IP step
 
 - Go-live step 3 now lists each IP on its own line: "Paste IP 1 → tap Confirm, Paste IP 2 → tap Confirm". It says to add them one at a time (no commas), that every IP is needed, and to check they all show before ticking Spot trading.

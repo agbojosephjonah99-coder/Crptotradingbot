@@ -125,4 +125,38 @@ async function removeKeys(chatId) {
   await store.cmd('DEL', keyOf(chatId));
 }
 
-module.exports = { TradingError, LIVE_CONFIRM, getStatus, connect, setEnabled, getActiveClient, getAnyClient, removeKeys, recordError };
+const STABLE = new Set(['USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'DAI']);
+
+/**
+ * The user's Spot wallet on Binance: every coin worth $1+, valued in USD.
+ * `locked` = coins held by open orders (e.g. the bot's stop orders).
+ */
+async function getBalances(chatId) {
+  const c = await getAnyClient(chatId);
+  if (!c) throw new TradingError('Connect your Binance account first: `golive`.');
+  let account;
+  try { account = await c.account(); } catch (err) {
+    throw new TradingError(err instanceof BinanceError && err.code === -2015
+      ? 'Binance refused the request. Check your key still has all the bot\'s IPs, or reconnect with `golive`.'
+      : `Binance error: ${err.message}`);
+  }
+  const { fetchPrice } = require('../lib/market');
+  const rows = [];
+  for (const b of account.balances || []) {
+    const free = Number(b.free) || 0, locked = Number(b.locked) || 0;
+    if (!(free + locked > 0)) continue;
+    const px = STABLE.has(b.asset) ? 1 : await fetchPrice(`${b.asset}USDT`, { exchange: 'binance' }).catch(() => null);
+    rows.push({ asset: b.asset, free, locked, price: px, usd: px ? Math.round((free + locked) * px * 100) / 100 : null });
+  }
+  const shown = rows.filter(r => r.usd === null || r.usd >= 1).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0));
+  return {
+    testnet: c.testnet,
+    assets: shown,
+    totalUsd: Math.round(rows.reduce((t, r) => t + (r.usd || 0), 0) * 100) / 100,
+    usdtFree: rows.find(r => r.asset === 'USDT')?.free || 0,
+    hiddenDust: rows.length - shown.length,
+    at: new Date().toISOString(),
+  };
+}
+
+module.exports = { getBalances, TradingError, LIVE_CONFIRM, getStatus, connect, setEnabled, getActiveClient, getAnyClient, removeKeys, recordError };

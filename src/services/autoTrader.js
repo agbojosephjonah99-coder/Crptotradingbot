@@ -195,6 +195,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
         `Sold ${r8(total)} ${coin} at an average of $${money(avg)}${tag}`,
         `Result: ${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%${trade.pnlDollar !== null ? ` ($${trade.pnlDollar.toFixed(2)})` : ''} — saved to your history.`,
         a.remainingQty > 0 ? `_${r8(a.remainingQty)} ${coin} left over is below Binance's minimum order and stays in your wallet._` : '',
+        profit.todayLine(await profit.getAllTrades(chatId)),
       ].filter(Boolean).join('\n'));
       actions.push('closed');
       await sendAll(chatId, msgs);

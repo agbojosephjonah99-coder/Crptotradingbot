@@ -333,3 +333,22 @@ test('fixed-IP proxy: signed Binance requests go through FIXIE_URL; the wizard s
     delete process.env.FIXIE_URL; delete process.env.TRADING_IPS;
   }
 });
+
+test('balance: Spot wallet valued in USD, coins held by stop orders shown, via bot and app', async () => {
+  const { ex, net } = setup({ price: 105 });
+  ex.balance.USDT = 250.5;
+  const accounts = require('../src/services/tradingAccounts');
+  await accounts.connect('1000', { apiKey: KEY, apiSecret: SECRET });
+  const b = await accounts.getBalances('1000');
+  assert.equal(b.totalUsd, 250.5 + 10 * 105);
+  assert.deepEqual(b.assets.map(a => a.asset), ['SOL', 'USDT']);
+
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'balance' } } }), fakeRes());
+  assert.match(net.sent.at(-1).text, /Your Binance balance/);
+  assert.match(net.sent.at(-1).text, /\$1,300\.50/);
+
+  const token = await require('../src/lib/dashAuth').issueToken('1000');
+  const res = fakeRes();
+  await require('../api/app')(fakeReq({ query: { action: 'balance' }, headers: { authorization: `Bearer ${token}` } }), res);
+  assert.equal(res.body.data.totalUsd, 1300.5);
+});

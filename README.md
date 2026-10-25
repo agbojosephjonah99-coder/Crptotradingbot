@@ -42,7 +42,7 @@ If `CRON_SECRET` is not set, endpoints stay open (with a warning in the logs) so
 
 Practice (play money, real prices): `practice` · `practice buy SOL 100 [2x] [sl 140]` · `practice sell SOL` · `practice reset`
 
-Go live (guided Binance set-up): `golive`
+Go live (guided Binance set-up): `golive` · `balance` (your Binance Spot wallet)
 
 Auto-buy: `autobuy` · `autobuy on|off` (practice) · `autobuy live on|off` (locked until proven) · admin: `autobuy run|pause|resume|unlock|lock` · research: `npm run lab`
 

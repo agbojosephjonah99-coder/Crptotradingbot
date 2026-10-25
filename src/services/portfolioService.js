@@ -192,6 +192,7 @@ function tradingCall(fn) {
 }
 
 const tradingStatus = (chatId) => accounts.getStatus(chatId);
+const tradingBalance = tradingCall(async (chatId) => accounts.getBalances(chatId));
 
 const tradingConnect = tradingCall(async (chatId, { apiKey, apiSecret, live }) => accounts.connect(chatId, { apiKey, apiSecret, live: !!live }));
 
@@ -228,5 +229,5 @@ async function removePosition(chatId, { positionId }) {
 
 module.exports = {
   UserError, getPortfolio, getHistory, createPosition, setStop, recordSale, removePosition, describe,
-  tradingStatus, tradingConnect, tradingMode, tradingDisconnect,
+  tradingStatus, tradingBalance, tradingConnect, tradingMode, tradingDisconnect,
 };
