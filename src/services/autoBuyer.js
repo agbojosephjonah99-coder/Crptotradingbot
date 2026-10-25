@@ -377,6 +377,15 @@ async function buyNow(chatId, { symbol, amount, mode }) {
   return { analysis: a, price: r.avg, qty: r.qty, spend };
 }
 
+/** Today's stop and signal for every coin the strategy trades. */
+async function coinTable() {
+  const strategy = currentStrategy();
+  const symbols = cfg.universe();
+  const sig = await computeSignals(strategy, { symbols });
+  const rows = symbols.map(sym => ({ coin: sym.replace(/USDT$/, ''), ...sig.analysis[sym] }));
+  return { strategy, regimeUp: sig.regimeUp, rows, at: new Date().toISOString() };
+}
+
 // ─── End-of-day results ──────────────────────────────────────────────────────
 /**
  * After the daily close, tell every user how the day went: real trades and
@@ -427,6 +436,6 @@ const usd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits
 
 module.exports = {
   AutoBuyError, HOUSE, currentStrategy, loadResearch, computeSignals, trailFor, size, runDaily,
-  analyseCoin, buyNow, sendDailySummaries, dailyMessage,
+  analyseCoin, buyNow, coinTable, sendDailySummaries, dailyMessage,
   setPractice, setLive, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
 };

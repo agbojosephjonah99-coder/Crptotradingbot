@@ -134,7 +134,7 @@ module.exports = async (req, res) => {
     const data = await action.run(chatId, parseBody(req));
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    if (err instanceof portfolio.UserError || err instanceof subs.PaymentError || err instanceof practice.PracticeError || err instanceof autoBuyer.AutoBuyError) return res.status(400).json({ success: false, error: err.message });
+    if (err instanceof portfolio.UserError || err instanceof subs.PaymentError || err instanceof practice.PracticeError || err instanceof autoBuyer.AutoBuyError) return res.status(400).json({ success: false, error: err.message, ...(err.code ? { code: err.code } : {}) });
     console.error(`[app:${name}]`, err.stack || err.message);
     return res.status(500).json({ success: false, error: 'Something went wrong — try again' });
   }

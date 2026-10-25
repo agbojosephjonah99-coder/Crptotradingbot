@@ -103,3 +103,14 @@ test('bot: /dashboard sends a personal link that logs in as that user', async ()
   const token = decodeURIComponent(btn.url.split('#t=')[1]);
   assert.equal(await auth.verifyToken(token), '1000');
 });
+
+test('dashboard add: a buy price far from the market returns code far_price; confirm saves it', async () => {
+  resetEnv();
+  mockNet({ price: 0.0000098 });
+  const token = await auth.issueToken('1000');
+  const r1 = await call('add', { token, body: { symbol: 'PEPE', buyPrice: '50' } });
+  assert.equal(r1.statusCode, 400);
+  assert.equal(r1.body.code, 'far_price');
+  const r2 = await call('add', { token, body: { symbol: 'PEPE', buyPrice: '50', confirm: true } });
+  assert.equal(r2.statusCode, 200);
+});

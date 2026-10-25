@@ -553,7 +553,7 @@ code { font-family: var(--code); font-size: 0.9em; background: rgba(124,106,247,
         <option value="binance">Binance</option><option value="bybit">Bybit</option><option value="okx">OKX</option>
         <option value="gate">Gate</option><option value="mexc">MEXC</option><option value="kucoin">KuCoin</option><option value="kraken">Kraken (USD)</option>
       </select></div>
-    <div class="form-group"><label class="form-label" for="add-price">Buy price ($)</label><input class="form-input" id="add-price" type="number" step="any" min="0" required></div>
+    <div class="form-group"><label class="form-label" for="add-price">Price you paid per coin ($)</label><input class="form-input" id="add-price" type="number" step="any" min="0" required></div>
     <div class="form-group"><label class="form-label" for="add-qty">Quantity (optional — enables $ P&amp;L)</label><input class="form-input" id="add-qty" type="number" step="any" min="0"></div>
     <div class="form-group"><label class="form-label" for="add-target">Target (optional, e.g. 2x or 25%)</label><input class="form-input" id="add-target" autocomplete="off"></div>
     <div class="form-group"><label class="form-label" for="add-stop">Your stop loss (optional)</label><input class="form-input" id="add-stop" type="number" step="any" min="0"></div>
@@ -919,7 +919,7 @@ async function api(action, body) {
   });
   const data = await resp.json().catch(() => ({ success: false, error: 'Bad response' }));
   if (resp.status === 401) { logout(); throw new Error(data.error || 'Login expired'); }
-  if (!data.success) { const e = new Error(data.error || 'Request failed'); e.status = resp.status; throw e; }
+  if (!data.success) { const e = new Error(data.error || 'Request failed'); e.status = resp.status; e.code = data.code; throw e; }
   return data.data;
 }
 
@@ -1098,10 +1098,20 @@ async function runAction(dialogId, action, body, okMsg) {
   }
 }
 
-function submitAdd(ev) {
+async function submitAdd(ev) {
   ev.preventDefault();
   const v = (id) => document.getElementById(id).value.trim();
-  runAction('dlg-add', 'add', { symbol: v('add-symbol'), exchange: v('add-exchange'), buyPrice: v('add-price'), quantity: v('add-qty'), target: v('add-target'), stop: v('add-stop') }, 'Position added — monitoring started');
+  const body = { symbol: v('add-symbol'), exchange: v('add-exchange'), buyPrice: v('add-price'), quantity: v('add-qty'), target: v('add-target'), stop: v('add-stop') };
+  try {
+    await api('add', body);
+  } catch (e) {
+    if (e.code !== 'far_price') { toast(e.message, 'error'); return false; }
+    if (!window.confirm(e.message + '\n\nSave it anyway (e.g. an old buy at that price)?')) return false;
+    try { await api('add', { ...body, confirm: true }); } catch (e2) { toast(e2.message, 'error'); return false; }
+  }
+  closeDlg('dlg-add');
+  toast('Position added — monitoring started', 'success');
+  loadPortfolio(true);
   return false;
 }
 function submitStop(ev) {

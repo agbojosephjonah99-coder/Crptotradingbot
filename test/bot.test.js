@@ -85,3 +85,18 @@ test('unapproved users are blocked from commands', async () => {
   await say('positions', '3000');
   assert.match(net.sent[0].text, /\/start/);
 });
+
+test('buy: a price far from the market is questioned (buy PEPE 50 ≠ $50 of PEPE); confirm saves it', async () => {
+  resetEnv();
+  const net = mockNet({ price: 0.0000098 });
+  const store = require('../src/services/positionStore');
+  await say('buy PEPE 50');
+  assert.match(net.sent.at(-1).text, /Check the price — PEPE/);
+  const kb = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data);
+  assert.deepEqual(kb, ['buy PEPE 50 confirm', 'buynow PEPE 50', 'practice buynow PEPE 50']);
+  assert.equal((await store.getPositionsBySymbol('1000', 'PEPEUSDT')).length, 0, 'nothing saved yet');
+  await say('buy PEPE 50 confirm');
+  assert.equal((await store.getPositionsBySymbol('1000', 'PEPEUSDT')).length, 1);
+  await say('buy PEPE 0.0000097');
+  assert.equal((await store.getPositionsBySymbol('1000', 'PEPEUSDT')).length, 2, 'a normal price goes straight through');
+});

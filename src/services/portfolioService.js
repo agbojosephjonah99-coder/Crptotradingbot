@@ -112,7 +112,7 @@ async function getHistory(chatId) {
 const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
 
 /** Add a position, then lock its trade plan (stop + TPs) like the bot's `buy`. */
-async function createPosition(chatId, { symbol, buyPrice, quantity, target, stop, exchange }) {
+async function createPosition(chatId, { symbol, buyPrice, quantity, target, stop, exchange, confirm = false }) {
   const sym = normaliseSymbol(symbol || '');
   const buy = num(buyPrice);
   if (!symbol || !/^[A-Z0-9]{2,20}USDT$/.test(sym)) throw new UserError('Enter a coin, e.g. SOL');
@@ -140,6 +140,14 @@ async function createPosition(chatId, { symbol, buyPrice, quantity, target, stop
       : `Couldn't find ${sym.replace(/USDT$/, '')}/USDT on Binance, Bybit, OKX, Gate, MEXC, KuCoin or Kraken`);
   }
 
+  if (found.price && !confirm) {
+    const ratio = buy / found.price;
+    if (ratio > 2 || ratio < 0.5) {
+      const e = new UserError(`${sym.replace(/USDT$/, '')} trades at about $${found.price} now, but you entered $${buy} per coin. "Buy price" is what you paid for ONE coin — to spend $${buy} on it, use Buy Now in the bot.`);
+      e.code = 'far_price';
+      throw e;
+    }
+  }
   const pos = await store.addPosition({ chatId, symbol: sym, buyPrice: buy, quantity: qty, targetMultiple, stopLossPrice: userStop, exchange: found.exchange });
 
   try {

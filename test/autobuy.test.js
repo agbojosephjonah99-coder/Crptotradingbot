@@ -308,3 +308,11 @@ test('minimum order is Binance\'s $5: auto-buy needs ~$50 (1% risk, ~10% stop); 
   assert.equal(size({ equity: 50, cash: 50, entry: 100, stop: 90, open: 0 }).usd, 5, '1% risk of $50 with a 10% stop = a $5 buy');
   assert.match(size({ equity: 25, cash: 25, entry: 100, stop: 90, open: 0 }).skip, /minimum order/);
 });
+
+test('stops: today\'s stop and signal for every coin', async () => {
+  const { net } = setup();
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'stops' } } }), fakeRes());
+  const t = net.sent.at(-1).text;
+  assert.match(t, /Today's stop for each coin/);
+  for (const c of ['BTC', 'ETH', 'SOL', 'UNI']) assert.match(t, new RegExp(`\\*${c}\\* \\$[\\d.]+ → stop \\$[\\d.]+ \\(\\*−[\\d.]+%\\*\\)`));
+});

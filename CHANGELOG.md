@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.17.1 — Catch "buy PEPE 50" mistakes
+
+- `buy COIN PRICE` logs a buy you already made, where PRICE is per coin. If the price is more than 2× away from the market (e.g. `buy PEPE 50` when PEPE is $0.0000098), the bot now stops and asks. It explains the difference and offers buttons:
+  - ✅ Yes — I bought at $50 each (an old buy);
+  - ⚡ Buy $50 of PEPE now (real money);
+  - 🎮 Practice: buy $50 of PEPE.
+- Dashboard "Add position": same check, with a confirm prompt. The field is renamed "Price you paid per coin ($)".
+- The Log a Buy guide now says PRICE is per coin and points to Buy Now for spending money.
+
+## 2.17.0 — Today's stop for every coin
+
+- New `stops` command, and a 🛡 Today's Stops (all coins) button in the menu and on the `autobuy` screen. For each of the 15 coins it shows yesterday's close, where the stop would be, and how far below that is, with ✅ for coins that have a buy signal today. If the BTC market filter is off, it says so.
+- Stops are recalculated every day from each coin's recent prices. The rule for the current strategy is the lower of the 20-day low and 2× the coin's average daily range. Once a coin is bought, its stop only moves up.
+
 ## 2.16.1 — $5 minimum (Binance's own)
 
 - The bot's minimum order is now **$5**, the same as Binance's Spot minimum for most USDT pairs. It was $10. Practice mode uses the same $5, so it behaves like real trading. Some coins need more on Binance, and that rule is still checked.

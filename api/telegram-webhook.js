@@ -77,6 +77,7 @@ const MENU_ROWS = [
   // Automation & practice
   [b('🤖 Auto-trading', 'golive'),         b('🛒 Auto-buy', 'autobuy')],
   [b('💵 Binance Balance', 'balance'),     b('🎮 Practice (play money)', 'practice')],
+  [b('🛡 Today\'s Stops (all coins)', 'stops')],
   // Market
   [b('🔍 Scan Now', 'scan'),               b('🌕 Moonshots', 'moonshots')],
   [b('🚀 New Listings', 'newlistings'),    b('💼 Split Capital', 'split_help')],
@@ -94,8 +95,7 @@ const menuFor = (chatId) => ({ inline_keyboard: isAdmin(chatId) ? [...MENU_ROWS,
 const MENU_TEXT = (admin) => [
   `*📋 Menu* — tap any button`,
   ``,
-  `*Row 1–4:* your trades · *5–6:* auto-trading, practice & balance`,
-  `*7–8:* market scans & dashboard · *9–10:* account & help${admin ? `\n*Last rows:* admin` : ''}`,
+  `Top: your real trades · Middle: auto-trading, practice & stops · Bottom: market, account & help${admin ? ' · Last rows: admin' : ''}`,
 ].join('\n');
 
 // ─── Send helpers (shared Telegram client, Markdown-safe) ───────────────────
@@ -487,6 +487,30 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  // ── STOPS: today's stop and signal for every coin ───────────────────────
+  if (cmd === 'stops' || cmd === 'coins' || (cmd === 'autobuy' && (parts[1] || '').toLowerCase() === 'coins')) {
+    await reply(chatId, `⏳ Working out today's stops for every coin…`);
+    try {
+      const t = await autoBuyer.coinTable();
+      const lines = [
+        `🛡 *Today's stop for each coin*`,
+        `_${esc(t.strategy.label)}_`,
+        ``,
+        ...t.rows.map(r => r.stop
+          ? `${r.signal ? '✅' : '⚪'} *${r.coin}* $${fmtP(r.close)} → stop $${fmtP(r.stop)} (*−${r.stopPct}%*)`
+          : `⚪ *${r.coin}* — ${r.reason}`),
+        ``,
+        `✅ = buy signal today · ⚪ = no signal (the stop shows where it would be if you used \`buynow\`)`,
+        t.regimeUp === false ? `⚠️ BTC is below its 100-day average, so the strategy isn't buying anything right now.` : '',
+        `_Prices are yesterday's daily close; stops are recalculated every day. Once you hold a coin, its stop only moves up._`,
+      ].filter(Boolean);
+      await send(chatId, lines.join('\n'), { inline_keyboard: [[{ text: '⚡ Buy Now', callback_data: 'buynow' }, { text: '🛒 Auto-buy', callback_data: 'autobuy' }]] });
+    } catch (err) {
+      await reply(chatId, `❌ Couldn't work out the stops right now: ${esc(err.message)}`);
+    }
+    return;
+  }
+
   // ── BUY NOW (the user picks the coin; the strategy manages the exit) ────
   if (cmd === 'buynow' || cmd === 'buy_now') {
     await handleBuyNow(chatId, parts.slice(1), 'live');
@@ -542,6 +566,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`buynow SOL 50\` — buy $50 of SOL now; the bot manages the sale`,
       `\`balance\` — your Binance Spot wallet`,
       `\`autobuy\` — the bot's buying strategy, test results and settings`,
+      `\`stops\` — today's stop-loss for each of the 15 coins`,
       ``,
       `━━━ *PRACTICE (play money)* ━━━`,
       `\`practice\` — your $10,000 practice account`,
@@ -717,6 +742,9 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
   // ── BUY ───────────────────────────────────────────────────────────────────
   if (cmd === 'buy') {
+    // "confirm" = the user already saw the price warning below
+    let confirmed = false;
+    for (let k = parts.length - 1; k > 1; k--) if (String(parts[k]).toLowerCase() === 'confirm') { confirmed = true; parts.splice(k, 1); }
     const rawSymbol = parts[1];
     const buyPrice  = parseFloat(parts[2]);
     let quantity = null, targetMultiple = null, targetPct = null;
@@ -790,6 +818,32 @@ async function handleMessage(chatId, text, from, meta = {}) {
     const entryNum = existing.length + 1;
     // Find where this coin trades (the exchange you named, or auto-detect)
     const found = await resolveExchange(symbol, wantedExchange);
+
+    // Catch "buy PEPE 50" meant as "buy $50 of PEPE": the price is far from the market
+    if (found?.price && !confirmed) {
+      const ratio = buyPrice / found.price;
+      if (ratio > 2 || ratio < 0.5) {
+        const coin = symbol.replace('USDT', '');
+        const again = `${cleanText.split(/\s+/).join(' ')} confirm`;
+        const kb = [];
+        if (again.length <= 60) kb.push([{ text: `✅ Yes — I bought at $${buyPrice} each`, callback_data: again }]);
+        if (buyPrice >= 5) {
+          kb.push([{ text: `⚡ Buy $${buyPrice} of ${coin} now (real money)`, callback_data: `buynow ${coin} ${buyPrice}` }]);
+          kb.push([{ text: `🎮 Practice: buy $${buyPrice} of ${coin}`, callback_data: `practice buynow ${coin} ${buyPrice}` }]);
+        }
+        await send(chatId, [
+          `🤔 *Check the price — ${coin}*`,
+          ``,
+          `${coin} trades at about \`$${fmtP(found.price)}\` right now, but you entered \`$${buyPrice}\` as the price you paid *per coin*.`,
+          ``,
+          `📝 \`buy ${coin} PRICE\` *logs* a buy you already made — PRICE is what you paid per coin.`,
+          `⚡ To *spend* $${buyPrice} on ${coin} now, use \`buynow ${coin} ${buyPrice}\` (or \`practice buynow\` for play money).`,
+          ``,
+          kb.length && again.length <= 60 ? `If $${buyPrice} per coin is right (an old buy), tap Yes.` : `If $${buyPrice} per coin is right, send the same command with \`confirm\` at the end.`,
+        ].join('\n'), { inline_keyboard: kb.length ? kb : [[{ text: '📖 How to log a buy', callback_data: 'buy_help' }]] });
+        return;
+      }
+    }
     if (!found) {
       await reply(chatId, wantedExchange
         ? `❌ ${symbol.replace('USDT', '')}/USDT isn't available on ${PROVIDERS[wantedExchange].name}. Check the ticker, or try another exchange.`
@@ -1503,7 +1557,10 @@ async function handleMessage(chatId, text, from, meta = {}) {
   // ── BUY / SELL GUIDE ──────────────────────────────────────────────────────
   if (cmd === 'buy_guide') {
     await reply(chatId, [
-      `💰 *How to Register a Buy*`,
+      `📝 *Log a buy you already made*`,
+      ``,
+      `\`buy COIN PRICE\` — PRICE is what you paid for *one* coin.`,
+      `_To spend money on a coin now, use ⚡ Buy Now: \`buynow SOL 50\` (spends $50)._`,
       ``,
       `*Track only:*`,
       `\`buy SOL 92.50\``,
@@ -1690,6 +1747,7 @@ async function handleAutoBuy(chatId, args) {
     ];
     const kb = [[st.practiceOn ? { text: '⏸ Practice auto-buy off', callback_data: 'autobuy off' } : { text: '🟢 Practice auto-buy on', callback_data: 'autobuy on' }]];
     if (st.unlocked) kb.push([st.liveOn ? { text: '⏸ Live auto-buy off', callback_data: 'autobuy live off' } : { text: '💰 Live auto-buy on', callback_data: 'autobuy live on' }]);
+    kb.push([{ text: '🛡 Today\'s stop for each coin', callback_data: 'stops' }]);
     kb.push([{ text: '🎮 My practice account', callback_data: 'practice' }]);
     if (isAdmin(chatId)) lines.push('', `_Admin: \`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`_`);
     await send(chatId, lines.filter(x => x !== '').join('\n'), { inline_keyboard: kb });
