@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.16.1 — $5 minimum (Binance's own)
+
+- The bot's minimum order is now **$5**, the same as Binance's Spot minimum for most USDT pairs. It was $10. Practice mode uses the same $5, so it behaves like real trading. Some coins need more on Binance, and that rule is still checked.
+- What this means in practice:
+  - **Buy Now:** a $25 account can buy $5 of a coin (20% per coin).
+  - **Auto-buy:** sizes each trade so about 1% of the account is at risk. With a typical ~10% stop, that's a $5 buy from a **$50** account.
+
 ## 2.16.0 — Real and practice clearly separated
 
 - **`positions` shows REAL money only**, titled "💰 REAL MONEY — your positions", in two groups:

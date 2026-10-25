@@ -37,7 +37,8 @@ test('practice buy: live price + slippage + 0.1% fee, cash goes down, plan locke
   assert.ok(Math.abs(p.quantity - (1000 - 1) / 100.05) < 1e-6, 'fee comes off what you buy');
   assert.ok(p.stopLossPrice > 0 && p.takeProfits?.tp1?.price > p.buyPrice, 'same stop + TP plan as live');
   await assert.rejects(practice.buy('2000', { symbol: 'SOL', amount: 50000 }), /Not enough practice cash/);
-  await assert.rejects(practice.buy('2000', { symbol: 'SOL', amount: 5 }), /at least \$10/);
+  await assert.rejects(practice.buy('2000', { symbol: 'SOL', amount: 4 }), /at least \$5/);
+  assert.ok((await practice.buy('2000', { symbol: 'SOL', amount: 5 })).position, '$5 works, like on Binance');
 });
 
 test('honest pricing: buying and selling straight back costs about 0.3%', async () => {

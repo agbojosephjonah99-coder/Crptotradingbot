@@ -17,7 +17,7 @@ module.exports = {
     maxPositionPct: 20,  // no single coin bigger than this % of the account
     maxOpen: 5,          // at most this many auto-bought positions at once
     dailyLossPct: 3,     // if the account fell this much today, no new buys today
-    minOrderUsd: 10,
+    minOrderUsd: 5,      // Binance's own Spot minimum for most USDT pairs (some coins need more; Binance's rule is checked too)
   },
   // What live auto-buy needs before the admin can unlock it
   GATE: {

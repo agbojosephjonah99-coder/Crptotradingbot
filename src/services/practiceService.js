@@ -29,7 +29,7 @@ const profit = require('./profitTracker');
 const START = 10_000;
 const FEE = 0.001;      // Binance spot taker fee
 const SLIP = 0.0005;    // price you lose on a market order
-const MIN_ORDER = 10;   // Binance's minimum order is ~$5–10
+const MIN_ORDER = 5;    // same as Binance's Spot minimum, so practice matches real trading
 const acctKey = (c) => `cryptobot:practice:${c}`;
 const posKey = (c) => `cryptobot:practicepos:${c}`;
 const tradesKey = (c) => `cryptobot:practicetrades:${c}`;

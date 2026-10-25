@@ -302,3 +302,9 @@ test('buynow (live): buys on Binance and places the stop order — even before a
   assert.equal(pos.strategy, 'donchian:20-10:btc');
   assert.equal(pos.boughtWithSignal, true);
 });
+
+test('minimum order is Binance\'s $5: auto-buy needs ~$50 (1% risk, ~10% stop); Buy Now needs ~$25 (20% cap)', () => {
+  const { size } = require('../src/services/autoBuyer');
+  assert.equal(size({ equity: 50, cash: 50, entry: 100, stop: 90, open: 0 }).usd, 5, '1% risk of $50 with a 10% stop = a $5 buy');
+  assert.match(size({ equity: 25, cash: 25, entry: 100, stop: 90, open: 0 }).skip, /minimum order/);
+});
