@@ -52,7 +52,7 @@ test('paid access OFF (default): nothing changes for approved users', async () =
   const net = mockNet();
   await approvedUser();
   await say('2000', 'positions');
-  assert.match(net.sent.at(-1).text, /No open positions/);
+  assert.match(net.sent.at(-1).text, /No real positions open/);
   assert.equal(await require('../src/services/subscriptionService').hasAccess('2000'), true);
 });
 
@@ -62,7 +62,7 @@ test('paid access ON: unpaid users are asked to subscribe; the admin never is', 
   await say('2000', 'positions');
   assert.match(net.sent.at(-1).text, /subscription has ended/);
   await say('1000', 'positions');
-  assert.match(net.sent.at(-1).text, /No open positions/, 'admin is free');
+  assert.match(net.sent.at(-1).text, /No real positions open/, 'admin is free');
   await say('2000', 'account');
   assert.match(net.sent.at(-1).text, /No subscription yet/);
 });
@@ -110,7 +110,7 @@ test('subscribe → Paystack link → payment verified once → access for 30 da
   assert.equal((await subs.getSub('2000')).paidUntil, until1, 'same payment never adds time twice');
 
   await say('2000', 'positions');
-  assert.match(net.sent.at(-1).text, /No open positions/, 'can use the bot now');
+  assert.match(net.sent.at(-1).text, /No real positions open/, 'can use the bot now');
 });
 
 test('a wrong amount or currency is not credited, and a forged webhook does nothing', async () => {

@@ -71,7 +71,7 @@ test('daily run: house forward test + opted-in users buy with play money; once p
   assert.equal(house.positions.length, 5, 'max 5 positions');
   assert.ok(house.positions.every(p => p.auto && p.stopLossPrice > 0));
   assert.ok(house.positions.every(p => p.cost <= 2000.01), 'no position above 20%');
-  assert.ok(net.sent.some(m => m.chat_id === '2000' && /Auto-bought \(practice\)/.test(m.text)));
+  assert.ok(net.sent.some(m => m.chat_id === '2000' && /PRACTICE · 🤖 \*Auto-bought/.test(m.text)));
   assert.ok(!net.sent.some(m => m.chat_id === '3000'), 'users who did not opt in get nothing');
   assert.ok(!net.sent.some(m => m.chat_id === 'house'), 'the house account sends no messages');
 
@@ -213,4 +213,92 @@ test('strategy lab: on random prices nothing passes', () => {
   const out = research(data);
   assert.notEqual(out.verdict, 'PASS');
   assert.ok(out.families.length === 3 && out.variants.length === 22);
+});
+
+test('buynow (practice): tells you whether the strategy agrees, buys after you confirm, managed by the trailing stop', async () => {
+  const { net, practice } = setup();
+  const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
+  await say('practice buynow SOL 500');
+  const ask = net.sent.at(-1);
+  assert.match(ask.text, /The strategy agrees/);
+  assert.equal(ask.reply_markup.inline_keyboard[0][0].callback_data, 'practice buynow SOL 500 confirm');
+  assert.equal((await practice.summary('1000')).positions.length, 0, 'nothing bought before confirming');
+  await say('practice buynow SOL 500 confirm');
+  assert.match(net.sent.at(-1).text, /Bought .* SOL/);
+  const [p] = (await practice.summary('1000')).positions;
+  assert.equal(p.auto, true);
+  assert.ok(p.stopLossPrice > 0);
+  await say('practice buynow SOL 5000 confirm');
+  assert.match(net.sent.at(-1).text, /more than 20%/);
+});
+
+test('buynow (practice): a coin without a signal gets an honest warning', async () => {
+  const { net } = setup();
+  // Falling coin: no breakout
+  const axios = require('axios');
+  const get = axios.get;
+  axios.get = (url, cfg) => (url.includes('/klines') && cfg?.params?.symbol === 'ADAUSDT' && cfg.params.interval === '1d'
+    ? Promise.resolve({ data: trendDaily(cfg.params.limit, -0.003).map(c => [c.time, c.open, c.high, c.low, c.close, c.volume]) })
+    : get(url, cfg));
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'practice buynow ADA 100' } } }), fakeRes());
+  assert.match(net.sent.at(-1).text, /wouldn't buy ADA today/);
+  assert.match(net.sent.at(-1).text, /isn't backed by the test results/);
+});
+
+test('end-of-day summary: profit → congratulations; loss → apology + encouragement; only once per day', async () => {
+  const { ab } = setup();
+  const loss = ab.dailyMessage('2026-10-25', { count: 3, wins: 1, pnlUsd: -12.4 }, { count: 0 });
+  assert.match(loss, /I'm sorry — today ended at a loss/);
+  assert.match(loss, /look for better chances tomorrow/);
+  assert.match(loss, /golive off/);
+  assert.match(loss, /-\$12\.40/);
+  const win = ab.dailyMessage('2026-10-25', { count: 2, wins: 2, pnlUsd: 20 }, { count: 1, wins: 1, pnlUsd: 5 });
+  assert.match(win, /profitable day/);
+  assert.match(win, /PRACTICE \(play money\):\* 1 trade closed/);
+
+  // Wired into the daily run, for users who closed trades during the day
+  const store = require('../src/lib/redis');
+  const dayStart = Math.floor(Date.now() / DAY) * DAY;
+  const yesterday = new Date(dayStart - 3 * 3_600_000).toISOString();
+  await store.cmd('RPUSH', 'cryptobot:tradelist:2000', JSON.stringify({ symbol: 'SOLUSDT', closedAt: yesterday, pnlDollar: -8, pnlPct: -2 }));
+  const sent = [];
+  const allowed = new Set(['1000', '2000']);
+  const r = await ab.runDaily({ allowed, send: async (id, text) => sent.push({ id, text }), now: new Date(dayStart + 10 * 60_000) });
+  assert.equal(r.summaries, 1);
+  assert.ok(sent.some(m => m.id === '2000' && /sorry/.test(m.text)));
+  const again = await ab.runDaily({ allowed, send: async (id, text) => sent.push({ id, text }), force: true });
+  assert.equal(again.summaries, 0, 'a forced re-run never repeats the summary');
+});
+
+test('buynow (live): buys on Binance and places the stop order — even before auto-buy is opened', async () => {
+  const { price } = setup();
+  const axios = require('axios');
+  const orders = [];
+  axios.request = async ({ method, url }) => {
+    const u = new URL(url); const p = Object.fromEntries(u.searchParams);
+    if (u.pathname === '/api/v3/account') return { data: { canTrade: true, balances: [{ asset: 'USDT', free: '500', locked: '0' }, { asset: 'SOL', free: '0.5', locked: '0' }] } };
+    if (u.pathname === '/api/v3/order' && method === 'POST') {
+      orders.push(p);
+      if (p.side === 'BUY') { const q = Number(p.quoteOrderQty) / price; return { data: { orderId: 1, status: 'FILLED', executedQty: String(q), cummulativeQuoteQty: p.quoteOrderQty, fills: [] } }; }
+      return { data: { orderId: 2, status: 'NEW', executedQty: '0', cummulativeQuoteQty: '0' } };
+    }
+    if (u.pathname === '/api/v3/order') return { data: { orderId: p.orderId, status: 'NEW', executedQty: '0' } };
+    throw new Error('unmocked ' + u.pathname);
+  };
+  const get = axios.get;
+  axios.get = (url, cfg) => (url.includes('/exchangeInfo')
+    ? Promise.resolve({ data: { symbols: [{ symbol: 'SOLUSDT', status: 'TRADING', baseAsset: 'SOL', orderTypes: ['MARKET', 'STOP_LOSS_LIMIT'], filters: [{ filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' }, { filterType: 'PRICE_FILTER', tickSize: '0.01' }, { filterType: 'NOTIONAL', minNotional: '5' }] }] } })
+    : get(url, cfg));
+  const accounts = require('../src/services/tradingAccounts');
+  await accounts.connect('2000', { apiKey: KEY, apiSecret: SECRET });
+  await accounts.setEnabled('2000', true);
+  const ab = require('../src/services/autoBuyer');
+  await assert.rejects(ab.buyNow('2000', { symbol: 'SOL', amount: 900, mode: 'live' }), /USDT in your Spot wallet/);
+  const r = await ab.buyNow('2000', { symbol: 'SOL', amount: 100, mode: 'live' });
+  assert.equal(r.analysis.signal, true);
+  assert.equal(orders.filter(o => o.side === 'BUY').length, 1);
+  assert.equal(orders.filter(o => o.type === 'STOP_LOSS_LIMIT').length, 1, 'stop order placed straight away');
+  const [pos] = Object.values(await require('../src/services/positionStore').getAllPositions('2000'));
+  assert.equal(pos.strategy, 'donchian:20-10:btc');
+  assert.equal(pos.boughtWithSignal, true);
 });

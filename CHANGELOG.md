@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.16.0 — Real and practice clearly separated
+
+- **`positions` shows REAL money only**, titled "💰 REAL MONEY — your positions", in two groups:
+  - 🤖 **Managed by the bot on your Binance account** (the bot sells these for you), with each one's stop and whether its stop order is on Binance;
+  - 📝 **Tracked only — you sell these yourself** (alerts only).
+
+  A separate button underneath: "🎮 See my PRACTICE positions (3)".
+- **Practice is always labelled as play money:** "🎮 PRACTICE — play money, not real", "🎮 PRACTICE buy (play money)", "🎮 PRACTICE · SOL TP1…", "🎮 Practice cash (play money)".
+- **Every message about your Binance account starts with 💰 REAL:** stop placed or moved, sold, closed, auto-bought.
+- The end-of-day result lists "💰 REAL money" and "🎮 PRACTICE (play money)" on separate lines.
+- Menu: "💰 Real Positions" and "🎮 Practice (play money)". Dashboard tabs: "💰 Real Portfolio" and "🎮 Practice (play money)".
+- Real and practice were already stored separately; this makes the difference obvious on screen.
+- Tests: 134.
+
+## 2.15.0 — Buy Now, and an end-of-day result
+
+- **⚡ Buy Now:** `buynow SOL 50` (real money) or `practice buynow SOL 50` (play money), plus a menu button.
+  - Before buying, the bot checks the coin against the strategy and says so plainly: "✅ The strategy agrees: SOL has a buy signal today", or "⚠️ The strategy wouldn't buy ADA today — no buy signal… this trade isn't backed by the test results".
+  - The user confirms with a button. The bot buys at market, puts a stop order on Binance straight away, and manages the trade with the strategy's trailing stop. The stop moves up as the price rises, and the bot sells when it's hit.
+  - Limits: at most 20% of the account in one coin, only the USDT actually in the Spot wallet, and coins on Binance with enough price history. Real money needs auto-trading on. It works even before auto-buy is opened, because the user chooses the coin.
+- **End-of-day result** (sent just after the daily close, about 1am Lagos time) to everyone who closed trades that day, real and practice:
+  - **Profit:** congratulations, and the bot keeps watching.
+  - **Loss:** an apology ("I'm sorry — today ended at a loss"), a plain explanation that losing days are normal for this strategy (more than half of trades lose a little; fewer, bigger winners make up for them), encouragement that the plan carries on tomorrow, and a reminder that `golive off` pauses at any time.
+  - Sent once per day. An admin `autobuy run` never repeats it.
+- Trailing stops now update daily for every strategy-managed position, including Buy Now buys and practice positions, not just auto-buy users.
+- Menu: ⚡ Buy Now added; "Add a Buy" renamed "📝 Log a Buy" (recording a buy you made yourself).
+- Tests: 133.
+
 ## 2.14.0 — A menu with everything
 
 - **📋 MENU now has a button for every feature,** grouped:

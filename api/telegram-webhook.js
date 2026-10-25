@@ -70,19 +70,19 @@ const PERSISTENT_MENU = {
 const b = (text, data) => ({ text, callback_data: data });
 const MENU_ROWS = [
   // Your trades
-  [b('📊 My Positions', 'positions'),     b('💰 Add a Buy', 'buy_help')],
-  [b('🧾 Record a Sale', 'sold_help'),     b('🗑 Stop Tracking', 'sell_help')],
-  [b('🛡 Change a Stop', 'setstop_help'),  b('🔎 Check a Coin', 'check_help')],
-  [b('📈 My Profits', 'profit'),           b('💼 Split Capital', 'split_help')],
+  [b('💰 Real Positions', 'positions'),   b('⚡ Buy Now', 'buynow_help')],
+  [b('📝 Log a Buy', 'buy_help'),          b('🧾 Record a Sale', 'sold_help')],
+  [b('🛡 Change a Stop', 'setstop_help'),  b('🗑 Stop Tracking', 'sell_help')],
+  [b('🔎 Check a Coin', 'check_help'),     b('📈 My Profits', 'profit')],
   // Automation & practice
   [b('🤖 Auto-trading', 'golive'),         b('🛒 Auto-buy', 'autobuy')],
-  [b('💰 Binance Balance', 'balance'),     b('🎮 Practice', 'practice')],
+  [b('💵 Binance Balance', 'balance'),     b('🎮 Practice (play money)', 'practice')],
   // Market
   [b('🔍 Scan Now', 'scan'),               b('🌕 Moonshots', 'moonshots')],
-  [b('🚀 New Listings', 'newlistings'),    b('🖥 My Dashboard', 'dashboard')],
+  [b('🚀 New Listings', 'newlistings'),    b('💼 Split Capital', 'split_help')],
   // Account & help
-  [b('💳 My Account', 'account'),          b('📖 All Commands', 'help')],
-  [b('📚 User Manual', 'manual')],
+  [b('🖥 My Dashboard', 'dashboard'),      b('💳 My Account', 'account')],
+  [b('📖 All Commands', 'help'),           b('📚 User Manual', 'manual')],
 ];
 const ADMIN_ROWS = [
   [b('⏳ Pending', 'pending'),   b('👥 Users', 'users')],
@@ -487,6 +487,12 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
+  // ── BUY NOW (the user picks the coin; the strategy manages the exit) ────
+  if (cmd === 'buynow' || cmd === 'buy_now') {
+    await handleBuyNow(chatId, parts.slice(1), 'live');
+    return;
+  }
+
   // ── AUTO-BUY (practice now; live only after proven results) ─────────────
   if (cmd === 'autobuy') {
     await handleAutoBuy(chatId, parts.slice(1));
@@ -533,12 +539,13 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `━━━ *AUTO-TRADING (real money)* ━━━`,
       `\`golive\` — connect Binance step by step, then turn on auto-trading`,
       `\`golive off\` — stop the bot buying and selling`,
+      `\`buynow SOL 50\` — buy $50 of SOL now; the bot manages the sale`,
       `\`balance\` — your Binance Spot wallet`,
       `\`autobuy\` — the bot's buying strategy, test results and settings`,
       ``,
       `━━━ *PRACTICE (play money)* ━━━`,
       `\`practice\` — your $10,000 practice account`,
-      `\`practice buy SOL 100\` · \`practice sell SOL\` · \`practice reset\``,
+      `\`practice buy SOL 100\` · \`practice buynow SOL 50\` · \`practice sell SOL\` · \`practice reset\``,
       `\`autobuy on\` / \`off\` — let the bot buy with your play money`,
       ``,
       `━━━ *MARKET* ━━━`,
@@ -1007,45 +1014,49 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
   // ── POSITIONS ─────────────────────────────────────────────────────────────
   if (cmd === 'positions' || cmd === 'pos') {
-    const all     = await getAllPositions(chatId);
-    const entries = Object.values(all);
+    const entries = Object.values(await getAllPositions(chatId)).sort((a, b) => new Date(a.addedAt) - new Date(b.addedAt));
+    const practiceOpen = (await practice.getAccount(chatId, { create: false })) ? (await practice.getPositions(chatId)).length : 0;
+    const practiceBtn = { inline_keyboard: [[{ text: `🎮 See my PRACTICE positions${practiceOpen ? ` (${practiceOpen})` : ''}`, callback_data: 'practice' }]] };
+
     if (entries.length === 0) {
-      await reply(chatId, `📭 *No open positions*\n\nAdd one: \`buy SOL 92.50\``);
+      await send(chatId, [
+        `💰 *REAL MONEY — your positions*`,
+        ``,
+        `📭 No real positions open.`,
+        `Buy now: \`buynow SOL 50\` · or log a buy you made: \`buy SOL 92.50 2\``,
+        ``,
+        `_🎮 Practice (play money) is kept separately._`,
+      ].join('\n'), practiceBtn);
       return;
     }
 
-    // Group by symbol
-    const grouped = {};
-    for (const pos of entries) {
-      if (!grouped[pos.symbol]) grouped[pos.symbol] = [];
-      grouped[pos.symbol].push(pos);
+    const autoOn = await autoTrader.isOn(chatId);
+    const managed = entries.filter(p => p.strategy || (autoOn && autoTrader.eligible(p)));
+    const tracked = entries.filter(p => !managed.includes(p));
+    const fmtPos = (pos) => {
+      const ex = pos.exchange ? ` · ${PROVIDERS[pos.exchange]?.name || pos.exchange}` : '';
+      return [
+        `*${pos.symbol.replace('USDT', '')}*${ex}`,
+        `  Entry \`$${pos.buyPrice}\`${pos.quantity ? ` · Qty ${+Number(pos.quantity).toFixed(8)}` : ''}`,
+        pos.stopLossPrice ? `  🛡 Stop \`$${fmtP(pos.stopLossPrice)}\`${pos.strategy ? ' (trailing)' : ''}${pos.auto?.stopOrderId ? ' · order on Binance ✅' : ''}` : '',
+        pos.targetMultiple ? `  🎯 Target ${pos.targetMultiple}X = \`$${pos.targetPrice?.toFixed(6)}\`` : '',
+        `  Status: ${pos.lastRecommendation || 'waiting for first check'}`,
+        `  _id: ${pos.positionId}_`,
+      ].filter(Boolean).join('\n');
+    };
+
+    const lines = [`💰 *REAL MONEY — your positions (${entries.length})*`, ``];
+    if (managed.length) {
+      lines.push(`🤖 *Managed by the bot on your Binance account*`, `_The bot sells these for you._`, ``);
+      managed.forEach(p => lines.push(fmtPos(p), ``));
     }
-
-    const lines = [`📊 *Your Open Positions (${entries.length} total)*`, ``];
-
-    for (const [symbol, coinEntries] of Object.entries(grouped)) {
-      if (coinEntries.length === 1) {
-        const pos = coinEntries[0];
-        lines.push(`*${symbol}*${pos.exchange ? ` · ${PROVIDERS[pos.exchange]?.name || pos.exchange}` : ''}`);
-        lines.push(`  Entry: \`$${pos.buyPrice}\``);
-        if (pos.quantity)       lines.push(`  Qty: ${pos.quantity}`);
-        if (pos.targetMultiple) lines.push(`  Target: ${pos.targetMultiple}X = \`$${pos.targetPrice?.toFixed(6)}\``);
-        lines.push(`  Status: ${pos.lastRecommendation || 'Pending first check'}`);
-        lines.push(``);
-      } else {
-        // Multiple entries for same coin
-        lines.push(`*${symbol}* — ${coinEntries.length} entries`);
-        coinEntries.forEach((pos, i) => {
-          lines.push(`  *Entry ${i + 1}:* \`$${pos.buyPrice}\`` +
-            (pos.targetMultiple ? ` → ${pos.targetMultiple}X` : '') +
-            (pos.quantity ? ` | Qty: ${pos.quantity}` : ''));
-          lines.push(`    Status: ${pos.lastRecommendation || 'Pending'}`);
-        });
-        lines.push(``);
-      }
+    if (tracked.length) {
+      lines.push(`📝 *Tracked only — you sell these yourself*`, `_The bot sends alerts; you place the sale on your exchange._`, ``);
+      tracked.forEach(p => lines.push(fmtPos(p), ``));
     }
-
-    await reply(chatId, lines.join('\n'));
+    lines.push(`_🎮 Practice (play money) positions are kept separately._`);
+    await replyChunked(chatId, lines.join('\n'));
+    await send(chatId, `🎮 *Practice* is separate from your real money.`, practiceBtn);
     return;
   }
 
@@ -1687,6 +1698,62 @@ async function handleAutoBuy(chatId, args) {
   }
 }
 
+// ─── Buy now ──────────────────────────────────────────────────────────────────
+async function handleBuyNow(chatId, args, mode) {
+  const coin = (args[0] || '').toUpperCase().replace(/USDT$/, '');
+  const amount = parseFloat(String(args[1] || '').replace(/[$,]/g, ''));
+  const confirm = (args[2] || '').toLowerCase() === 'confirm';
+  const prefix = mode === 'practice' ? 'practice buynow' : 'buynow';
+  const where = mode === 'practice' ? '🎮 play money' : '💰 real money, on your Binance account';
+
+  if (!coin || !(amount > 0)) {
+    await reply(chatId, [
+      `⚡ *Buy Now* — you pick the coin, the bot buys it and manages the sale`,
+      ``,
+      `\`buynow SOL 50\` — buy $50 of SOL on your Binance account`,
+      `\`practice buynow SOL 50\` — the same with play money`,
+      ``,
+      `Before buying, I tell you whether the strategy agrees with buying that coin today.`,
+      `Then I put a stop order on Binance and move it up as the price rises (never down). When it's hit, I sell and tell you the result.`,
+      `Max ${require('../src/config/autobuy').LIMITS.maxPositionPct}% of your account in one coin. Real money needs auto-trading on (\`golive\`).`,
+    ].join('\n'));
+    return;
+  }
+
+  try {
+    if (!confirm) {
+      await reply(chatId, `🔎 Checking ${coin} against the strategy…`);
+      const a = await autoBuyer.analyseCoin(coin);
+      if (!a.stop) { await reply(chatId, `❌ Can't buy ${coin} this way: ${a.reason}.`); return; }
+      await send(chatId, [
+        `⚡ *Buy $${amount} of ${coin} now?* (${where})`,
+        ``,
+        a.signal
+          ? `✅ *The strategy agrees:* ${coin} has a buy signal today.`
+          : `⚠️ *The strategy wouldn't buy ${coin} today* — ${a.reason}.\nYou can still buy: the stop protects you. But this trade isn't backed by the test results.`,
+        ``,
+        `🛡 *Stop:* $${fmtP(a.stop)} (−${a.stopPct}% from now). It moves up as the price rises, never down. When it's hit, I sell.`,
+        mode === 'live' ? `Losses are possible.` : '',
+      ].filter(Boolean).join('\n'), { inline_keyboard: [
+        [{ text: `✅ Yes, buy $${amount} of ${coin}`, callback_data: `${prefix} ${coin} ${amount} confirm` }],
+        [{ text: 'Cancel', callback_data: mode === 'practice' ? 'practice' : 'positions' }],
+      ] });
+      return;
+    }
+    const r = await autoBuyer.buyNow(chatId, { symbol: coin, amount, mode });
+    await reply(chatId, [
+      `✅ *Bought ${+Number(r.qty).toFixed(8)} ${coin}* at ~$${fmtP(r.price)} (${usd(r.spend)}) — ${where}`,
+      `🛡 ${mode === 'live' ? 'Stop order placed on Binance' : 'Stop set'} at $${fmtP(r.analysis.stop)} (−${r.analysis.stopPct}%).`,
+      ``,
+      `I'll message you when the stop moves up, when I sell, and with your result at the end of each day.`,
+      mode === 'live' ? `See it any time: \`positions\` · \`balance\`` : `See it any time: \`practice\``,
+    ].join('\n'));
+  } catch (err) {
+    const known = err instanceof autoBuyer.AutoBuyError || err instanceof practice.PracticeError || err instanceof accounts.TradingError;
+    await reply(chatId, `❌ ${known ? err.message : `Buy failed: ${esc(err.message)}`}`);
+  }
+}
+
 // ─── Practice mode ────────────────────────────────────────────────────────────
 const usd = (n) => n == null ? '—' : `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pm = (n) => n == null ? '—' : `${n >= 0 ? '+' : ''}${usd(n)}`;
@@ -1700,6 +1767,7 @@ const PRACTICE_BUTTONS = { inline_keyboard: [
 
 async function handlePractice(chatId, args) {
   const sub = (args[0] || '').toLowerCase();
+  if (sub === 'buynow') { await handleBuyNow(chatId, args.slice(1), 'practice'); return; }
   try {
     if (sub === 'buy') {
       // practice buy SOL 100 [sl 88] [2x|25%]
@@ -1715,7 +1783,7 @@ async function handlePractice(chatId, args) {
       const { position: p, cash } = await practice.buy(chatId, { symbol: coin, amount, stop, target });
       const t = p.takeProfits;
       await reply(chatId, [
-        `🎮 *Practice buy — ${p.symbol.replace('USDT', '')}*`,
+        `🎮 *PRACTICE buy (play money) — ${p.symbol.replace('USDT', '')}*`,
         ``,
         `Spent ${usd(p.cost)} → ${+p.quantity.toFixed(8)} ${p.symbol.replace('USDT', '')} at $${fmtP(p.buyPrice)}`,
         `_(live Binance price $${fmtP(p.livePriceAtBuy)} + slippage, fee ${usd(p.fees)})_`,
@@ -1769,7 +1837,7 @@ async function handlePractice(chatId, args) {
     // Status
     const s = await practice.summary(chatId);
     const lines = [
-      `🎮 *Practice account* — play money, real Binance prices`,
+      `🎮 *PRACTICE — play money, not real* (live Binance prices)`,
       ``,
       `💰 *Total value:* ${usd(s.equity)}  (${pm(s.returnUsd)} · ${signed(s.returnPct, '%')} since start)`,
       `💵 Cash: ${usd(s.cash)}`,
@@ -2198,6 +2266,7 @@ async function handleUpdate(body) {
       split_help:  'split_guide',
       setstop_help: 'setstop_guide',
       check_help:  'check_guide',
+      buynow_help: 'buynow',
       profit:      'profit',
       manual:      'manual',
     };

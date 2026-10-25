@@ -120,9 +120,9 @@ test('bot: practice commands', async () => {
   const { net: n } = setup(100);
   const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
   await say('practice');
-  assert.match(n.sent.at(-1).text, /Practice account/);
+  assert.match(n.sent.at(-1).text, /PRACTICE — play money/);
   await say('practice buy SOL 250 2x');
-  assert.match(n.sent.at(-1).text, /Practice buy — SOL/);
+  assert.match(n.sent.at(-1).text, /PRACTICE buy \(play money\) — SOL/);
   assert.match(n.sent.at(-1).text, /\$9,750\.00/);
   await say('practice sell SOL');
   assert.match(n.sent.at(-1).text, /sold/);
@@ -216,7 +216,7 @@ test('menu: every feature has a button; admin rows only for the admin; menu text
   await say(1000, 'menu');
   const admin = n.sent.at(-1);
   const data = admin.reply_markup.inline_keyboard.flat().map(x => x.callback_data);
-  for (const d of ['positions', 'buy_help', 'sold_help', 'sell_help', 'setstop_help', 'check_help', 'profit', 'split_help', 'golive', 'autobuy', 'balance', 'practice', 'scan', 'moonshots', 'newlistings', 'dashboard', 'account', 'help', 'manual', 'pending', 'users', 'subs', 'invite']) {
+  for (const d of ['positions', 'buynow_help', 'buy_help', 'sold_help', 'sell_help', 'setstop_help', 'check_help', 'profit', 'split_help', 'golive', 'autobuy', 'balance', 'practice', 'scan', 'moonshots', 'newlistings', 'dashboard', 'account', 'help', 'manual', 'pending', 'users', 'subs', 'invite']) {
     assert.ok(data.includes(d), `menu has ${d}`);
   }
   assert.match(admin.text, /^\*📋 Menu\*/);
@@ -231,4 +231,19 @@ test('menu: every feature has a button; admin rows only for the admin; menu text
   await require('../src/services/positionStore').addPosition({ chatId: '1000', symbol: 'SOLUSDT', buyPrice: 100, exchange: 'binance' });
   await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data: 'check_help', from: {}, message: { message_id: 9, chat: { id: 1000 }, text: '📋 Menu — tap any button' } } } }), fakeRes());
   assert.deepEqual(n.sent.at(-1).reply_markup.inline_keyboard.flat().map(x => x.callback_data), ['check SOL']);
+});
+
+test('positions: REAL only, split into bot-managed vs tracked; practice is never mixed in', async () => {
+  const { net: n, practice } = setup(100);
+  const ps = require('../src/services/positionStore');
+  await ps.addPosition({ chatId: '1000', symbol: 'ETHUSDT', buyPrice: 100, quantity: 1, exchange: 'mexc' });
+  const managed = await ps.addPosition({ chatId: '1000', symbol: 'SOLUSDT', buyPrice: 100, quantity: 2, stopLossPrice: 90, exchange: 'binance' });
+  await ps.updatePosition('1000', managed.positionId, { strategy: 'donchian:55-20:btc' });
+  await practice.buy('1000', { symbol: 'BNB', amount: 100 });
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'positions' } } }), fakeRes());
+  const list = n.sent.at(-2).text;
+  assert.match(list, /REAL MONEY — your positions \(2\)/);
+  assert.match(list, /Managed by the bot[\s\S]*SOL[\s\S]*Tracked only[\s\S]*ETH/);
+  assert.ok(!/BNB/.test(list), 'practice coin not in the real list');
+  assert.match(n.sent.at(-1).reply_markup.inline_keyboard[0][0].text, /PRACTICE positions \(1\)/);
 });

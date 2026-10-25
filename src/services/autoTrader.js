@@ -125,7 +125,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
       const o = await c.getOrder(sym, a.stopOrderId);
       if (o.status === 'FILLED') {
         const q = noteFill(o, 'stop', a.stopPrice);
-        msgs.push(`🤖 *Auto-exit${dry}:* your Binance stop filled — sold ${r8(q)} ${coin} at ~$${money(avgFill(o, a.stopPrice))}${tag}`);
+        msgs.push(`💰 REAL · 🤖 *Auto-exit${dry}:* your Binance stop filled — sold ${r8(q)} ${coin} at ~$${money(avgFill(o, a.stopPrice))}${tag}`);
         a.stopOrderId = null;
         await store.cmd('HDEL', ordersKey(chatId), positionId);
         actions.push('stop-filled');
@@ -175,7 +175,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
       } else {
         const o = await c.marketSell(sym, toFixedStep(qty, rules.stepSize), clientId(wants[0].key));
         const q = noteFill(o, wants[0].key, px) || 0;
-        msgs.push(`🤖 *Auto-exit${dry}:* sold ${r8(q)} ${coin} at ~$${money(avgFill(o, px))}${tag} (${label}).`);
+        msgs.push(`💰 REAL · 🤖 *Auto-exit${dry}:* sold ${r8(q)} ${coin} at ~$${money(avgFill(o, px))}${tag} (${label}).`);
         actions.push(`sell:${wants.map(w => w.key).join('+')}`);
       }
       for (const w of wants) a.done[w.key] = true;
@@ -191,7 +191,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
       await store.cmd('HDEL', ordersKey(chatId), positionId);
       await ps.removePositionById(chatId, positionId);
       msgs.push([
-        `✅ *${sym} closed automatically${dry}*`,
+        `💰 REAL · ✅ *${sym} closed automatically${dry}*`,
         `Sold ${r8(total)} ${coin} at an average of $${money(avg)}${tag}`,
         `Result: ${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%${trade.pnlDollar !== null ? ` ($${trade.pnlDollar.toFixed(2)})` : ''} — saved to your history.`,
         a.remainingQty > 0 ? `_${r8(a.remainingQty)} ${coin} left over is below Binance's minimum order and stays in your wallet._` : '',
@@ -224,7 +224,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
           a.stopQty = qty;
           a.lastError = null;
           await store.cmd('HSET', ordersKey(chatId), positionId, JSON.stringify({ symbol: sym, orderId: a.stopOrderId }));
-          msgs.push(`🤖 *${moved ? 'Stop moved' : 'Stop placed'} on Binance${dry}:* sell ${qty} ${coin} if price falls to $${money(stop)}${tag}.`);
+          msgs.push(`💰 REAL · 🤖 *${moved ? 'Stop moved' : 'Stop placed'} on Binance${dry}:* sell ${qty} ${coin} if price falls to $${money(stop)}${tag}.`);
           actions.push(moved ? 'move-stop' : 'place-stop');
         }
       }

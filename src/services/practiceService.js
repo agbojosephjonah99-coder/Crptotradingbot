@@ -233,18 +233,18 @@ async function syncUser(chatId, cache = new Map()) {
       p.lastCheckAt = new Date().toISOString();
       for (const s of sales) {
         cash += s.net;
-        msgs.push(`🎮 *Practice — ${coinOf(p.symbol)} ${LABEL[s.reason]}:* sold ${r8(s.qty)} at $${px(s.at)} (fee ${usd(s.fee)}) → +${usd(s.net)}`);
+        msgs.push(`🎮 PRACTICE · *${coinOf(p.symbol)} ${LABEL[s.reason]}:* sold ${r8(s.qty)} at $${px(s.at)} (fee ${usd(s.fee)}) → +${usd(s.net)}`);
       }
       const trade = sales.length ? await closeIfDone(chatId, p, price) : null;
       if (trade) {
-        msgs.push(`🎮 *Practice trade closed — ${coinOf(p.symbol)}:* ${trade.pnlDollar >= 0 ? '+' : ''}${usd(trade.pnlDollar)} (${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%) after ${usd(trade.fees)} fees.\n${profit.todayLine(await getTrades(chatId)).replace('Today so far', 'Practice today')}`);
+        msgs.push(`🎮 PRACTICE · *trade closed — ${coinOf(p.symbol)}:* ${trade.pnlDollar >= 0 ? '+' : ''}${usd(trade.pnlDollar)} (${trade.pnlPct >= 0 ? '+' : ''}${trade.pnlPct}%) after ${usd(trade.fees)} fees.\n${profit.todayLine(await getTrades(chatId)).replace('Today so far', 'Practice today')}`);
       } else {
         await savePos(chatId, p);
       }
     }
     if (cash !== acct.cash) {
       await setCash(chatId, cash);
-      msgs.push(`💵 Practice cash: ${usd(cash)}`);
+      msgs.push(`🎮 Practice cash (play money): ${usd(cash)}`);
     }
     return msgs;
   });
