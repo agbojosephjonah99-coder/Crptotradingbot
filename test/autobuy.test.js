@@ -395,3 +395,67 @@ test('a failed daily check does not use up the day: the admin is told and the ne
   assert.ok((await practice.summary('house')).positions.length > 0, 'and the house account bought');
   assert.equal((await ab.runDaily({ allowed: new Set(['1000']), send, now: dayStartPlus(70) })).skipped, 'already ran today');
 });
+
+test('autobuy on: says whether today\'s check already ran, what it found, and when the first check is', async () => {
+  setup();
+  const ab = require('../src/services/autoBuyer');
+  const before = await ab.todayCheck(dayStartPlus(2));
+  assert.equal(before.ranToday, false);
+  assert.match(before.text, /in a few minutes/);
+
+  await ab.runDaily({ allowed: new Set(['1000']), send: async () => {}, now: dayStartPlus(10) });
+  const after = await ab.todayCheck(dayStartPlus(60));
+  assert.equal(after.ranToday, true);
+  assert.ok(after.signals > 0);
+  assert.match(after.text, /Today's check already ran/);
+  assert.match(after.text, /practice buynow [A-Z]+ 500/);
+  assert.match(after.text, /tomorrow just after 1am Lagos time/);
+});
+
+test('manual: describes what the bot does now (it can buy and sell), not the old read-only bot', async () => {
+  const { net } = setup();
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'manual' } } }), fakeRes());
+  const all = net.sent.map(m => m.text).join('\n');
+  assert.doesNotMatch(all, /read-only|never touches your money|CryptoBot V2/);
+  assert.match(all, /JijazyBot — User Manual/);
+  assert.match(all, /Does the bot buy\/sell for me\?\*\nOnly if you ask it to/);
+  assert.match(all, /Why hasn't it bought anything/);
+  for (const m of net.sent) assert.ok(m.text.length < 4096, 'each section fits in one Telegram message');
+});
+
+test('prices: $1,000+ coins (BTC, ETH) format without crashing', () => {
+  const { fmtUsd } = require('../src/strategies');
+  assert.equal(fmtUsd(104250.37), '$104,250');
+  assert.equal(fmtUsd(2500.5), '$2,501');
+  assert.equal(fmtUsd(182.41), '$182.41');
+  assert.equal(fmtUsd(1.23456), '$1.2346');
+  assert.equal(fmtUsd(0.0000098), '$0.000009800');
+  assert.equal(fmtUsd(NaN), '—');
+});
+
+test('daily check with real-world prices (BTC ~$100,000, ETH ~$3,000): runs and buys', async () => {
+  resetEnv({ TRADING_ENCRYPTION_KEY: ENC, AUTO_STRATEGY_FILE: path.join(os.tmpdir(), 'no-such-strategy.json') });
+  delete process.env.AUTOBUY_UNIVERSE;
+  const scale = { BTCUSDT: 400, ETHUSDT: 12, BNBUSDT: 3 };
+  const k = (sym, limit) => trendDaily(limit).map(c => { const m = scale[sym] || 1; return { ...c, open: c.open * m, high: c.high * m, low: c.low * m, close: c.close * m }; });
+  const base = lastClose() * 1.002;
+  mockNet({ price: base * 400, klines: (sym, interval, limit) => (interval === '1d' ? k(sym, limit) : [{ time: Date.now() - 60_000, open: base, high: base, low: base, close: base, volume: 1 }]) });
+  const ab = require('../src/services/autoBuyer');
+  const sent = [];
+  const r = await ab.runDaily({ allowed: new Set(['1000']), send: async (id, text) => sent.push({ id: String(id), text }), now: dayStartPlus(10) });
+  assert.ok(r.signals > 0, 'the check finished');
+  const report = sent.find(m => /Auto-buy daily check/.test(m.text));
+  assert.match(report.text, /BTC \$\d{2,3},\d{3} is above its 100-day average \$\d{2,3},\d{3}/);
+  assert.ok(!sent.some(m => /check failed/.test(m.text)));
+});
+
+test('a failed admin run says so plainly (not "try admin run of 6")', async () => {
+  resetEnv({ TRADING_ENCRYPTION_KEY: ENC, AUTO_STRATEGY_FILE: path.join(os.tmpdir(), 'no-such-strategy.json') });
+  mockNet({ price: 100, klines: () => { throw new Error('Binance is down'); } });
+  const ab = require('../src/services/autoBuyer');
+  const sent = [];
+  await assert.rejects(ab.runDaily({ allowed: new Set(['1000']), force: true, send: async (id, text) => sent.push(text) }));
+  assert.match(sent[0], /your `autobuy run`/);
+  assert.match(sent[0], /Send `autobuy run` to try again/);
+  assert.doesNotMatch(sent[0], /admin run of|No more/);
+});

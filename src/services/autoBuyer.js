@@ -89,9 +89,11 @@ async function computeSignals(strategy, { symbols = null } = {}) {
   const btcLast = prepared.BTCUSDT.c[prepared.BTCUSDT.c.length - 1];
   const btc = ctx.btcAt(btcLast.time);
   const regimeUp = ctx.btcUp(btcLast.time);
-  const regimeText = btc && btc.sma100
-    ? `BTC ${fmtUsd(btc.close)} is ${regimeUp ? 'above' : 'below'} its 100-day average ${fmtUsd(btc.sma100)}`
-    : 'BTC\'s 100-day average isn\'t available';
+  // Wording only — a formatting problem must never stop the day's check
+  let regimeText = 'BTC\'s 100-day average isn\'t available';
+  try {
+    if (btc && btc.sma100) regimeText = `BTC ${fmtUsd(btc.close)} is ${regimeUp ? 'above' : 'below'} its 100-day average ${fmtUsd(btc.sma100)}`;
+  } catch { regimeText = `BTC is ${regimeUp ? 'above' : 'below'} its 100-day average`; }
   for (const sym of list) {
     const ind = prepared[sym];
     if (!ind) { analysis[sym] = { signal: false, reason: 'not enough daily price history on Binance' }; continue; }
@@ -269,6 +271,31 @@ async function userStatus(chatId) {
   return { practiceOn: !!pr, liveOn: !!lv, ...g, lastRun: last, limits: cfg.LIMITS, universe: cfg.universe().map(s => s.replace(/USDT$/, '')) };
 }
 
+/**
+ * What a user who switches auto-buy on right now should know about today:
+ * has today's check run, what did it find, and when is their first check.
+ */
+async function todayCheck(now = new Date()) {
+  const date = now.toISOString().slice(0, 10);
+  const last = await store.getJSON(K.signals, null);
+  const ranToday = last && last.date === date;
+  if (!ranToday) {
+    const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const when = mins < cfg.DAILY_RUN_AFTER_UTC_MINUTES ? 'just after 1am Lagos time (in a few minutes)' : 'within the next 30 minutes (today\'s check hasn\'t run yet)';
+    return { ranToday: false, text: `*Your first check:* ${when}.` };
+  }
+  const lines = [`*Today's check already ran (${date}):* `];
+  if (last.buys?.length) {
+    const coins = last.buys.map(b => b.coin);
+    lines[0] += `buy signal${coins.length > 1 ? 's' : ''} for ${coins.join(', ')}.`;
+    lines.push(`Those were bought for accounts that had auto-buy on. To try ${coins.length > 1 ? 'one' : 'it'} now: \`practice buynow ${coins[0]} 500\`.`);
+  } else {
+    lines[0] += `no buy signals${last.regimeUp === false ? ' — BTC is below its 100-day average, so the strategy is waiting' : ''}.`;
+  }
+  lines.push(`*Your first check:* tomorrow just after 1am Lagos time.`);
+  return { ranToday: true, signals: last.buys?.length || 0, text: lines.join('\n') };
+}
+
 // ─── Practice accounts ────────────────────────────────────────────────────────
 async function runPracticeAccount(chatId, strategy, sig, { buy = true } = {}) {
   const msgs = [];
@@ -391,7 +418,10 @@ async function runDaily({ allowed = new Set(), send = async () => {}, force = fa
     try {
       sig = await computeSignals(strategy);
     } catch (err) {
-      if (admin) await send(admin, `⚠️ *Auto-buy check failed* (${date}, try ${tries || 'admin run'} of ${MAX_TRIES}): ${err.message}\n${tries && tries < MAX_TRIES ? 'It will try again in about 30 minutes.' : 'No more tries today — send `autobuy run` to try by hand.'}`).catch(() => {});
+      const head = force ? `${date}, your \`autobuy run\`` : `${date}, try ${tries} of ${MAX_TRIES}`;
+      const next = force ? 'Nothing was bought. Send `autobuy run` to try again.'
+        : tries < MAX_TRIES ? 'It will try again in about 30 minutes.' : 'No more automatic tries today — send `autobuy run` to try by hand.';
+      if (admin) await send(admin, `⚠️ *Auto-buy check failed* (${head}): ${err.message}\n${next}`).catch(() => {});
       throw err;
     }
     await store.setJSON(K.signals, { date, at: new Date().toISOString(), strategy: strategy.id, verdict: strategy.verdict, regimeUp: sig.regimeUp, regimeText: sig.regimeText, buys: sig.buys.map(b => ({ coin: coinOf(b.symbol), stopPct: b.stopPct, why: b.why })) });
@@ -572,5 +602,5 @@ const usd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits
 module.exports = {
   AutoBuyError, HOUSE, currentStrategy, loadResearch, computeSignals, trailFor, size, runDaily,
   analyseCoin, buyNow, coinTable, sendDailySummaries, dailyMessage, buyMessage, noBuyMessage, adminReport,
-  setPractice, setLive, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
+  setPractice, setLive, todayCheck, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
 };

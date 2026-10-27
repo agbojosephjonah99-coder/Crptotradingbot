@@ -73,8 +73,15 @@ function prepare(c) {
 
 const ret = (ind, i, n) => (i - n >= 0 ? ind.close[i] / ind.close[i - n] - 1 : null);
 
-/** Price for messages: 4 decimals from $1 up, 4 significant digits below. */
-const $ = (p) => (p == null || !Number.isFinite(p) ? '—' : `$${p >= 1 ? Number(p).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: p >= 1000 ? 0 : 4 }) : Number(p).toPrecision(4)}`);
+/** Price for messages: whole dollars from $1,000, up to 4 decimals from $1, 4 significant digits below. */
+const $ = (p) => {
+  if (p == null || !Number.isFinite(p)) return '—';
+  if (p < 1) return `$${Number(p).toPrecision(4)}`;
+  // $1,000 and up: whole dollars ($104,250). Below that: 2–4 decimals ($182.41, $1.2345).
+  // (minimumFractionDigits must never be above maximumFractionDigits, or toLocaleString throws.)
+  const digits = p >= 1000 ? { minimumFractionDigits: 0, maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 4 };
+  return `$${Number(p).toLocaleString('en-US', digits)}`;
+};
 const pct = (x) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`;
 
 const STRATEGIES = {

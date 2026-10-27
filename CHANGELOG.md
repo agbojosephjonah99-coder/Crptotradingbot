@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.20.2 — Fix: the daily auto-buy check crashed on BTC's price
+
+- **Fixed: "Auto-buy check failed: maximumFractionDigits value is out of range".** The price wording added in 2.20.0 crashed on any price of $1,000 or more, so the check failed every time at "BTC $… is above its 100-day average", and nothing was bought for anyone (practice, house or real). The same crash also broke `stops` and ⚡ Buy Now. Prices from $1,000 now show in whole dollars ($104,250).
+- The BTC market-filter wording can no longer stop the check, even if formatting ever fails again.
+- A failed `autobuy run` now says "your `autobuy run`… Send `autobuy run` to try again" instead of "try admin run of 6… No more tries today".
+- New tests use real-world prices (BTC around $100,000, ETH around $3,000). Tests: 155.
+
+## 2.20.1 — An up-to-date user manual
+
+- **📚 User Manual rewritten** (`manual` / the menu button). It still said "the bot is read-only — you execute all trades", called itself CryptoBot V2 and presented the switched-off signal scanner as the main feature. It now explains, in 9 short sections:
+  - what JijazyBot does (track and alert on 7 exchanges, practice with play money, buy and sell on your own Binance account);
+  - how your money stays safe (your own Binance account, no withdrawals, encrypted keys, `golive off`);
+  - how to start (practice and `autobuy on` first, then the 4-step `golive`);
+  - how the bot buys (Buy Now, auto-buy, the 55-day breakout with the BTC filter, the safety limits, the rising stop);
+  - what to expect, honestly (about 3 buys a month, more than half of trades lose a little, +23% vs BTC's +85% in the test);
+  - logging your own trades, the alerts (TP1 40% · TP2 35% · TP3 the rest, done automatically for bot-managed positions), the high-risk scans;
+  - common questions: "Does the bot buy/sell for me?" → "Only if you ask it to…", "Why hasn't auto-buy bought anything?", "Why is my balance $0?", the $5 minimum.
+- **`autobuy on` now says where today stands:** whether today's check has already run and what it found (signals, or BTC below its 100-day average), and when your first check is. If today's check already bought a coin for others, it tells you how to buy it now in practice (`practice buynow COIN 500`).
+- Tests: 152.
+
 ## 2.20.0 — Back buttons, reasons for every auto-buy, safer payments
 
 - **⬅️ Back on every screen, and old screens disappear.** Tapping any button now removes the message it was on (and the rest of that screen), and the next screen has a ⬅️ Back button that returns to the screen you came from: menu → Practice → Auto-buy → Today's stops → Back → Auto-buy → Back → Practice → Back → menu.
