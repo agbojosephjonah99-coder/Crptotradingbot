@@ -486,3 +486,25 @@ test('strategy lab: comparisons (2% risk, breakout + strongest coins, BTC above 
   const t = btcTrend(btc, 250 * DAY, 200), h = btcTrend(btc, 250 * DAY, 0);
   assert.ok(t.maxDrawdownPct < h.maxDrawdownPct, 'the 200-day rule cuts the fall');
 });
+
+test('manual: figures come from the latest lab result; it covers paying, free small accounts, savings, expect and ask', async () => {
+  const fs = require('fs');
+  const file = path.join(os.tmpdir(), `lab-manual-${Date.now()}.json`);
+  fs.writeFileSync(file, JSON.stringify({ period: { split: '2023-12-11', to: '2026-10-26' }, btcBuyHoldTestPct: 94.3, pick: { family: 'donchian', params: { entryN: 55, exitN: 20, regime: true }, portfolioTest: { returnPct: 21.5, maxDrawdownPct: 4.2 }, test: { trades: 108 } } }));
+  setup({ strategyFile: file });
+  process.env.PAID_ACCESS_ENABLED = 'true';
+  process.env.OPENAI_API_KEY = 'sk-test';
+  const net = require('./helpers').mockNet({ price: 100 });
+  try {
+    await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'manual' } } }), fakeRes());
+    const all = net.sent.map(m => m.text).join('\n');
+    assert.match(all, /108 trades it was never tuned on\. Over 2\.9 years it grew an account about 22% \(about 7% a year, worst drop 4\.2%\), while simply holding BTC made 94%/);
+    assert.doesNotMatch(all, /about 23%|made 85%/);
+    assert.match(all, /DO I HAVE TO PAY/);
+    assert.match(all, /Free for small accounts:\* if your Binance Spot balance is \$100\.00 or less/);
+    assert.match(all, /save 10/);
+    assert.match(all, /expect 20/);
+    assert.match(all, /Ask the bot:\* tap 💬 Ask the Bot/);
+    for (const m of net.sent) assert.ok(m.text.length < 4096);
+  } finally { delete process.env.PAID_ACCESS_ENABLED; delete process.env.OPENAI_API_KEY; }
+});

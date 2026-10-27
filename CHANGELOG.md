@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.22.1 — User manual brought up to date
+
+- **📚 The manual's test figures now come from the latest lab result** (`data/auto-strategy.json`), so they update every time you run `npm run lab` and commit. It said "about 23% over 3 years, BTC made 85%"; it now says, from the current result: 108 trades, about 22% over 2.9 years (about 7% a year, worst drop 4.2%), holding BTC 94% with far bigger drops.
+- **New section "💳 Do I have to pay?"**: the price (or "free right now"), free access for small accounts and its limit, and that practice, `expect`, `golive` and `balance` always work. When the AI helper is on, it also explains 💬 Ask the bot and the daily question limit.
+- **"How to start"** now points small accounts to `expect 20` and the weekly savings plan (`save 10`).
+- Tests: 180.
+
 ## 2.22.0 — Fairer strategy comparisons in the lab, and 💬 Ask the bot
 
 **Auto-buy is unchanged** (practice, the house forward test and real money): the lab still picks the strategy on the training period only, `data/auto-strategy.json` keeps the same pick, and the bot trades exactly as before.

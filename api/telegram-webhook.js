@@ -1325,6 +1325,13 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
   // ── MANUAL ───────────────────────────────────────────────────────────────
   if (cmd === 'manual' || cmd === 'guide') {
+    // Figures come from the latest lab result, so the manual never goes stale
+    const lab = expectations.stats();
+    const labYears = lab.years.toFixed(1);
+    const payLine = !subs.enabled()
+      ? `The bot is free to use right now.`
+      : [`Access costs ${subs.priceLabel()} (\`subscribe you@example.com\`; card, bank transfer or USSD).`,
+        subs.freeLimit() > 0 ? `🆓 *Free for small accounts:* if your Binance Spot balance is ${usd(subs.freeLimit())} or less, you don't pay. Coins bought by your savings plan don't count. It's checked when you connect and every day.` : ''].filter(Boolean).join('\n');
     // Send manual in chunks — it is long
     const sections = [
 
@@ -1370,6 +1377,8 @@ async function handleMessage(chatId, text, from, meta = {}) {
       ``,
       `*3. Check your money*`,
       `\`balance\` shows your Binance Spot wallet. \`positions\` shows your real trades.`,
+      ``,
+      `*Small amount?* Send \`expect 20\` (or your amount) to see honest numbers first, and consider the weekly savings plan: \`save 10\`.`,
       ].join('\n'),
 
       // ── Section 4 ──
@@ -1395,7 +1404,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       ``,
       `• *Buys are rare.* About 3 a month across all 15 coins. Some weeks have none, and when BTC is below its 100-day average the bot waits. On a quiet day you get a note saying why.`,
       `• *More than half of trades lose a little.* The fewer, bigger winners are meant to make up for them.`,
-      `• *Tested on past data:* it made money after fees on 108 trades it was never tuned on. But over nearly 3 years it grew an account about 23%, while simply holding BTC made 85%. It aims to be steady, not fast.`,
+      `• *Tested on past data:* it made money after fees on ${lab.trades ?? 'about 100'} trades it was never tuned on. Over ${labYears} years it grew an account about ${Math.round(lab.returnPct)}% (about ${lab.yearlyPct.toFixed(0)}% a year, worst drop ${lab.maxDrawdownPct}%)${lab.btcHoldPct != null ? `, while simply holding BTC made ${Math.round(lab.btcHoldPct)}% — with far bigger drops` : ''}. It aims to be steady, not fast.`,
       `• *No strategy can double your money weekly.* Anyone who promises that is not being honest.`,
       ``,
       `After each trading day you get your result — wins, losses and profit.`,
@@ -1412,6 +1421,15 @@ async function handleMessage(chatId, text, from, meta = {}) {
       ``,
       `\`expect 50\` shows what the trading strategy could make with $50 (or any amount), honestly — including that small amounts make small dollars.`,
       ].join('\n'),
+
+      // ── Section 5c ──
+      [`💳 *DO I HAVE TO PAY?*`,
+      ``,
+      payLine,
+      ``,
+      `\`account\` shows your status. Practice, \`expect\`, \`golive\` and \`balance\` always work, so you can try things and connect before paying.`,
+      ai.isConfigured() ? `\n💬 *Ask the bot:* tap 💬 Ask the Bot or just type a question, e.g. _why did the bot buy SOL?_ The AI explains using your own trades; it never buys, sells or predicts prices. ${ai.dailyLimit()} questions a day.` : '',
+      ].filter(x => x !== '').join('\n'),
 
       // ── Section 6 ──
       [`📝 *TRADES YOU MAKE YOURSELF*`,

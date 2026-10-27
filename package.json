@@ -1,6 +1,6 @@
 {
   "name": "crypto-signal-bot-v2-enhanced",
-  "version": "2.22.0",
+  "version": "2.22.1",
   "description": "JijazyBot — Telegram trading assistant: position alerts on 7 exchanges, play-money practice, and buying/selling on each user's own Binance account (tested breakout strategy; keys can never withdraw)",
   "main": "index.js",
   "engines": {
