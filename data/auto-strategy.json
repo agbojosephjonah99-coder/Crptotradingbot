@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-27T02:05:24.934Z",
+  "generatedAt": "2026-10-27T03:06:18.847Z",
   "rules": {
     "feePct": 0.1,
     "slippagePct": 0.05,
@@ -225,6 +225,68 @@
     }
   },
   "verdict": "PASS",
+  "comparisons": {
+    "risk2": {
+      "donchian": {
+        "taken": 55,
+        "returnPct": 37.7,
+        "maxDrawdownPct": 8.9
+      },
+      "emaTrend": {
+        "taken": 59,
+        "returnPct": 47.5,
+        "maxDrawdownPct": 10.8
+      },
+      "momentum": {
+        "taken": 78,
+        "returnPct": 68.8,
+        "maxDrawdownPct": 16.3
+      }
+    },
+    "combo": {
+      "families": [
+        "donchian",
+        "momentum"
+      ],
+      "test": {
+        "trades": 200,
+        "winRatePct": 42,
+        "expectancyR": 0.439,
+        "expectancyRange95": [
+          0.186,
+          0.692
+        ],
+        "profitFactor": 2.42,
+        "avgTradePct": 7.71,
+        "avgDays": 34.2,
+        "bestR": 13.96,
+        "worstR": -1.03
+      },
+      "verdict": "PASS",
+      "portfolio1": {
+        "taken": 81,
+        "returnPct": 18.4,
+        "maxDrawdownPct": 7.6
+      },
+      "portfolio2": {
+        "taken": 81,
+        "returnPct": 34.1,
+        "maxDrawdownPct": 14.4
+      }
+    },
+    "btcTrend200": {
+      "returnPct": 75.7,
+      "maxDrawdownPct": 32,
+      "switches": 29,
+      "timeInMarketPct": 62
+    },
+    "btcHold": {
+      "returnPct": 94,
+      "maxDrawdownPct": 53,
+      "switches": 1,
+      "timeInMarketPct": 100
+    }
+  },
   "variants": [
     {
       "id": "donchian:20-10:btc",
