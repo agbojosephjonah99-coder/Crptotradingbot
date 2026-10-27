@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.20.3 — Scan and moonshots look at Binance coins
+
+- **🔍 Scan, 🌕 Moonshots and 💼 Split now scan Binance coins.** Before, they only looked at KuCoin, so many picks couldn't be bought on Binance (where Buy Now and auto-trading work). Now:
+  - the coin list is every live Binance USDT pair that is up today with at least $200k of volume, minus big established coins, stablecoins, fiat, gold and wrapped tokens, and delisted pairs; the 30 busiest are scored;
+  - the momentum check uses Binance's own hourly candles;
+  - each pick shows "🏦 Exchange: Binance (COIN/USDT)", a ready `buynow COIN 10` (real money, high risk) and `practice buynow COIN 100`, and its track command includes `ex binance`.
+  - If Binance can't be reached, the scan falls back to KuCoin and says so ("these come from KuCoin and may not be on Binance").
+- The admin's moonshot alerts and the info-channel broadcast use the same Binance list.
+- `/api/health` `moonshotData` now checks Binance (or KuCoin) plus CoinGecko.
+- 🚀 New Listings is unchanged.
+- Tests: 158.
+
 ## 2.20.2 — Fix: the daily auto-buy check crashed on BTC's price
 
 - **Fixed: "Auto-buy check failed: maximumFractionDigits value is out of range".** The price wording added in 2.20.0 crashed on any price of $1,000 or more, so the check failed every time at "BTC $… is above its 100-day average", and nothing was bought for anyone (practice, house or real). The same crash also broke `stops` and ⚡ Buy Now. Prices from $1,000 now show in whole dollars ($104,250).

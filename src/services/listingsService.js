@@ -1,6 +1,11 @@
 /**
  * ─── Listings Service ─────────────────────────────────────────────────────────
- * KuCoin for market data + CoinGecko for metadata + probabilityEngine for scoring
+ * Binance for market data (KuCoin only if Binance can't be reached) + CoinGecko
+ * for metadata + probabilityEngine for scoring.
+ *
+ * v2.20.3: scan / moonshots / split look at BINANCE coins, so every pick can be
+ * bought where the bot trades (Buy Now, auto-trading). Before, they only looked
+ * at KuCoin, and many picks weren't on Binance at all.
  *
  * RELIABILITY (v2.5): the old version made ~90 calls one after another
  * (2 CoinGecko + 1 KuCoin per coin × 30 coins). CoinGecko's free tier allows
@@ -15,6 +20,7 @@
 const { calculateProbability } = require('./probabilityEngine');
 const { getWithRetry } = require('../lib/http');
 const { mapLimit } = require('../lib/concurrency');
+const { binanceGet } = require('../lib/market');
 
 const KUCOIN_BASE    = 'https://api.kucoin.com/api/v1';
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
@@ -28,6 +34,12 @@ const ESTABLISHED = new Set([
   'TIA','KAS','ORDI','WIF','JUP','BONK','PYTH','BOME','MEME','NOT',
   'ZK','TURBO','DOGS','GOAT','POPCAT','ME','MOVE','VIRTUAL','TRUMP',
   'EIGEN','CATI','STRK','PIXEL','PORTAL','AEVO','ACT','DRIFT',
+]);
+
+// Not coins to scan: stablecoins, fiat, gold and wrapped tokens
+const NOT_COINS = new Set([
+  'USDC','FDUSD','TUSD','USDP','DAI','BUSD','USDS','USDE','USD1','RLUSD','BFUSD','XUSD','PYUSD','USTC',
+  'EUR','EURI','AEUR','GBP','TRY','BRL','PAXG','XAUT','WBTC','WBETH','BETH','BNSOL',
 ]);
 
 const CHAIN_LABELS = {
@@ -141,6 +153,46 @@ async function enrichWithDetails(coins, getMeta, setMeta) {
   });
 }
 
+// ─── Binance tickers ──────────────────────────────────────────────────────────
+async function getBinanceTickers() {
+  const r = await binanceGet('/ticker/24hr');
+  const rows = Array.isArray(r?.data) ? r.data : [];
+  if (!rows.length) throw new Error('Binance tickers unavailable');
+  const fresh = Date.now() - 2 * 3_600_000; // delisted pairs stop updating
+  return rows
+    .map(t => ({ t, base: String(t.symbol || '').replace(/USDT$/, '') }))
+    .filter(({ t, base }) => {
+      const vol    = parseFloat(t.quoteVolume) || 0;
+      const change = parseFloat(t.priceChangePercent);
+      return String(t.symbol).endsWith('USDT') && base && !ESTABLISHED.has(base) && !NOT_COINS.has(base) &&
+        Number(t.count) > 0 && Number(t.closeTime) >= fresh &&
+        vol >= 200_000 && change > 0 && change < 600 && parseFloat(t.lastPrice) > 0;
+    })
+    .map(({ t, base }) => ({
+      exchange:      'binance',
+      binanceSymbol: t.symbol,
+      base,
+      price:         parseFloat(t.lastPrice),
+      change24h:     parseFloat(t.priceChangePercent),
+      volume:        parseFloat(t.quoteVolume),
+      high24h:       parseFloat(t.highPrice),
+      low24h:        parseFloat(t.lowPrice),
+      tradeCount:    parseInt(t.count || 0, 10),
+    }))
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, 30); // top 30 by volume go to deep analysis
+}
+
+/** Binance coins; KuCoin only if Binance can't be reached. Tagged with the source. */
+async function getScanTickers() {
+  try {
+    return { source: 'Binance', tickers: await getBinanceTickers() };
+  } catch (err) {
+    console.warn('[Listings] Binance tickers failed, using KuCoin:', err.message);
+    return { source: 'KuCoin', tickers: await getKuCoinTickers() };
+  }
+}
+
 // ─── KuCoin tickers ───────────────────────────────────────────────────────────
 async function getKuCoinTickers() {
   const r = await getWithRetry(`${KUCOIN_BASE}/market/allTickers`, { timeout: 12000 });
@@ -163,6 +215,7 @@ async function getKuCoinTickers() {
       high24h:      parseFloat(t.high),
       low24h:       parseFloat(t.low),
       tradeCount:   parseInt(t.count || 0, 10),
+      exchange:     'kucoin',
     }))
     .sort((a, b) => b.volume - a.volume)
     .slice(0, 30); // top 30 by volume go to deep analysis
@@ -177,7 +230,7 @@ async function getTrendingSymbols() {
 
 // ─── Main: getMoonshots ───────────────────────────────────────────────────────
 async function getMoonshots() {
-  const [tickers, trendingCoins] = await Promise.all([getKuCoinTickers(), getTrendingSymbols()]);
+  const [{ source, tickers }, trendingCoins] = await Promise.all([getScanTickers(), getTrendingSymbols()]);
   const trendingSymbols = new Set(trendingCoins.map(c => c.item.symbol.toUpperCase()));
   const metas = await getMetaForSymbols(tickers.map(t => t.base));
 
@@ -205,7 +258,7 @@ async function getMoonshots() {
     .slice(0, 5);
 
   await enrichWithDetails(results, c => c.meta, (c, m) => { c.meta = m; });
-  return results;
+  return Object.assign(results, { source });
 }
 
 // ─── Main: getNewListingsWithMetadata ─────────────────────────────────────────
@@ -224,4 +277,4 @@ async function getNewListingsWithMetadata() {
   return { hotCoins, trending };
 }
 
-module.exports = { getMoonshots, getNewListingsWithMetadata, getMarketsBySymbols, getCoinDetail };
+module.exports = { getMoonshots, getBinanceTickers, getScanTickers, getNewListingsWithMetadata, getMarketsBySymbols, getCoinDetail };

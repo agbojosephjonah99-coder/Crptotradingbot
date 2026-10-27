@@ -124,3 +124,72 @@ test('health: reports each service; storage missing → 503', async () => {
   assert.equal(res.body.checks.telegram.ok, true);
   assert.ok(!JSON.stringify(res.body).includes('TEST_TOKEN'));
 });
+
+test('scan / moonshots: looks at Binance USDT coins (not KuCoin) and skips stablecoins, big coins and delisted pairs', async () => {
+  resetEnv();
+  const now = Date.now();
+  const row = (symbol, extra = {}) => ({ symbol, lastPrice: '1.5', priceChangePercent: '25', quoteVolume: '5000000', highPrice: '1.6', lowPrice: '1.0', count: 120000, closeTime: now, ...extra });
+  const net = mockNet({
+    extra: (method, url, cfg) => {
+      if (url.includes('/ticker/24hr')) {
+        return { data: [
+          row('ABCUSDT'), row('XYZUSDT', { quoteVolume: '9000000' }),
+          row('FDUSDUSDT'), row('SOLUSDT'), row('ABCBTC'),
+          row('OLDUSDT', { closeTime: now - 30 * 86_400_000 }), row('DOWNUSDT', { priceChangePercent: '-5' }),
+        ] };
+      }
+      if (url.includes('/coins/markets')) return { data: cfg.params.symbols.split(',').map(s => ({ id: `${s}-id`, symbol: s, name: s.toUpperCase(), current_price: 1.5, market_cap: 50e6, total_volume: 5e6 })) };
+      if (url.includes('/search/trending')) return { data: { coins: [] } };
+      if (/\/coins\/[^/]+-id$/.test(url)) return { data: { id: 'x', name: 'X', symbol: 'x', platforms: {}, market_data: {} } };
+      if (url.includes('kucoin')) throw new Error('KuCoin must not be used when Binance works');
+      return undefined;
+    },
+  });
+  const { getScanTickers, getMoonshots } = require('../src/services/listingsService');
+  const { source, tickers } = await getScanTickers();
+  assert.equal(source, 'Binance');
+  assert.deepEqual(tickers.map(t => t.base), ['XYZ', 'ABC'], 'only live, rising, non-stable, non-major USDT pairs, biggest volume first');
+  assert.equal(tickers[0].binanceSymbol, 'XYZUSDT');
+
+  const picks = await getMoonshots();
+  assert.equal(picks.source, 'Binance');
+  assert.ok(net.calls.some(c => c.url.includes('/klines') && c.a?.params?.symbol === 'ABCUSDT' && c.a.params.interval === '1h'), 'momentum uses Binance hourly candles');
+  assert.ok(!net.calls.some(c => c.url.includes('kucoin')));
+});
+
+test('scan: falls back to KuCoin only when Binance is unreachable, and says so', async () => {
+  resetEnv();
+  mockNet({
+    extra: (method, url) => {
+      if (url.includes('/ticker/24hr')) throw new Error('Binance down');
+      if (url.includes('/market/allTickers')) return { data: { data: { ticker: [{ symbol: 'ABC-USDT', volValue: '5000000', changeRate: '0.25', last: '1.5', high: '1.6', low: '1.0', count: '1' }] } } };
+      return undefined;
+    },
+  });
+  const { getScanTickers } = require('../src/services/listingsService');
+  const { source, tickers } = await getScanTickers();
+  assert.equal(source, 'KuCoin');
+  assert.equal(tickers[0].exchange, 'kucoin');
+});
+
+test('scan command: picks say Binance, and offer Buy Now and a Binance-tracked log', async () => {
+  resetEnv();
+  const now = Date.now();
+  const net = mockNet({
+    klines: () => Array.from({ length: 24 }, (_, i) => ({ time: now - (24 - i) * 3_600_000, open: 1 + i * 0.01, high: 1.3, low: 0.9, close: 1.01 + i * 0.012, volume: 1000 + i * 300 })),
+    extra: (method, url, cfg) => {
+      if (url.includes('/ticker/24hr')) return { data: [{ symbol: 'ABCUSDT', lastPrice: '1.5', priceChangePercent: '25', quoteVolume: '8000000', highPrice: '1.6', lowPrice: '1.0', count: 120000, closeTime: now }] };
+      if (url.includes('/coins/markets')) return { data: [{ id: 'abc-id', symbol: 'abc', name: 'Abc Coin', current_price: 1.5, market_cap: 40e6, total_volume: 8e6 }] };
+      if (url.includes('/search/trending')) return { data: { coins: [{ item: { symbol: 'ABC', id: 'abc-id', score: 1 } }] } };
+      if (/\/coins\/abc-id$/.test(url)) return { data: { id: 'abc-id', name: 'Abc Coin', symbol: 'abc', platforms: {}, market_data: {} } };
+      return undefined;
+    },
+  });
+  await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text: 'scan' } } }), fakeRes());
+  const all = net.sent.map(m => m.text).join('\n');
+  assert.match(all, /Scanning Binance coins/);
+  assert.match(all, /Found 1 pick on Binance/);
+  assert.match(all, /Exchange:\*  Binance \(ABC\/USDT\)/);
+  assert.match(all, /buynow ABC 10/);
+  assert.match(all, /buy ABC [\d.]+ 2x ex binance/);
+});

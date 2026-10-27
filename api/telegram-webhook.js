@@ -667,7 +667,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`autobuy on\` / \`off\` — let the bot buy with your play money`,
       ``,
       `━━━ *MARKET* ━━━`,
-      `\`scan\` · \`moonshots\` — small caps with strong momentum (high risk)`,
+      `\`scan\` · \`moonshots\` — Binance coins with strong momentum (high risk)`,
       `\`newlistings\` — new coins with contract addresses`,
       ``,
       `━━━ *ACCOUNT* ━━━`,
@@ -681,7 +681,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
   // ── SCAN ─────────────────────────────────────────────────────────────────
   if (cmd === 'scan' || cmd === 'search' || cmd === 'find') {
-    await reply(chatId, `🔍 Scanning small caps for momentum... about 30 seconds.`);
+    await reply(chatId, `🔍 Scanning Binance coins for momentum... about 30 seconds.`);
     try {
       const { getMoonshots } = require('../src/services/listingsService');
       const moonshots = await getMoonshots();
@@ -691,7 +691,10 @@ async function handleMessage(chatId, text, from, meta = {}) {
         return;
       }
 
-      await reply(chatId, `✅ *Found ${moonshots.length} pick${moonshots.length > 1 ? 's' : ''}*`);
+      const onBinance = moonshots.source !== 'KuCoin';
+      await reply(chatId, onBinance
+        ? `✅ *Found ${moonshots.length} pick${moonshots.length > 1 ? 's' : ''} on Binance*`
+        : `✅ *Found ${moonshots.length} pick${moonshots.length > 1 ? 's' : ''} on KuCoin*\n⚠️ _Binance couldn't be reached, so these come from KuCoin and may not be on Binance._`);
 
       for (const coin of moonshots) {
         const meta     = coin.meta;
@@ -713,6 +716,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
           `${bandEmoji} *Score: ${coin.probability}/92 — ${coin.band}*`,
           `_Heuristic score, not a probability — this scanner has not been backtested._`,
           ``,
+          `🏦 *Exchange:*  ${coin.exchange === 'kucoin' ? 'KuCoin' : 'Binance'} (${coin.base}/USDT)`,
           `💰 *Price:*     \`$${cgPrice}\``,
           `📈 *24H:*       +${coin.change24h.toFixed(2)}%`,
           `💵 *Volume:*    $${(coin.volume / 1e6).toFixed(2)}M`,
@@ -751,8 +755,9 @@ async function handleMessage(chatId, text, from, meta = {}) {
         if (meta?.cgUrl) lines.push(`🔗 ${meta.cgUrl}`);
         lines.push(``);
         lines.push(`💼 *Position size:* ${coin.positionAdvice}`);
-        lines.push(`📝 \`buy ${coin.base} ${cgPrice} 2x\``);
-        lines.push(`📝 \`buy ${coin.base} ${cgPrice} 5x\``);
+        const ex = coin.exchange === 'kucoin' ? 'kucoin' : 'binance';
+        lines.push(`📝 Bought it yourself? Track it: \`buy ${coin.base} ${cgPrice} 2x ex ${ex}\``);
+        if (ex === 'binance') lines.push(`⚡ Or buy on Binance now (real money, high risk): \`buynow ${coin.base} 10\` · practice: \`practice buynow ${coin.base} 100\``);
 
         await replyChunked(chatId, lines.filter(Boolean).join('\n'));
       }
@@ -1383,7 +1388,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       // ── Section 8 ──
       [`🔍 *MARKET SCANS (HIGH RISK)*`,
       ``,
-      `🔍 *Scan* / 🌕 *Moonshots* — small coins moving fast, with a score from 0 to 92 built from 7 checks (volume, price structure, size, liquidity, momentum, social interest, red flags).`,
+      `🔍 *Scan* / 🌕 *Moonshots* — smaller Binance coins moving fast, with a score from 0 to 92 built from 7 checks (volume, price structure, size, liquidity, momentum, social interest, red flags).`,
       `🚀 *New Listings* — new coins with their contract address. Always check the address on CoinGecko to avoid fake tokens.`,
       ``,
       `⚠️ This score has *not* been tested on past data and is not a probability. These coins are *not* bought by auto-buy. If you trade them, use small amounts.`,

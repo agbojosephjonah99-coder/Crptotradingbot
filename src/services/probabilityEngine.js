@@ -210,29 +210,39 @@ function analyseLiquidity(coin, meta) {
   return result;
 }
 
+/**
+ * Last 24 hourly candles, oldest first, from the exchange the coin was found on:
+ * Binance (coin.binanceSymbol, e.g. "ABCUSDT") or KuCoin ("ABC-USDT").
+ */
+async function hourlyCandles(coinOrSymbol) {
+  const coin = typeof coinOrSymbol === 'string' ? { kuCoinSymbol: coinOrSymbol } : (coinOrSymbol || {});
+  if (coin.binanceSymbol) {
+    const { fetchKlines } = require('../lib/market');
+    return fetchKlines(coin.binanceSymbol, '1h', 24, { exchange: 'binance' });
+  }
+  const r = await getWithRetry(`${KUCOIN_BASE}/market/candles`, {
+    params: { symbol: coin.kuCoinSymbol || `${coin.base}-USDT`, type: '1hour', pageSize: 24 },
+    timeout: 8000,
+  });
+  // KuCoin candles, newest first: [time, open, close, high, low, volume, turnover]
+  return (r.data?.data || []).slice().reverse().map(c => ({
+    open: parseFloat(c[1]), close: parseFloat(c[2]),
+    high: parseFloat(c[3]), low: parseFloat(c[4]),
+    volume: parseFloat(c[5]),
+  }));
+}
+
 // ─── Factor 5: Momentum Trend ─────────────────────────────────────────────────
 // Is buying pressure building or fading?
-async function analyseMomentum(symbol) {
+async function analyseMomentum(coinOrSymbol) {
   const result = { score: 0, max: 15, flags: [], green: [] };
 
   try {
-    // Fetch 1H candles from KuCoin
-    const r = await getWithRetry(`${KUCOIN_BASE}/market/candles`, {
-      params: { symbol, type: '1hour', pageSize: 24 },
-      timeout: 8000,
-    });
-
-    if (!r.data?.data || r.data.data.length < 6) {
+    const candles = await hourlyCandles(coinOrSymbol);
+    if (!candles || candles.length < 6) {
       result.flags.push('Limited price history — momentum unverifiable');
       return result;
     }
-
-    // KuCoin candles: [time, open, close, high, low, volume, turnover]
-    const candles = r.data.data.reverse().map(c => ({
-      open: parseFloat(c[1]), close: parseFloat(c[2]),
-      high: parseFloat(c[3]), low: parseFloat(c[4]),
-      volume: parseFloat(c[5]),
-    }));
 
     const n = candles.length;
 
@@ -367,7 +377,7 @@ async function calculateProbability(coin, meta, trendingSymbols) {
     Promise.resolve(analysePriceStructure(coin)),
     Promise.resolve(analyseMarketCapRisk(meta)),
     Promise.resolve(analyseLiquidity(coin, meta)),
-    analyseMomentum(coin.kuCoinSymbol || `${coin.base}-USDT`),
+    analyseMomentum(coin),
     Promise.resolve(analyseSocialSignal(coin, meta, trendingSymbols)),
   ]);
   const f7 = detectRedFlags(coin, meta);

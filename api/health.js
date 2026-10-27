@@ -78,7 +78,7 @@ module.exports = async (req, res) => {
       marketData: marketData ? (binance.ok ? 'Binance' : binanceMirror.ok ? 'Binance mirror' : 'Kraken only (limited history)') : 'DOWN',
       storage: redis.ok ? 'Upstash OK' : 'DOWN',
       telegram: telegram.ok ? 'OK' : 'DOWN',
-      moonshotData: kucoin.ok && coingecko.ok ? 'OK' : 'degraded (KuCoin or CoinGecko unreachable)',
+      moonshotData: (binance.ok || binanceMirror.ok || kucoin.ok) && coingecko.ok ? 'OK' : 'degraded (Binance/KuCoin or CoinGecko unreachable)',
     },
     checks,
     exchanges: exchangeChecks,

@@ -8,7 +8,7 @@ A Telegram trading assistant that runs on Vercel serverless functions. It **can 
 - **Auto-exits:** real stop orders on Binance, sales at take-profits or the trailing stop.
 - **Position alerts:** stop-loss, take-profit, target and milestone alerts for positions logged on 7 exchanges, sent to each user's own chat.
 - **Honest track record:** the strategies are backtested with fees and slippage. The original signal scanner showed no edge, so its alerts stay off.
-- **Moonshots / listings:** small-cap gainers from KuCoin and Binance with a heuristic score (not backtested, labelled as such).
+- **Scan / moonshots:** Binance USDT coins with strong momentum (KuCoin only if Binance is unreachable), with a heuristic score (not backtested, labelled as such).
 - **Navigation:** every screen has a ⬅️ Back button, and tapping a button removes the screen it was on.
 - **Dashboard:** `/dashboard`. Send `/dashboard` to the bot for a private login link.
 - **Paid access (optional):** Paystack and Flutterwave, managed from the admin's 💳 Subscriptions panel.
