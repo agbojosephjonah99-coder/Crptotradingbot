@@ -6,7 +6,8 @@
  *
  * Payments: Paystack and/or Flutterwave (whichever has a secret key set). A payment only counts after Paystack's verify API says
  * it succeeded for the right amount and currency (the webhook and the return
- * link are just triggers to check). Each payment reference is credited once.
+ * link are just triggers to check). The same goes for Flutterwave and its verify
+ * API. Webhooks with a bad signature (Paystack) or hash (Flutterwave) are refused. Each payment reference is credited once.
  *
  * Env:
  *   PAID_ACCESS_ENABLED     true to require a subscription
@@ -298,18 +299,29 @@ async function revoke(chatId) {
   await store.cmd('HSET', subKey(chatId), 'paidUntil', new Date(Date.now() - 1000).toISOString());
 }
 
-/** Paystack webhook: check the signature, then verify the payment with Paystack. */
-async function handleWebhook(rawBody, signature) {
+/**
+ * Paystack webhook. Requests without a valid x-paystack-signature (HMAC-SHA512
+ * of the body with PAYSTACK_SECRET_KEY) are REJECTED before anything else, so
+ * nobody can make the bot call Paystack by posting fake events. A genuine
+ * payment is then still only credited after Paystack's verify API confirms it.
+ * (If a real webhook were ever refused, the payer is still credited by the /paid
+ * return link and by `subscribe check`, which ask Paystack directly.)
+ */
+function paystackSignatureOk(rawBody, signature) {
   const key = process.env.PAYSTACK_SECRET_KEY || '';
-  const body = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody || {});
+  if (!key || !signature) return false;
+  const body = typeof rawBody === 'string' || Buffer.isBuffer(rawBody) ? rawBody : JSON.stringify(rawBody || {});
   const expected = crypto.createHmac('sha512', key).update(body).digest('hex');
-  const sigOk = !!signature && signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const got = String(signature);
+  return got.length === expected.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+}
+
+async function handleWebhook(rawBody, signature) {
+  if (!paystackSignatureOk(rawBody, signature)) return { ignored: true, rejected: true, reason: 'bad or missing signature' };
   let event;
-  try { event = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody; } catch { event = null; }
-  // The signature can fail only because the body was re-serialised; either way
-  // nothing is credited unless Paystack's verify API confirms the payment.
-  if (!event || event.event !== 'charge.success' || !event.data?.reference) return { ignored: true, sigOk };
-  return { sigOk, ...(await confirmPayment(event.data.reference)) };
+  try { event = typeof rawBody === 'string' || Buffer.isBuffer(rawBody) ? JSON.parse(String(rawBody)) : rawBody; } catch { event = null; }
+  if (!event || event.event !== 'charge.success' || !event.data?.reference) return { ignored: true };
+  return confirmPayment(event.data.reference);
 }
 
 /**
@@ -363,7 +375,7 @@ async function listSubscribers() {
 
 module.exports = {
   PaymentError, enabled, plan, priceLabel, providers, PROVIDER_NAMES, handleFlutterwaveWebhook, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
-  startCheckout, confirmPayment, extend, revoke, handleWebhook, sendReminders, listSubscribers, validEmail,
+  startCheckout, confirmPayment, extend, revoke, handleWebhook, paystackSignatureOk, sendReminders, listSubscribers, validEmail,
 };
 
 /** Tell the user (and the admin) about a credited payment. */

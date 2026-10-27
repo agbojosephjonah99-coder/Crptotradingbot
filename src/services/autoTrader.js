@@ -1,7 +1,9 @@
 /**
  * ─── Automated exits (opt-in, Binance spot) ───────────────────────────────────
  * Carries out the SELL side of each position's locked plan on the user's own
- * Binance account. It never buys and never opens a position.
+ * Binance account. This module itself never buys or opens a position; buying
+ * is done by autoBuyer.js (⚡ Buy Now and daily auto-buy), which then hands the
+ * position to this module to manage the exits.
  *
  *   Protect   a real STOP_LOSS_LIMIT order sits on Binance at the saved stop,
  *             so the stop works even between bot checks

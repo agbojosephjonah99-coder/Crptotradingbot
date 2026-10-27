@@ -1261,9 +1261,9 @@ function renderAuto(s) {
     <div class="form-title">What automated exits do</div>
     The bot places your <b>sell</b> orders on your own Binance account, following each position's plan:
     a real stop order at your stop, 40% sold at TP1, 35% at TP2, the rest at TP3, and 60% at your own target.
-    It <b>never buys</b>, only works on Binance positions that have a quantity, and keys that can withdraw are refused.
+    Exits on their own <b>never buy</b>: buying only happens with ⚡ Buy Now or auto-buy, which you switch on separately. Exits only work on Binance positions that have a quantity, and keys that can withdraw are refused.
     Removing a position (or <code>sell SOL</code> in the bot) cancels its stop order without selling.
-    <div class="track-note" style="margin-top:8px">This strategy has not shown an edge in backtests. Automation removes slow reactions, not risk. Start on the testnet.</div>
+    <div class="track-note" style="margin-top:8px">The auto-buy strategy passed an 8-year test on past data, but coins you pick yourself aren't backed by any test. Automation removes slow reactions, not risk. Practise first.</div>
   </div>`;
   if (!s.encryptionReady) {
     box.innerHTML = intro + `<div class="state-empty"><div>Not set up on this bot yet.</div><div class="state-label">The admin needs to add <code>TRADING_ENCRYPTION_KEY</code> in Vercel.</div></div>`;

@@ -92,7 +92,7 @@ test('buy: a price far from the market is questioned (buy PEPE 50 ≠ $50 of PEP
   const store = require('../src/services/positionStore');
   await say('buy PEPE 50');
   assert.match(net.sent.at(-1).text, /Check the price — PEPE/);
-  const kb = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data);
+  const kb = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data).filter(d => !d.startsWith('nav:'));
   assert.deepEqual(kb, ['buy PEPE 50 confirm', 'buynow PEPE 50', 'practice buynow PEPE 50']);
   assert.equal((await store.getPositionsBySymbol('1000', 'PEPEUSDT')).length, 0, 'nothing saved yet');
   await say('buy PEPE 50 confirm');

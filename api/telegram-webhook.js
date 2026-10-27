@@ -22,8 +22,10 @@
  * `/cmd@BotName` in groups, trade plan locked at buy time.
  */
 
+const { AsyncLocalStorage } = require('async_hooks');
 const tg = require('../src/lib/telegram');
 const store = require('../src/lib/redis');
+const nav = require('../src/lib/navigation');
 const { dashboardLink, revokeAll } = require('../src/lib/dashAuth');
 const { deferUntilAfterResponse } = require('../src/lib/background');
 const { verifyTelegramWebhook } = require('../src/lib/auth');
@@ -99,8 +101,83 @@ const MENU_TEXT = (admin) => [
 ].join('\n');
 
 // ─── Send helpers (shared Telegram client, Markdown-safe) ───────────────────
+// Every message goes through navSend, which adds the ⬅️ Back button and
+// remembers which screen each message belongs to (src/lib/navigation.js).
+const navCtx = new AsyncLocalStorage();
+
+function currentNav(chatId) {
+  const ctx = navCtx.getStore();
+  return ctx && ctx.chatId === String(chatId) ? ctx : null;
+}
+
+async function remember(ctx, msg, keep) {
+  const id = msg?.message_id;
+  if (!id) return;
+  if (!keep) {
+    await nav.saveMsg(ctx.chatId, id, { s: ctx.screen, b: ctx.back, x: [...ctx.parts] });
+    ctx.parts.push(id);
+  } else {
+    await nav.saveMsg(ctx.chatId, id, { s: ctx.screen, b: ctx.back, k: 1 });
+  }
+}
+
+/** Send the plain message that was held back, with ⬅️ Back if it's the last one. */
+async function flushHeld(ctx, last) {
+  const h = ctx.held;
+  if (!h) return;
+  ctx.held = null;
+  const withBackBtn = last && ctx.back && !ctx.backShown;
+  if (withBackBtn) ctx.backShown = true;
+  const msg = await h.doSend(withBackBtn ? nav.backOnly(ctx.back) : PERSISTENT_MENU);
+  // Screens disappear together; results of actions (receipts) stay in the chat
+  await remember(ctx, msg, ctx.kind === 'action');
+}
+
+async function navSend(chatId, text, markup, long = false) {
+  const doSend = (mk) => (long ? tg.sendLong(chatId, text, { markup: mk }) : tg.send(chatId, text, { markup: mk }));
+  const ctx = currentNav(chatId);
+  if (!ctx) return doSend(markup || PERSISTENT_MENU);
+
+  if (markup && Array.isArray(markup.inline_keyboard)) {
+    await flushHeld(ctx, false);
+    const mk = nav.withBack(markup, ctx.back);
+    if (ctx.back) ctx.backShown = true;
+    const msg = await doSend(mk);
+    await remember(ctx, msg, false);
+    return msg;
+  }
+
+  const plain = !markup || markup === PERSISTENT_MENU;
+  if (plain && ctx.button && ctx.back && !nav.isProgress(text)) {
+    // Hold it: only the LAST plain message of a screen gets the Back button
+    await flushHeld(ctx, false);
+    ctx.held = { doSend };
+    return null;
+  }
+  await flushHeld(ctx, false);
+  const msg = await doSend(markup || PERSISTENT_MENU);
+  if (ctx.button && nav.isProgress(text)) await remember(ctx, msg, false);
+  return msg;
+}
+
+/** Run a command inside a navigation context, then send whatever is still held. */
+async function withNav(ctx, fn) {
+  const c = { ...ctx, parts: [], held: null, backShown: false };
+  return navCtx.run(c, async () => {
+    try { return await fn(); } finally { await flushHeld(c, true).catch(err => console.error('[Nav]', err.message)); }
+  });
+}
+
+/** Delete the screen a button was tapped on (unless it's a receipt we keep). */
+async function clearScreen(chatId, messageId, rec) {
+  if (!messageId || rec?.k) return;
+  const ids = [messageId, ...(rec?.x || [])];
+  for (const id of ids) await tg.call('deleteMessage', { chat_id: chatId, message_id: id }).catch(() => {});
+  await nav.forget(chatId, ids);
+}
+
 async function send(chatId, text, markup) {
-  return tg.send(chatId, text, { markup: markup || PERSISTENT_MENU });
+  return navSend(chatId, text, markup);
 }
 
 async function reply(chatId, text, showInline = false) {
@@ -108,7 +185,7 @@ async function reply(chatId, text, showInline = false) {
 }
 
 async function replyChunked(chatId, text, showInline = false) {
-  return tg.sendLong(chatId, text, { markup: showInline ? menuFor(chatId) : PERSISTENT_MENU });
+  return navSend(chatId, text, showInline ? menuFor(chatId) : PERSISTENT_MENU, true);
 }
 
 const answerCallback = tg.answerCallback;
@@ -240,11 +317,11 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `🤖 *Welcome to CryptoBot V2!*`,
       ``,
       `📊 *What this bot does:*`,
-      `  • Scans the market for strong momentum setups`,
-      `  • Finds newly listed coins with contract addresses`,
-      `  • Alerts you exactly when to buy and sell`,
-      `  • Monitors your positions 24/7`,
-      `  • Sends instant alerts when your 2X or 5X target is hit`,
+      `  • Practice with $10,000 of play money at real prices`,
+      `  • Buys and sells for you on *your own* Binance account (optional — it can never withdraw)`,
+      `  • Watches your positions 24/7: stop, take-profit and target alerts`,
+      `  • Uses one tested strategy (breakouts to new highs) and tells you why it buys`,
+      `  • Finds newly listed coins and market movers (high risk)`,
       ``,
       `🔒 *This is a private bot.*`,
       `Your access request has been sent to the admin.`,
@@ -1688,7 +1765,8 @@ async function handleAutoBuy(chatId, args) {
         `🤖 *Practice auto-buy ON*`,
         ``,
         `Every day just after midnight (UTC) the bot checks ${autoBuyer.currentStrategy().name.toLowerCase()} signals on 15 large coins and buys the ones that qualify with your *play money* — about 1% of the account at risk per trade, at most 5 at once.`,
-        `It sells by a trailing stop that only moves up. You'll get a message for every buy and sale.`,
+        `It sells by a trailing stop that only moves up. You'll get a message for every buy (with the reasons it chose that coin) and every sale — and on days with nothing to buy, a short note saying why.`,
+        `_Signals are rare (about 3 a month across all coins), so several quiet days in a row are normal. The first check is just after 1am Lagos time._`,
         ``,
         `\`autobuy off\` stops new buys. \`practice\` shows your results.`,
       ].join('\n'));
@@ -1759,7 +1837,8 @@ async function handleAutoBuy(chatId, args) {
       !st.eligible ? `${tick(c.research)} strategy PASSES the test  ${tick(c.days)} ${st.needs.days}+ days  ${tick(c.trades)} ${st.needs.trades}+ trades  ${tick(c.profit)} in profit` : '',
       ``,
       `*You:* practice auto-buy ${st.practiceOn ? '🟢 ON' : '⚪ OFF'} · live auto-buy ${st.liveOn ? '🟢 ON' : '⚪ OFF'}`,
-      st.lastRun ? `_Last check ${st.lastRun.date}: ${st.lastRun.buys.length ? st.lastRun.buys.map(x => x.coin).join(', ') : 'no buy signals'}${st.lastRun.regimeUp === false ? ' (BTC below its 100-day average)' : ''}_` : '',
+      st.lastRun ? `*Last check (${st.lastRun.date}):* ${st.lastRun.buys.length ? st.lastRun.buys.map(x => `${x.coin}${x.why ? ` — ${esc(x.why)}` : ''}`).join('; ') : 'no buy signals'}` : `_No daily check has run yet — the first one is just after 1am Lagos time._`,
+      st.lastRun?.regimeText ? `${st.lastRun.regimeUp ? '🟢' : '🔴'} ${st.lastRun.regimeText}${st.lastRun.regimeUp === false ? ' — the strategy waits until BTC is back above it' : ''}` : (st.lastRun?.regimeUp === false ? '🔴 BTC is below its 100-day average — the strategy waits' : ''),
     ];
     const kb = [[st.practiceOn ? { text: '⏸ Practice auto-buy off', callback_data: 'autobuy off' } : { text: '🟢 Practice auto-buy on', callback_data: 'autobuy on' }]];
     if (st.unlocked) kb.push([st.liveOn ? { text: '⏸ Live auto-buy off', callback_data: 'autobuy live off' } : { text: '💰 Live auto-buy on', callback_data: 'autobuy live on' }]);
@@ -1903,7 +1982,7 @@ async function handlePractice(chatId, args) {
         `*It's priced like the real thing:* live Binance prices, Binance's 0.1% fee on every buy and sell, a little slippage, and stops that trigger on any dip (and fill lower if the price jumps past them).`,
         `The bot sells for you at the stop and take-profits, exactly as automated exits do with real money. So your practice result is close to what real money would have done.`,
         ``,
-        `_Measured so far, this strategy has lost money after fees in backtests. Practise first and see for yourself before using real money._`,
+        `_Coins you pick yourself aren't backed by any test. The auto-buy strategy passed an 8-year test after fees, but it's steady rather than fast and still has to prove itself live — practise first before using real money._`,
       ].join('\n'), PRACTICE_BUTTONS);
       return;
     }
@@ -1971,13 +2050,13 @@ async function handleGoLive(chatId, args) {
       ``,
       `1. A Binance account`,
       `2. Money in it (USDT, bought with Naira)`,
-      `3. A "key" that lets the bot sell for you — it can *never* withdraw your money`,
+      `3. A "key" that lets the bot buy and sell for you — it can *never* withdraw your money`,
       `4. Paste the key here`,
       ``,
-      `Your money stays in *your own* Binance account the whole time. The bot only places sell orders (stops and take-profits) for positions you add.`,
+      `Your money stays in *your own* Binance account the whole time. The bot places stop orders and sells for your positions, buys when you tap ⚡ Buy Now, and — once you turn it on — buys by itself with auto-buy.`,
       ``,
       practiceLine,
-      `⚠️ Real money can be lost. In backtests this strategy has lost money after fees.`,
+      `⚠️ Real money can be lost. The strategy passed its test on past data (about +23% over 3 years, smaller drops than holding BTC — but less than holding BTC in a boom). Past results don't guarantee future ones.`,
     ].join('\n'), next('Start step 1 →', 'golive 1'));
     return;
   }
@@ -2404,7 +2483,7 @@ async function handleAutotrade(chatId, args, meta = {}) {
         `  🟢 sells 40% at TP1, 35% at TP2 and the rest at TP3`,
         `  🎯 sells 60% at your own target`,
         `  🔴 sells the rest if the stop is hit`,
-        `It never buys. \`sell SOL\` or Remove cancels the stop order without selling.`,
+        `Auto-exits only sell — buying happens only with ⚡ Buy Now or auto-buy, which you switch on separately. \`sell SOL\` or Remove cancels the stop order without selling.`,
         ``,
         `⏳ Placing your stop orders now…`,
       ].join('\n'));
@@ -2449,7 +2528,7 @@ async function handleAutotrade(chatId, args, meta = {}) {
       : `Status: not connected`,
     s.lastError ? `Last problem: _${esc(s.lastError)}_` : '',
     ``,
-    `*What it does:* sells for you on Binance at your stop and take-profits. It *never buys* and can't withdraw.`,
+    `*What it does:* sells for you on Binance at your stop and take-profits. Auto-exits on their own never buy (buying is ⚡ Buy Now or auto-buy, switched on separately) and can't withdraw.`,
     ``,
     `*Set up (test mode first):*`,
     `1. Get free testnet keys at https://testnet.binance.vision (log in with GitHub → Generate HMAC key)`,
@@ -2475,10 +2554,11 @@ async function handleUpdate(body) {
     await answerCallback(cq.id);
     if (!chatId) return;
 
-    // Tapping a button in the main menu removes the menu message (keeps the chat tidy)
-    if (cq.message?.message_id && /^(📋 Menu|What would you like to do\?)/.test(cq.message.text || '')) {
-      await tg.call('deleteMessage', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
-    }
+    // Tapping any button removes the screen it was on (keeps the chat tidy).
+    // Receipts of actions ("✅ Bought…") are kept.
+    const msgId = cq.message?.message_id;
+    const rec = await nav.getMsg(chatId, msgId);
+    await clearScreen(chatId, msgId, rec);
 
     if (data.startsWith('approve:') || data.startsWith('reject:')) {
       const [action, targetId] = data.split(':');
@@ -2502,7 +2582,10 @@ async function handleUpdate(body) {
       profit:      'profit',
       manual:      'manual',
     };
-    await handleMessage(chatId, commandMap[data] || data, cq.from);
+    // ⬅️ Back (nav:SCREEN) shows that screen again; anything else runs as before
+    const ctx = await nav.contextForTap(chatId, data, rec);
+    const command = data.startsWith('nav:') ? ctx.command : data;
+    await withNav(ctx, () => handleMessage(chatId, commandMap[command] || command, cq.from));
     return;
   }
 
@@ -2514,7 +2597,9 @@ async function handleUpdate(body) {
   const looksSecret = /[A-Za-z0-9]{32,}/.test(message.text) || /^\/?auto(trade|exits?)(@\w+)?\s+connect/i.test(message.text.trim());
   const logText = looksSecret ? '[message with a key — not logged]' : message.text.slice(0, 80);
   console.log(`[Webhook] From ${chatId}: ${logText}`);
-  await handleMessage(chatId, message.text, message.from, { messageId: message.message_id });
+  // Typed commands: screens with buttons get ⬅️ Back to the menu. (Never stores
+  // the typed text unless it is a known screen name, so keys can't leak here.)
+  await withNav(nav.contextForTyped(chatId, message.text), () => handleMessage(chatId, message.text, message.from, { messageId: message.message_id }));
 }
 
 /** Telegram re-sends an update if we're slow; process each update_id once. */

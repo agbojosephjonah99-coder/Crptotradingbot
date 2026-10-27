@@ -26,8 +26,12 @@ module.exports = {
     forwardTrades: 20,       // with at least 20 closed trades
     forwardProfit: true,     // and made money after fees
   },
-  // Used until `npm run lab` has chosen one (practice only, clearly labelled "not yet tested")
-  FALLBACK: { family: 'donchian', params: { entryN: 20, exitN: 10, regime: true }, id: 'donchian:20-10:btc' },
+  // Used only if data/auto-strategy.json (the saved `npm run lab` result) is missing.
+  // These are the settings that PASSED the 3,000-day lab test (Oct 2026), so a
+  // missing file never switches the bot to an untested strategy. Without the
+  // file the verdict still shows "NOT TESTED", so live auto-buy can't be unlocked
+  // on it, and the health check and the admin's daily report warn about it.
+  FALLBACK: { family: 'donchian', params: { entryN: 55, exitN: 20, regime: true }, id: 'donchian:55-20:btc' },
   STRATEGY_FILE: 'data/auto-strategy.json',
   DAILY_RUN_AFTER_UTC_MINUTES: 5, // run each day at 00:05 UTC or later (after the daily candle closes)
 };

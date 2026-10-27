@@ -1,14 +1,17 @@
-# CryptoBot V2
+# JijazyBot (CryptoBot V2)
 
-A Telegram crypto signal and position-tracking bot that runs on Vercel serverless functions.
-It **only gives advice and never places trades**.
+A Telegram trading assistant that runs on Vercel serverless functions. It **can buy and sell on each user's own Binance account** (only when the user connects a key and switches it on; keys that can withdraw are refused, and the bot never holds anyone's money).
 
-- **Scanner:** checks your coin list on 4H, 1H and 15M candles (ADX, RSI, StochRSI, MACD, Bollinger Bands, VWAP, OBV, candle patterns), using closed candles only. A strong setup becomes a BUY with an ATR stop and three take-profits.
-- **Honest track record:** the live strategy is backtested with fees and slippage. Every BUY alert shows how that kind of signal actually performed (see `STRATEGY.md`).
-- **Moonshots / listings:** small-cap gainers from KuCoin and Binance, with CoinGecko data and a 7-factor heuristic score.
-- **Telegram bot:** new users wait for admin approval. Users log trades (`buy SOL 92.5 2x`) and the bot monitors them.
-- **Monitors:** stop-loss, take-profit, target and milestone alerts, sent to each user's own chat.
-- **Dashboard:** `/dashboard`. Send `/dashboard` to the bot for a private login link; you'll see your real positions with live P&L, and can add, update or close them.
+- **Practice mode:** $10,000 of play money at live Binance prices, with real fees and slippage.
+- **Auto-buy:** once a day it checks one tested strategy (breakout to a new 55-day high, only while BTC is above its 100-day average) on 15 large coins, buys the ones that signal, and tells you *why* it bought each one. Practice for everyone; real money only once the admin opens it (see `STRATEGY.md` and `autobuy`).
+- **⚡ Buy Now:** the user picks the coin; the bot buys it, places the stop order on Binance and trails it.
+- **Auto-exits:** real stop orders on Binance, sales at take-profits or the trailing stop.
+- **Position alerts:** stop-loss, take-profit, target and milestone alerts for positions logged on 7 exchanges, sent to each user's own chat.
+- **Honest track record:** the strategies are backtested with fees and slippage. The original signal scanner showed no edge, so its alerts stay off.
+- **Moonshots / listings:** small-cap gainers from KuCoin and Binance with a heuristic score (not backtested, labelled as such).
+- **Navigation:** every screen has a ⬅️ Back button, and tapping a button removes the screen it was on.
+- **Dashboard:** `/dashboard`. Send `/dashboard` to the bot for a private login link.
+- **Paid access (optional):** Paystack and Flutterwave, managed from the admin's 💳 Subscriptions panel.
 
 ## Setup
 
@@ -92,6 +95,6 @@ The free Hobby plan allows **12 functions** per deployment, and each file in `ap
 - Binance blocks some server regions (including Vercel's default US region). Candles and prices fall back to Kraken/KuCoin, but `/api/v2listings` is Binance-only.
 - Moonshot scans make many CoinGecko calls, and the free tier may rate-limit them.
 - Functions are limited to 60 seconds; very long coin lists in `BINANCE_SYMBOLS` may need splitting.
-- The live strategy was tested and shown to have no edge after fees (see `STRATEGY.md`).
+- The original signal scanner was tested and shown to have no edge after fees; its alert crons stay off. The auto-buy strategy passed its lab test but is still in its live forward test (see `STRATEGY.md`).
 
 See `CHANGELOG.md` for what changed, and `STRATEGY.md` for how the strategy is tested.

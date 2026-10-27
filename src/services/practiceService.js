@@ -87,7 +87,7 @@ function parseTarget(t) {
 }
 
 /** Buy `amount` dollars of a coin at the live Binance price. */
-async function buy(chatId, { symbol, amount, stop = null, target = null, strategy = null }) {
+async function buy(chatId, { symbol, amount, stop = null, target = null, strategy = null, why = null }) {
   const sym = normaliseSymbol(symbol || '');
   if (!/^[A-Z0-9]{2,20}USDT$/.test(sym)) throw new PracticeError('Which coin? e.g. `practice buy SOL 100`');
   const spend = Number(amount);
@@ -122,6 +122,7 @@ async function buy(chatId, { symbol, amount, stop = null, target = null, strateg
       targetMultiple, targetPrice: targetMultiple ? fill * targetMultiple : null,
       tp1Hit: false, tp2Hit: false, tp3Hit: false, targetHit: false,
       sold: [], openedAt: now, lastCheckAt: now,
+      ...(why ? { buyReason: why } : {}),
     };
     await savePos(chatId, p);
     await setCash(chatId, acct.cash - spend);

@@ -73,6 +73,10 @@ function prepare(c) {
 
 const ret = (ind, i, n) => (i - n >= 0 ? ind.close[i] / ind.close[i - n] - 1 : null);
 
+/** Price for messages: 4 decimals from $1 up, 4 significant digits below. */
+const $ = (p) => (p == null || !Number.isFinite(p) ? '—' : `$${p >= 1 ? Number(p).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: p >= 1000 ? 0 : 4 }) : Number(p).toPrecision(4)}`);
+const pct = (x) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`;
+
 const STRATEGIES = {
   donchian: {
     name: 'Breakout to a new high',
@@ -84,6 +88,16 @@ const STRATEGIES = {
     entry(ind, i, p) { const h = priorHigh(ind.c, i, p.entryN); return h !== null && ind.close[i] > h; },
     initialStop(ind, i, p, entry) { return Math.min(priorLow(ind.c, i, p.exitN) ?? entry * 0.9, entry - 2 * ind.atr[i]); },
     trail(ind, i, p) { return priorLow(ind.c, i, p.exitN); },
+    /** Why it signalled (or how far it is from signalling). gap = % rise still needed. */
+    explain(ind, i, p) {
+      const h = priorHigh(ind.c, i, p.entryN);
+      const c = ind.close[i];
+      if (h === null) return { text: 'not enough history yet', gap: null };
+      return c > h
+        ? { text: `Breakout: closed at ${$(c)}, above its ${p.entryN}-day high of ${$(h)} (${pct(c / h - 1)}) — a new high`, gap: 0 }
+        : { text: `needs a close above its ${p.entryN}-day high of ${$(h)} (${pct(h / c - 1)} from ${$(c)})`, gap: h / c - 1 };
+    },
+    exitText: (p) => `the stop follows the lowest low of the last ${p.exitN} days and only ever moves up; when the price falls to it, the bot sells`,
   },
   emaTrend: {
     name: 'Trend pullback',
@@ -99,6 +113,18 @@ const STRATEGIES = {
     },
     initialStop(ind, i, p, entry) { return entry - p.k * ind.atr[i]; },
     trail(ind, i, p, pos) { return pos.highestClose - p.k * ind.atr[i]; },
+    explain(ind, i, p) {
+      const f = ind.ema[p.fast][i], s = ind.ema[p.slow][i], l = ind.ema[200][i];
+      if (f === null || s === null || l === null) return { text: 'not enough history yet', gap: null };
+      const ok = this.entry(ind, i, p);
+      return {
+        text: ok
+          ? `Trend pullback: uptrend (EMA${p.fast} ${$(f)} > EMA${p.slow} ${$(s)}, price above the 200-day average ${$(l)}) and it closed back above EMA${p.fast} today at ${$(ind.close[i])}`
+          : `needs an uptrend (EMA${p.fast} above EMA${p.slow}, price above ${$(l)}) and a close back above EMA${p.fast} (${$(f)})`,
+        gap: ok ? 0 : null,
+      };
+    },
+    exitText: (p) => `the stop trails ${p.k}× the coin's average daily range below its highest close and only ever moves up; when the price falls to it, the bot sells`,
   },
   momentum: {
     name: 'Strongest coins',
@@ -115,6 +141,19 @@ const STRATEGIES = {
     },
     initialStop(ind, i, p, entry) { return entry - p.k * ind.atr[i]; },
     trail(ind, i, p, pos) { return pos.highestClose - p.k * ind.atr[i]; },
+    explain(ind, i, p, ctx) {
+      const r = ret(ind, i, p.lookback);
+      if (r === null) return { text: 'not enough history yet', gap: null };
+      const rank = ctx ? ctx.rank(ind.symbol, ind.c[i].time, p.lookback) + 1 : null;
+      const ok = this.entry(ind, i, p, ctx);
+      return {
+        text: ok
+          ? `Strongest coins: #${rank} of the list by ${p.lookback}-day return (${pct(r)}), and above its 50-day average`
+          : `ranked #${rank ?? '?'} by ${p.lookback}-day return (${pct(r)}); needs top ${p.topN}, a positive return and a price above its 50-day average`,
+        gap: ok ? 0 : null,
+      };
+    },
+    exitText: (p) => `the stop trails ${p.k}× the coin's average daily range below its highest close and only ever moves up; when the price falls to it, the bot sells`,
   },
 };
 
@@ -142,6 +181,11 @@ function makeContext(prepared, btc) {
       if (i === undefined || btc.sma100[i] === null) return false;
       return btc.close[i] > btc.sma100[i];
     },
+    /** BTC's close and 100-day average on that day (for messages). */
+    btcAt(time) {
+      const i = btc?.timeIndex.get(time);
+      return i === undefined ? null : { close: btc.close[i], sma100: btc.sma100[i] };
+    },
     rank(symbol, time, lookback) {
       const key = `${time}|${lookback}`;
       if (!rankCache.has(key)) {
@@ -160,4 +204,4 @@ function makeContext(prepared, btc) {
   };
 }
 
-module.exports = { STRATEGIES, variants, prepare, makeContext, ema, sma, atr, priorHigh, priorLow };
+module.exports = { STRATEGIES, variants, prepare, makeContext, ema, sma, atr, priorHigh, priorLow, fmtUsd: $ };

@@ -54,6 +54,8 @@ function memExec([name, ...a]) {
       mem.set(key, { type: 'string', value: String(value), expiresAt: px ? Date.now() + px : null });
       return 'OK';
     }
+    case 'INCR': { const e = live(a[0]); const n = (e ? Number(e.value) : 0) + 1; if (!Number.isFinite(n)) throw new Error('ERR value is not an integer'); if (e) e.value = String(n); else mem.set(a[0], { type: 'string', value: String(n), expiresAt: null }); return n; }
+    case 'HLEN': { const e = live(a[0]); return e ? e.value.size : 0; }
     case 'DEL': { let n = 0; for (const k of a) if (live(k)) { mem.delete(k); n++; } return n; }
     case 'EXISTS': return a.filter(k => live(k)).length;
     case 'TYPE': { const e = live(a[0]); return e ? e.type : 'none'; }

@@ -231,7 +231,7 @@ test('menu: every feature has a button; admin rows only for the admin; menu text
 
   await require('../src/services/positionStore').addPosition({ chatId: '1000', symbol: 'SOLUSDT', buyPrice: 100, exchange: 'binance' });
   await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data: 'check_help', from: {}, message: { message_id: 9, chat: { id: 1000 }, text: '📋 Menu — tap any button' } } } }), fakeRes());
-  assert.deepEqual(n.sent.at(-1).reply_markup.inline_keyboard.flat().map(x => x.callback_data), ['check SOL']);
+  assert.deepEqual(n.sent.at(-1).reply_markup.inline_keyboard.flat().map(x => x.callback_data), ['check SOL', 'nav:menu'], 'coins + ⬅️ Back to the menu');
 });
 
 test('positions: REAL only, split into bot-managed vs tracked; practice is never mixed in', async () => {

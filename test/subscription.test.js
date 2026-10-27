@@ -124,9 +124,19 @@ test('a wrong amount or currency is not credited, and a forged webhook does noth
   assert.equal(r.credited, false);
   assert.match(r.reason, /expected NGN 5000/);
 
-  // Webhook for a reference this bot never created
+  // Forged webhook (no signature, or a wrong one) → refused before anything else
+  for (const headers of [{}, { 'x-paystack-signature': 'f'.repeat(128) }]) {
+    const res = fakeRes();
+    await require('../api/app')(fakeReq({ method: 'POST', query: { action: 'paystack-webhook' }, body: { event: 'charge.success', data: { reference } }, headers }), res);
+    assert.equal(res.statusCode, 401, 'unsigned / badly signed webhooks are refused');
+  }
+  assert.equal(ps.verifyCalls, 1, 'a refused webhook never makes the bot call Paystack');
+
+  // Correctly signed, but for a reference this bot never created → ignored without a lookup
+  const body = { event: 'charge.success', data: { reference: 'cb_9999_fake_ref' } };
+  const sig = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY).update(JSON.stringify(body)).digest('hex');
   const res = fakeRes();
-  await require('../api/app')(fakeReq({ method: 'POST', query: { action: 'paystack-webhook' }, body: { event: 'charge.success', data: { reference: 'cb_9999_fake_ref' } } }), res);
+  await require('../api/app')(fakeReq({ method: 'POST', query: { action: 'paystack-webhook' }, body, headers: { 'x-paystack-signature': sig } }), res);
   assert.equal(res.statusCode, 200);
   assert.equal(await subs.hasAccess('2000'), false);
   assert.equal(ps.verifyCalls, 1, 'unknown references are not even looked up');
@@ -266,7 +276,7 @@ test('Flutterwave: users choose a provider; payment verified with Flutterwave\'s
   const tap = (data) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data, from: {}, message: { message_id: 1, chat: { id: 2000 }, text: 'x' } } } }), fakeRes());
 
   await say('2000', 'subscribe ada@example.com');
-  const choice = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data);
+  const choice = net.sent.at(-1).reply_markup.inline_keyboard.flat().map(b => b.callback_data).filter(d => !d.startsWith('nav:'));
   assert.deepEqual(choice, ['subscribe via flutterwave', 'subscribe via paystack']);
   await tap('subscribe via flutterwave');
   assert.match(net.sent.at(-1).reply_markup.inline_keyboard[0][0].url, /checkout\.flutterwave\.com/);

@@ -63,7 +63,7 @@ test('daily run: house forward test + opted-in users buy with play money; once p
   const send = async (id, text) => net.sent.push({ chat_id: id, text });
 
   const r = await ab.runDaily({ allowed, send, now: new Date(Math.floor(Date.now() / DAY) * DAY + 10 * 60_000) });
-  assert.equal(r.strategy, 'donchian:20-10:btc', 'fallback strategy until `npm run lab` picks one');
+  assert.equal(r.strategy, 'donchian:55-20:btc', 'without the lab file: the settings that passed the lab test, never an untested one');
   assert.ok(r.signals >= 5);
   assert.equal(r.practice, 2, 'house + the one user who opted in');
 
@@ -142,7 +142,7 @@ test('live run (when unlocked): market buy on Binance, position saved with the s
   assert.ok(buys.every(b => Number(b.quoteOrderQty) <= 1000.01), '20% cap of a $5,000 account');
   assert.equal(stops.length, 5, 'every live buy gets a stop order on Binance straight away');
   const pos = Object.values(await require('../src/services/positionStore').getAllPositions('2000'));
-  assert.ok(pos.every(p => p.strategy === 'donchian:20-10:btc' && p.stopStage === 'trail' && p.exchange === 'binance'));
+  assert.ok(pos.every(p => p.strategy === 'donchian:55-20:btc' && p.stopStage === 'trail' && p.exchange === 'binance'));
 });
 
 test('monitor gives auto-bought positions no take-profits (trailing stop only)', () => {
@@ -186,7 +186,7 @@ test('admin opens auto-buy early; golive "Turn on auto-trading" turns on buying 
   assert.equal((await require('../src/services/autoBuyer').userStatus('1000')).liveOn, false);
 });
 
-test('menu message is deleted when one of its buttons is tapped', async () => {
+test('a screen is deleted when one of its buttons is tapped', async () => {
   const { net } = setup();
   const axios = require('axios');
   const deleted = [];
@@ -195,7 +195,7 @@ test('menu message is deleted when one of its buttons is tapped', async () => {
   await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q1', data: 'practice', from: {}, message: { message_id: 55, chat: { id: 1000 }, text: 'What would you like to do?\n\nTap a button below:' } } } }), fakeRes());
   assert.deepEqual(deleted, [55]);
   await require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q2', data: 'practice', from: {}, message: { message_id: 56, chat: { id: 1000 }, text: 'Practice account …' } } } }), fakeRes());
-  assert.deepEqual(deleted, [55], 'other messages with buttons are kept');
+  assert.deepEqual(deleted, [55, 56], 'every screen with buttons is removed when one of its buttons is tapped');
   assert.ok(net.sent.length > 0);
 });
 
@@ -299,7 +299,7 @@ test('buynow (live): buys on Binance and places the stop order — even before a
   assert.equal(orders.filter(o => o.side === 'BUY').length, 1);
   assert.equal(orders.filter(o => o.type === 'STOP_LOSS_LIMIT').length, 1, 'stop order placed straight away');
   const [pos] = Object.values(await require('../src/services/positionStore').getAllPositions('2000'));
-  assert.equal(pos.strategy, 'donchian:20-10:btc');
+  assert.equal(pos.strategy, 'donchian:55-20:btc');
   assert.equal(pos.boughtWithSignal, true);
 });
 
@@ -315,4 +315,83 @@ test('stops: today\'s stop and signal for every coin', async () => {
   const t = net.sent.at(-1).text;
   assert.match(t, /Today's stop for each coin/);
   for (const c of ['BTC', 'ETH', 'SOL', 'UNI']) assert.match(t, new RegExp(`\\*${c}\\* \\$[\\d.]+ → stop \\$[\\d.]+ \\(\\*−[\\d.]+%\\*\\)`));
+});
+
+// ─── v2.20: reasons, quiet-day notes, the admin report, retry after a failure ──
+const dayStartPlus = (min) => new Date(Math.floor(Date.now() / DAY) * DAY + min * 60_000);
+
+test('every auto-buy says why: the signal, the market filter, the test and the amount; house buys reach the admin', async () => {
+  const { net, ab } = setup();
+  await ab.setPractice('2000', true);
+  const sent = [];
+  await ab.runDaily({ allowed: new Set(['1000', '2000']), send: async (id, text) => sent.push({ id: String(id), text }), now: dayStartPlus(10) });
+
+  const mine = sent.filter(m => m.id === '2000' && /Auto-bought/.test(m.text));
+  assert.ok(mine.length >= 1);
+  const m = mine[0].text;
+  assert.match(m, /🎮 PRACTICE · 🤖 \*Auto-bought \w+\* \(play money\)/);
+  assert.match(m, /Why the bot bought \w+:/);
+  assert.match(m, /Breakout: closed at \$[\d,.]+, above its 55-day high of \$[\d,.]+ \(\+[\d.]+%\)/);
+  assert.match(m, /Market filter: BTC \$[\d,.]+ is above its 100-day average/);
+  assert.match(m, /Strategy test: not tested yet/, 'honest when the lab file is missing');
+  assert.match(m, /Why this amount:\* if the stop is hit you lose about \$[\d,.]+ — 1% of your \$10,000\.00 account/);
+  assert.match(m, /How it sells:\* the stop follows the lowest low of the last 20 days/);
+
+  const house = sent.filter(x => x.id === '1000' && /HOUSE forward test · 🤖 \*Auto-bought/.test(x.text));
+  assert.ok(house.length >= 1, 'the admin sees what the house forward test bought, with reasons');
+  const report = sent.find(x => x.id === '1000' && /Auto-buy daily check/.test(x.text));
+  assert.ok(report, 'the admin gets the daily report');
+  assert.match(report.text, /Buy signals \(\d+\)/);
+  assert.match(report.text, /🏠 house: /);
+  assert.match(report.text, /NOT TESTED: data\/auto-strategy\.json is missing/);
+  assert.ok(net);
+});
+
+test('a day with nothing to buy: users with auto-buy on are told why (BTC below its 100-day average)', async () => {
+  resetEnv({ TRADING_ENCRYPTION_KEY: ENC, AUTO_STRATEGY_FILE: path.join(os.tmpdir(), 'no-such-strategy.json') });
+  mockNet({ price: 50, klines: (sym, interval, limit) => trendDaily(limit, -0.003) }); // a falling market
+  const ab = require('../src/services/autoBuyer');
+  await ab.setPractice('2000', true);
+  const sent = [];
+  const r = await ab.runDaily({ allowed: new Set(['1000', '2000', '3000']), send: async (id, text) => sent.push({ id: String(id), text }), now: dayStartPlus(10) });
+  assert.equal(r.signals, 0);
+  const note = sent.find(m => m.id === '2000');
+  assert.ok(note, 'the user who switched auto-buy on hears about the quiet day');
+  assert.match(note.text, /No coin to buy today/);
+  assert.match(note.text, /\*Why:\* BTC \$[\d,.]+ is below its 100-day average \$[\d,.]+/);
+  assert.ok(!sent.some(m => m.id === '3000'), 'users who never switched auto-buy on are not messaged');
+  assert.ok(sent.some(m => m.id === '1000' && /Auto-buy daily check/.test(m.text) && /Nothing bought today/.test(m.text)));
+  // Once a day only
+  await ab.runDaily({ allowed: new Set(['2000']), send: async (id, text) => sent.push({ id: String(id), text }), now: dayStartPlus(40) });
+  assert.equal(sent.filter(m => m.id === '2000').length, 1);
+});
+
+test('no signal but BTC is up: the note names the coins closest to a breakout', () => {
+  const ab = require('../src/services/autoBuyer');
+  const text = ab.noBuyMessage('2026-10-27', ab.currentStrategy(), {
+    regimeOn: true, regimeUp: true, regimeText: 'BTC $100,000 is above its 100-day average $90,000',
+    analysis: { SOLUSDT: { gapPct: 2.1 }, ETHUSDT: { gapPct: 0.8 }, ADAUSDT: { gapPct: 9 }, XRPUSDT: { gapPct: 4 } },
+  });
+  assert.match(text, /none of the 4 coins gave a buy signal/);
+  assert.match(text, /Closest:\* ETH needs \+0\.8% · SOL needs \+2\.1% · XRP needs \+4%/);
+});
+
+test('a failed daily check does not use up the day: the admin is told and the next run retries', async () => {
+  resetEnv({ TRADING_ENCRYPTION_KEY: ENC, AUTO_STRATEGY_FILE: path.join(os.tmpdir(), 'no-such-strategy.json') });
+  let down = true;
+  const price = lastClose() * 1.002;
+  mockNet({ price, klines: (sym, interval, limit) => { if (down && interval === '1d') throw new Error('Binance is down'); return interval === '1d' ? trendDaily(limit) : [{ time: Date.now() - 60_000, open: price, high: price, low: price, close: price, volume: 1 }]; } });
+  const ab = require('../src/services/autoBuyer');
+  const practice = require('../src/services/practiceService');
+  const sent = [];
+  const send = async (id, text) => sent.push({ id: String(id), text });
+
+  await assert.rejects(ab.runDaily({ allowed: new Set(['1000']), send, now: dayStartPlus(10) }), /no BTC daily data/);
+  assert.ok(sent.some(m => m.id === '1000' && /Auto-buy check failed/.test(m.text) && /try again in about 30 minutes/.test(m.text)));
+
+  down = false;
+  const r = await ab.runDaily({ allowed: new Set(['1000']), send, now: dayStartPlus(40) });
+  assert.ok(r.signals > 0, 'the retry ran the check');
+  assert.ok((await practice.summary('house')).positions.length > 0, 'and the house account bought');
+  assert.equal((await ab.runDaily({ allowed: new Set(['1000']), send, now: dayStartPlus(70) })).skipped, 'already ran today');
 });

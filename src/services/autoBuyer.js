@@ -28,7 +28,7 @@ const path = require('path');
 const store = require('../lib/redis');
 const { fetchKlines, fetchPrice } = require('../lib/market');
 const { mapLimit } = require('../lib/concurrency');
-const { STRATEGIES, prepare, makeContext } = require('../strategies');
+const { STRATEGIES, prepare, makeContext, fmtUsd } = require('../strategies');
 const cfg = require('../config/autobuy');
 const practice = require('./practiceService');
 const ps = require('./positionStore');
@@ -44,6 +44,9 @@ const K = {
   day: (d) => `cryptobot:autobuy:day:${d}`,
   lastEq: (c) => `cryptobot:autobuy:lasteq:${c}`,
   signals: 'cryptobot:autobuy:signals',
+  running: 'cryptobot:lock:autobuy',
+  tries: (d) => `cryptobot:autobuy:tries:${d}`,
+  did: (d, id) => `cryptobot:autobuy:did:${d}:${id}`,
 };
 
 class AutoBuyError extends Error {}
@@ -63,7 +66,7 @@ function currentStrategy() {
     return { family: pick.family, params: pick.params, id: pick.id, label: pick.label, name: pick.name, verdict: res.verdict, why: pick.why, test: pick.test, portfolioTest: pick.portfolioTest, period: res.period, tested: true };
   }
   const f = cfg.FALLBACK;
-  return { ...f, name: STRATEGIES[f.family].name, label: `${STRATEGIES[f.family].name} — ${STRATEGIES[f.family].describe(f.params)}`, verdict: 'NOT TESTED', why: 'not tested yet — run `npm run lab`', tested: false };
+  return { ...f, name: STRATEGIES[f.family].name, label: `${STRATEGIES[f.family].name} — ${STRATEGIES[f.family].describe(f.params)}, only while BTC is above its 100-day average`, verdict: 'NOT TESTED', why: 'the saved lab result (data/auto-strategy.json) is missing — run `npm run lab -- --days 3000` and commit it', tested: false, missingFile: true };
 }
 
 // ─── Signals (one computation per day, shared by everyone) ───────────────────
@@ -83,21 +86,83 @@ async function computeSignals(strategy, { symbols = null } = {}) {
   const p = strategy.params;
   const buys = [];
   const analysis = {};
+  const btcLast = prepared.BTCUSDT.c[prepared.BTCUSDT.c.length - 1];
+  const btc = ctx.btcAt(btcLast.time);
+  const regimeUp = ctx.btcUp(btcLast.time);
+  const regimeText = btc && btc.sma100
+    ? `BTC ${fmtUsd(btc.close)} is ${regimeUp ? 'above' : 'below'} its 100-day average ${fmtUsd(btc.sma100)}`
+    : 'BTC\'s 100-day average isn\'t available';
   for (const sym of list) {
     const ind = prepared[sym];
     if (!ind) { analysis[sym] = { signal: false, reason: 'not enough daily price history on Binance' }; continue; }
     const i = ind.c.length - 1;
     const ref = ind.close[i];
     const stop = i >= 20 ? s.initialStop(ind, i, p, ref) : null;
-    const base = { close: ref, stop: Number.isFinite(stop) && stop > 0 && stop < ref ? stop : null };
+    const base = { close: ref, stop: Number.isFinite(stop) && stop > 0 && stop < ref ? stop : null, date: new Date(ind.c[i].time).toISOString().slice(0, 10) };
     if (base.stop) base.stopPct = r2((1 - base.stop / ref) * 100);
     if (i < s.warmup) { analysis[sym] = { ...base, signal: false, reason: 'too new — not enough price history for the strategy' }; continue; }
+    let ex = { text: null, gap: null };
+    try { if (s.explain) ex = s.explain(ind, i, p, ctx); } catch { /* explanation is extra */ }
+    base.why = ex.text;
+    base.gapPct = Number.isFinite(ex.gap) ? r2(ex.gap * 100) : null;
     if (p.regime && !ctx.btcUp(ind.c[i].time)) { analysis[sym] = { ...base, signal: false, reason: 'the market filter is off: BTC is below its 100-day average' }; continue; }
     if (!s.entry(ind, i, p, ctx)) { analysis[sym] = { ...base, signal: false, reason: `no buy signal today (the strategy needs: ${s.describe(p).split(';')[0]})` }; continue; }
     analysis[sym] = { ...base, signal: true, reason: 'the strategy has a buy signal today' };
-    if (base.stop) buys.push({ symbol: sym, close: ref, stop: base.stop, stopPct: base.stopPct });
+    if (base.stop) buys.push({ symbol: sym, close: ref, stop: base.stop, stopPct: base.stopPct, why: base.why });
   }
-  return { prepared, buys, analysis, regimeUp: ctx.btcUp(prepared.BTCUSDT.c[prepared.BTCUSDT.c.length - 1].time) };
+  return { prepared, buys, analysis, regimeUp, regimeText, regimeOn: !!p.regime };
+}
+
+// ─── Plain-words explanations for every buy ──────────────────────────────────
+const coinOf = (sym) => sym.replace(/USDT$/, '');
+
+/** "Why the bot bought X" — the signal, the market filter and the test result. */
+function whyLines(b, strategy, sig) {
+  const lines = [];
+  if (b.why) lines.push(`• ${b.why}`);
+  if (sig.regimeOn) lines.push(`• Market filter: ${sig.regimeText} — the strategy only buys while BTC is in an up-trend`);
+  const t = strategy.test;
+  if (strategy.tested && t) lines.push(`• Strategy test: ${strategy.verdict === 'PASS' ? 'PASSED' : strategy.verdict} — on ${t.trades} past trades it was never tuned on, each trade made on average ${t.expectancyR >= 0 ? '+' : ''}${Number(t.expectancyR).toFixed(2)}× the amount it risked, after fees (losing trades included)`);
+  else lines.push(`• Strategy test: not tested yet (the saved lab results are missing)`);
+  return lines;
+}
+
+function sizeLine(z, equity) {
+  const cap = z.capped === 'position' ? ` (capped at ${cfg.LIMITS.maxPositionPct}% of the account for one coin)` : z.capped === 'cash' ? ' (all the cash available)' : '';
+  return `*Why this amount:* if the stop is hit you lose about ${usd(z.riskUsd)} — ${cfg.LIMITS.riskPct}% of your ${usd(equity)} account${cap}.`;
+}
+
+/** The full "auto-bought" message (practice, house or real). */
+function buyMessage({ mode, b, strategy, sig, z, equity, price, qty }) {
+  const coin = coinOf(b.symbol);
+  const head = mode === 'live' ? `💰 REAL · 🤖 *Auto-bought ${coin}* on Binance`
+    : mode === 'house' ? `🏠 HOUSE forward test · 🤖 *Auto-bought ${coin}* (play money)`
+    : `🎮 PRACTICE · 🤖 *Auto-bought ${coin}* (play money)`;
+  const stopPct = r2((1 - b.stop / price) * 100);
+  return [
+    head,
+    `${+Number(qty).toFixed(8)} ${coin} at ~$${fmtP(price)} (${usd(z.usd)}) · stop $${fmtP(b.stop)} (−${stopPct}%)`,
+    ``,
+    `*Why the bot bought ${coin}:*`,
+    ...whyLines(b, strategy, sig),
+    ``,
+    sizeLine(z, equity),
+    `*How it sells:* ${STRATEGIES[strategy.family].exitText ? STRATEGIES[strategy.family].exitText(strategy.params) : 'by a trailing stop that only moves up'}.`,
+  ].join('\n');
+}
+
+/** Why nothing was bought today — the market filter, or the coins closest to a signal. */
+function noBuyMessage(date, strategy, sig) {
+  const lines = [`🛒 *Auto-buy check — ${date}*`, ``, `No coin to buy today.`];
+  if (sig.regimeOn && !sig.regimeUp) {
+    lines.push(`*Why:* ${sig.regimeText}. The strategy only buys while BTC is above it, to stay out of falling markets.`);
+  } else {
+    lines.push(`*Why:* none of the ${Object.keys(sig.analysis).length} coins gave a buy signal (${STRATEGIES[strategy.family].describe(strategy.params).split(';')[0]}).`);
+    const near = Object.entries(sig.analysis).filter(([, a]) => a.gapPct > 0).sort((x, y) => x[1].gapPct - y[1].gapPct).slice(0, 3);
+    if (near.length) lines.push(`*Closest:* ${near.map(([s, a]) => `${coinOf(s)} needs +${a.gapPct}%`).join(' · ')}`);
+  }
+  lines.push(``, `_Signals are rare with this strategy — in testing about 3 a month across all coins, with some weeks having none. Waiting is part of the plan. Next check: tomorrow just after 1am Lagos time._`);
+  return lines.join('\n');
 }
 
 /** New trailing stop for a position, or null if it shouldn't move. */
@@ -116,10 +181,14 @@ function size({ equity, cash, entry, stop, open, lastEquity }) {
   if (open >= L.maxOpen) return { skip: `already ${open} auto positions (max ${L.maxOpen})` };
   if (lastEquity && equity < lastEquity * (1 - L.dailyLossPct / 100)) return { skip: `account fell ${r2((1 - equity / lastEquity) * 100)}% since yesterday — no new buys today` };
   const riskUsd = equity * (L.riskPct / 100);
-  let usd = (riskUsd / (entry - stop)) * entry;
-  usd = Math.min(usd, equity * (L.maxPositionPct / 100), cash * 0.98);
+  const wanted = (riskUsd / (entry - stop)) * entry;
+  const maxPos = equity * (L.maxPositionPct / 100);
+  const maxCash = cash * 0.98;
+  const usd = Math.min(wanted, maxPos, maxCash);
   if (usd < L.minOrderUsd) return { skip: 'not enough cash for the minimum order' };
-  return { usd: r2(usd) };
+  const capped = usd < wanted - 0.005 ? (usd === maxCash ? 'cash' : 'position') : null;
+  // What is actually at risk if the stop is hit (smaller when the size was capped)
+  return { usd: r2(usd), riskUsd: r2(usd * (1 - stop / entry)), capped };
 }
 
 // ─── Flags / settings ─────────────────────────────────────────────────────────
@@ -203,6 +272,7 @@ async function userStatus(chatId) {
 // ─── Practice accounts ────────────────────────────────────────────────────────
 async function runPracticeAccount(chatId, strategy, sig, { buy = true } = {}) {
   const msgs = [];
+  const bought = [];
   // 1) Trail the stops of auto-bought positions
   for (const p of (await practice.getPositions(chatId)).filter(x => x.auto)) {
     const t = trailFor(sig.prepared, strategy, p);
@@ -210,7 +280,7 @@ async function runPracticeAccount(chatId, strategy, sig, { buy = true } = {}) {
     if (t?.stop) msgs.push(`🎮🤖 ${p.symbol.replace('USDT', '')}: trailing stop raised to $${fmtP(t.stop)}`);
   }
   // 2) New buys
-  if (!buy || !sig.buys.length) return msgs;
+  if (!buy || !sig.buys.length) return Object.assign(msgs, { bought });
   const s = await practice.summary(chatId);
   const lastEquity = Number(await store.cmd('GET', K.lastEq(chatId))) || null;
   const held = new Set(s.positions.filter(p => p.auto).map(p => p.symbol));
@@ -222,13 +292,14 @@ async function runPracticeAccount(chatId, strategy, sig, { buy = true } = {}) {
     try {
       const live = await fetchPrice(b.symbol, { exchange: 'binance' });
       if (!live || b.stop >= live) { msgs.push(`🎮🤖 Skipped ${b.symbol.replace('USDT', '')}: price already at the stop`); continue; }
-      const { position, cash: left } = await practice.buy(chatId, { symbol: b.symbol, amount: z.usd, stop: b.stop, strategy });
+      const { position, cash: left } = await practice.buy(chatId, { symbol: b.symbol, amount: z.usd, stop: b.stop, strategy, why: b.why });
       cash = left; open++; held.add(b.symbol);
-      msgs.push(`🎮 PRACTICE · 🤖 *Auto-bought ${b.symbol.replace('USDT', '')}* (play money): ${usd(z.usd)} at $${fmtP(position.buyPrice)} · stop $${fmtP(b.stop)} (−${b.stopPct}%, risk ≈ ${cfg.LIMITS.riskPct}% of the account)`);
+      bought.push(coinOf(b.symbol));
+      msgs.push(buyMessage({ mode: chatId === HOUSE ? 'house' : 'practice', b, strategy, sig, z, equity: s.equity, price: position.buyPrice, qty: position.quantity }));
     } catch (err) { msgs.push(`🎮🤖 Couldn't buy ${b.symbol.replace('USDT', '')}: ${err.message}`); }
   }
   await store.cmd('SET', K.lastEq(chatId), String(s.equity));
-  return msgs;
+  return Object.assign(msgs, { bought });
 }
 
 // ─── Live accounts (only when unlocked) ──────────────────────────────────────
@@ -243,7 +314,7 @@ async function liveEquity(c, positions) {
 }
 
 /** Market-buy on Binance, save the position with the strategy's stop, put the stop order on Binance. */
-async function liveBuy(chatId, c, { symbol, usd: spend, stop, strategy, autoBought = false, signal = null }) {
+async function liveBuy(chatId, c, { symbol, usd: spend, stop, strategy, autoBought = false, signal = null, why = null }) {
   const rules = await c.symbolRules(symbol);
   const o = await c.marketBuy(symbol, Number(spend).toFixed(2), `cb-${autoBought ? 'ab' : 'bn'}-${Date.now().toString(36)}`);
   const qtyGross = Number(o.executedQty) || 0;
@@ -252,15 +323,16 @@ async function liveBuy(chatId, c, { symbol, usd: spend, stop, strategy, autoBoug
   const qty = floorToStep(qtyGross - feeInCoin, rules.stepSize);
   const avg = Number(o.cummulativeQuoteQty) / qtyGross;
   const pos = await ps.addPosition({ chatId, symbol, buyPrice: avg, quantity: Number(toFixedStep(qty, rules.stepSize)), stopLossPrice: stop, exchange: 'binance' });
-  await ps.updatePosition(chatId, pos.positionId, { strategy: strategy.id, stopStage: 'trail', stopSource: 'strategy', highestClose: avg, autoBought, ...(signal !== null ? { boughtWithSignal: signal } : {}) });
+  await ps.updatePosition(chatId, pos.positionId, { strategy: strategy.id, stopStage: 'trail', stopSource: 'strategy', highestClose: avg, autoBought, ...(signal !== null ? { boughtWithSignal: signal } : {}), ...(why ? { buyReason: why } : {}) });
   await autoTrader.sync(chatId, pos.positionId); // puts the stop order on Binance
   return { qty, avg, positionId: pos.positionId };
 }
 
 async function runLiveAccount(chatId, strategy, sig, { buy = true } = {}) {
   const msgs = [];
+  const bought = [];
   const c = await accounts.getActiveClient(chatId);
-  if (!c) return buy ? [`🤖 Live auto-buy skipped: auto-trading is off. Send \`golive\`.`] : [];
+  if (!c) return Object.assign(buy ? [`🤖 Live auto-buy skipped: auto-trading is off. Send \`golive\`.`] : [], { bought });
   const mine = Object.values(await ps.getAllPositions(chatId)).filter(p => p.strategy);
   // 1) Trail stops; autoTrader moves the Binance stop order
   for (const p of mine) {
@@ -269,7 +341,7 @@ async function runLiveAccount(chatId, strategy, sig, { buy = true } = {}) {
     await ps.updatePosition(chatId, p.positionId, { highestClose: t.highestClose, ...(t.stop ? { stopLossPrice: t.stop, stopStage: 'trail' } : {}) });
     if (t.stop) await autoTrader.sync(chatId, p.positionId);
   }
-  if (!buy || !sig.buys.length) return msgs;
+  if (!buy || !sig.buys.length) return Object.assign(msgs, { bought });
   // 2) New buys
   const { usdt, equity } = await liveEquity(c, mine);
   const lastEquity = Number(await store.cmd('GET', K.lastEq(`live:${chatId}`))) || null;
@@ -280,13 +352,14 @@ async function runLiveAccount(chatId, strategy, sig, { buy = true } = {}) {
     const z = size({ equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
     if (z.skip) { msgs.push(`🤖 Skipped ${b.symbol.replace('USDT', '')}: ${z.skip}`); if (/max|fell/.test(z.skip)) break; continue; }
     try {
-      const { qty, avg } = await liveBuy(chatId, c, { symbol: b.symbol, usd: z.usd, stop: b.stop, strategy, autoBought: true });
+      const { qty, avg } = await liveBuy(chatId, c, { symbol: b.symbol, usd: z.usd, stop: b.stop, strategy, autoBought: true, why: b.why });
       cash -= z.usd; open++; held.add(b.symbol);
-      msgs.push(`💰 REAL · 🤖 *Auto-bought ${b.symbol.replace('USDT', '')}* on Binance: ${qty} at ~$${fmtP(avg)} (${usd(z.usd)}) · stop $${fmtP(b.stop)} (−${b.stopPct}%)`);
+      bought.push(coinOf(b.symbol));
+      msgs.push(buyMessage({ mode: 'live', b, strategy, sig, z, equity, price: avg, qty }));
     } catch (err) { msgs.push(`⚠️ Auto-buy ${b.symbol.replace('USDT', '')} failed: ${err.message}`); }
   }
   await store.cmd('SET', K.lastEq(`live:${chatId}`), String(equity));
-  return msgs;
+  return Object.assign(msgs, { bought });
 }
 
 // ─── The daily run ────────────────────────────────────────────────────────────
@@ -300,39 +373,101 @@ async function runDaily({ allowed = new Set(), send = async () => {}, force = fa
   const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
   if (!force && mins < cfg.DAILY_RUN_AFTER_UTC_MINUTES) return { skipped: 'waiting for the daily close' };
   const date = now.toISOString().slice(0, 10);
-  if (!force && (await store.cmd('SET', K.day(date), '1', 'NX', 'EX', 3 * 86400)) !== 'OK') return { skipped: 'already ran today' };
+  const admin = process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID) : null;
 
-  const strategy = currentStrategy();
-  const sig = await computeSignals(strategy);
-  await store.setJSON(K.signals, { date, at: new Date().toISOString(), strategy: strategy.id, verdict: strategy.verdict, regimeUp: sig.regimeUp, buys: sig.buys.map(b => ({ coin: b.symbol.replace('USDT', ''), stopPct: b.stopPct })) });
+  // The day only counts as done once the check has SUCCEEDED. A failed check
+  // (no prices, a timeout) is retried by the next monitor run, up to 6 times.
+  if (!force) {
+    if (await store.cmd('GET', K.day(date))) return { skipped: 'already ran today' };
+    if (!(await store.lock(K.running, 300).catch(() => true))) return { skipped: 'already running' };
+  }
+  const tries = force ? 0 : Number(await store.cmd('INCR', K.tries(date)).catch(() => 1)) || 1;
+  if (!force && tries === 1) await store.cmd('EXPIRE', K.tries(date), 3 * 86400).catch(() => {});
+  if (!force && tries > MAX_TRIES) { await store.cmd('DEL', K.running).catch(() => {}); return { skipped: `gave up after ${MAX_TRIES} failed tries today` }; }
 
-  const out = { date, strategy: strategy.id, signals: sig.buys.length, practice: 0, live: 0, summaries: 0 };
-
-  // End of the trading day: everyone's result for the day that just closed
-  if (!force) out.summaries = await sendDailySummaries({ allowed, send, now }).catch(err => { console.error('[AutoBuy] summary', err.message); return 0; });
-
-  // Practice: trail every strategy position; buy only for the house + users who switched auto-buy on
-  const practiceOn = new Set(((await store.cmd('SMEMBERS', K.users)) || []).map(String));
-  const practiceIds = [HOUSE, ...(await practice.allUsers()).filter(id => id !== HOUSE && allowed.has(String(id)))];
-  for (const id of practiceIds) {
+  try {
+    const strategy = currentStrategy();
+    let sig;
     try {
-      const msgs = await runPracticeAccount(id, strategy, sig, { buy: id === HOUSE || practiceOn.has(String(id)) });
-      if (id !== HOUSE) for (const m of msgs) await send(id, m);
-      out.practice++;
-    } catch (err) { console.error('[AutoBuy] practice', id, err.message); }
-  }
+      sig = await computeSignals(strategy);
+    } catch (err) {
+      if (admin) await send(admin, `⚠️ *Auto-buy check failed* (${date}, try ${tries || 'admin run'} of ${MAX_TRIES}): ${err.message}\n${tries && tries < MAX_TRIES ? 'It will try again in about 30 minutes.' : 'No more tries today — send `autobuy run` to try by hand.'}`).catch(() => {});
+      throw err;
+    }
+    await store.setJSON(K.signals, { date, at: new Date().toISOString(), strategy: strategy.id, verdict: strategy.verdict, regimeUp: sig.regimeUp, regimeText: sig.regimeText, buys: sig.buys.map(b => ({ coin: coinOf(b.symbol), stopPct: b.stopPct, why: b.why })) });
 
-  // Live: trail every strategy position (incl. `buynow` buys); auto-buy only when opened + opted in
-  const unlocked = await isLiveUnlocked();
-  const liveOn = new Set(((await store.cmd('SMEMBERS', K.live)) || []).map(String));
-  for (const id of allowed) {
-    const hasStrategyPos = Object.values(await ps.getAllPositions(id)).some(p => p.strategy);
-    const buy = unlocked && liveOn.has(String(id));
-    if (!hasStrategyPos && !buy) continue;
-    try { for (const m of await runLiveAccount(id, strategy, sig, { buy })) await send(id, m); out.live++; }
-    catch (err) { console.error('[AutoBuy] live', id, err.message); await send(id, `⚠️ Auto-trading problem: ${err.message}`); }
+    const out = { date, strategy: strategy.id, signals: sig.buys.length, practice: 0, live: 0, summaries: 0, bought: {} };
+    // Each account is handled once a day, even if a retry runs after a timeout
+    const once = async (id) => force || (await store.cmd('SET', K.did(date, id), '1', 'NX', 'EX', 3 * 86400).catch(() => 'OK')) === 'OK';
+
+    // End of the trading day: everyone's result for the day that just closed
+    if (!force && (await once('summaries'))) out.summaries = await sendDailySummaries({ allowed, send, now }).catch(err => { console.error('[AutoBuy] summary', err.message); return 0; });
+
+    // Practice: trail every strategy position; buy only for the house + users who switched auto-buy on
+    const practiceOn = new Set(((await store.cmd('SMEMBERS', K.users)) || []).map(String));
+    const practiceIds = [HOUSE, ...(await practice.allUsers()).filter(id => id !== HOUSE && allowed.has(String(id)))];
+    for (const id of practiceIds) {
+      if (!(await once(`p:${id}`))) continue;
+      try {
+        const msgs = await runPracticeAccount(id, strategy, sig, { buy: id === HOUSE || practiceOn.has(String(id)) });
+        // The house account's buys go to the admin, so the forward test is visible
+        const to = id === HOUSE ? admin : id;
+        if (to) for (const m of msgs) if (id !== HOUSE || /Auto-bought/.test(m)) await send(to, m);
+        if (msgs.bought?.length) out.bought[id === HOUSE ? 'house' : `practice:${id}`] = msgs.bought;
+        out.practice++;
+      } catch (err) { console.error('[AutoBuy] practice', id, err.message); }
+    }
+
+    // Live: trail every strategy position (incl. `buynow` buys); auto-buy only when opened + opted in
+    const unlocked = await isLiveUnlocked();
+    const liveOn = new Set(((await store.cmd('SMEMBERS', K.live)) || []).map(String));
+    for (const id of allowed) {
+      const hasStrategyPos = Object.values(await ps.getAllPositions(id)).some(p => p.strategy);
+      const buy = unlocked && liveOn.has(String(id));
+      if (!hasStrategyPos && !buy) continue;
+      if (!(await once(`l:${id}`))) continue;
+      try {
+        const msgs = await runLiveAccount(id, strategy, sig, { buy });
+        for (const m of msgs) await send(id, m);
+        if (msgs.bought?.length) out.bought[`live:${id}`] = msgs.bought;
+        out.live++;
+      } catch (err) { console.error('[AutoBuy] live', id, err.message); await send(id, `⚠️ Auto-trading problem: ${err.message}`); }
+    }
+
+    // Everyone with auto-buy on who got nothing today hears why (once a day)
+    if (!sig.buys.length) {
+      const watchers = new Set([...practiceOn, ...(unlocked ? liveOn : [])].filter(id => allowed.has(id) && id !== admin));
+      const text = noBuyMessage(date, strategy, sig);
+      for (const id of watchers) if (await once(`n:${id}`)) await send(id, text).catch(() => {});
+    }
+
+    // The admin's daily report: signals with reasons, and what each account bought
+    if (admin && (await once('report'))) await send(admin, adminReport(date, strategy, sig, out)).catch(() => {});
+
+    if (!force) await store.cmd('SET', K.day(date), '1', 'EX', 3 * 86400);
+    return out;
+  } finally {
+    if (!force) await store.cmd('DEL', K.running).catch(() => {});
   }
-  return out;
+}
+
+const MAX_TRIES = 6;
+
+function adminReport(date, strategy, sig, out) {
+  const lines = [`📋 *Auto-buy daily check — ${date}*`, `_${strategy.label}${strategy.tested ? '' : ' — ⚠️ NOT TESTED: data/auto-strategy.json is missing, run `npm run lab`'}_`, ``];
+  if (sig.regimeOn) lines.push(`${sig.regimeUp ? '🟢' : '🔴'} Market filter: ${sig.regimeText}`);
+  if (sig.buys.length) {
+    lines.push(`✅ *Buy signals (${sig.buys.length}):*`);
+    for (const b of sig.buys) lines.push(`• *${coinOf(b.symbol)}* — ${b.why || 'signal'} · stop −${b.stopPct}%`);
+  } else {
+    lines.push(noBuyMessage(date, strategy, sig).split('\n').slice(3, 5).join('\n'));
+  }
+  const who = Object.entries(out.bought);
+  lines.push(``, who.length
+    ? `🛒 *Bought:* ${who.map(([k, coins]) => `${k === 'house' ? '🏠 house' : k.startsWith('live:') ? `💰 ${k.slice(5)}` : `🎮 ${k.slice(9)}`}: ${coins.join(', ')}`).join(' · ')}`
+    : `🛒 Nothing bought today.`);
+  lines.push(`_${out.practice} practice account(s) checked · ${out.live} live account(s)_`);
+  return lines.filter(x => x !== '').join('\n');
 }
 
 // ─── Buy now (the user picks the coin; the strategy manages the exit) ────────
@@ -436,6 +571,6 @@ const usd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits
 
 module.exports = {
   AutoBuyError, HOUSE, currentStrategy, loadResearch, computeSignals, trailFor, size, runDaily,
-  analyseCoin, buyNow, coinTable, sendDailySummaries, dailyMessage,
+  analyseCoin, buyNow, coinTable, sendDailySummaries, dailyMessage, buyMessage, noBuyMessage, adminReport,
   setPractice, setLive, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
 };

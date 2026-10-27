@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.20.0 — Back buttons, reasons for every auto-buy, safer payments
+
+- **⬅️ Back on every screen, and old screens disappear.** Tapping any button now removes the message it was on (and the rest of that screen), and the next screen has a ⬅️ Back button that returns to the screen you came from: menu → Practice → Auto-buy → Today's stops → Back → Auto-buy → Back → Practice → Back → menu.
+  - Back only ever shows a screen again. It never repeats an action: after "Yes, buy $50 of SOL" or "Start again with $10,000", Back goes to the screen you started from without buying or resetting twice.
+  - Receipts are kept: results such as "✅ Bought…" or "🟢 Auto-trading is ON" get a Back button but stay in the chat.
+  - Typed commands work as before; their screens with buttons get ⬅️ Back to the menu.
+  - The bot remembers screens for 7 days (`cryptobot:nav:*` in storage). Nothing typed is stored except known screen names, so API keys can never end up there.
+- **Every auto-buy explains itself** (practice, the house forward test and real money):
+  - the signal in numbers ("closed at $182.41, above its 55-day high of $179.80, +1.5%"),
+  - the market filter ("BTC $104,250 is above its 100-day average $97,830"),
+  - the strategy's test result in plain words,
+  - why that amount ("if the stop is hit you lose about $100 — 1% of your account"; says so when the 20% cap or the cash limited it),
+  - how it will sell.
+
+  The reason is also saved on the position (`buyReason`).
+- **A note on days with nothing to buy,** for everyone who switched auto-buy on: "No coin to buy today", with why (BTC below its 100-day average, or the 3 coins closest to a breakout and how far each still has to rise). Once a day.
+- **Daily report for the admin:** the market filter, every buy signal with its reason, what each account bought (🏠 house, 🎮 practice, 💰 real) and how many accounts were checked. The house account's buys are also sent to the admin in full.
+- **Fixed: a failed daily check no longer loses the day.** Before, the day was marked "done" before the prices were fetched, so a Binance hiccup or a timeout meant no buying until the next day. Now the day only counts once the check succeeds. The next monitor run (30 minutes later) retries, up to 6 times, and the admin is told about each failure. Each account is still handled only once a day, even across retries.
+- **Fixed: the strategy fallback.** If `data/auto-strategy.json` is ever missing, the bot now uses the settings that passed the lab test (breakout 55/20 with the BTC filter) instead of an untested 20/10 variant. It still shows "NOT TESTED" (so live auto-buy can't be unlocked on it), and `/api/health` (`autoBuyStrategy.warning`) and the admin's daily report warn about it.
+- **Fixed: Paystack webhooks without a valid signature are refused** (HTTP 401) before anything else, so nobody can make the bot call Paystack with fake events. The signature is checked on the raw body when available, otherwise as Paystack's own docs do it. Payments still only count after Paystack's verify API confirms them, and the `/paid` return link and `subscribe check` still credit payers on their own.
+- **Up-to-date descriptions:** the README, `package.json`, the welcome message, the go-live intro, practice help, the auto-exits screens and the dashboard no longer say the bot "never buys" or that "the strategy lost money". They now describe Buy Now, auto-buy and the tested breakout strategy (with its honest caveats).
+- The auto-buy screen shows the last check's reasons and the BTC filter.
+- Tests: 150.
+
 ## 2.19.0 — Flutterwave payments
 
 - **Flutterwave** added next to Paystack (Standard checkout, v3 API): cards, bank transfer and USSD.

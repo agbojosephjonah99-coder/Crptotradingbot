@@ -85,6 +85,10 @@ module.exports = async (req, res) => {
     exchangesWorking: Object.entries(exchangeChecks).filter(([, c]) => c.ok).map(([id]) => PROVIDERS[id].name),
     strategy: ACTIVE,
     backtestStatsSaved: !!loadSavedStats(),
+    autoBuyStrategy: (() => {
+      const s = require('../src/services/autoBuyer').currentStrategy();
+      return { id: s.id, verdict: s.verdict, labResultSaved: !s.missingFile, ...(s.missingFile ? { warning: 'data/auto-strategy.json is missing: using the last passing settings, but live auto-buy cannot be unlocked. Run `npm run lab -- --days 3000` and commit the file.' } : {}) };
+    })(),
     autoExits: {
       available: require('../src/lib/secretBox').isConfigured(),
       dryRun: String(process.env.AUTOTRADE_DRY_RUN || '').toLowerCase() === 'true',

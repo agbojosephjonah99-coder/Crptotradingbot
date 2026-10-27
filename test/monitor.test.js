@@ -65,7 +65,13 @@ test('position alerts go only to the owner, never the shared info channel', asyn
   await require('../api/v2monitor')(fakeReq(), res);
   assert.equal(res.statusCode, 200);
   assert.ok(net.sent.length > 0);
-  for (const m of net.sent) assert.equal(String(m.chat_id), '2000');
+  for (const m of net.sent) {
+    assert.notEqual(String(m.chat_id), '-100999', 'nothing goes to the shared channel');
+    // The admin also gets the daily auto-buy report (and the house account's buys)
+    if (String(m.chat_id) === '1000') assert.match(m.text, /Auto-buy daily check|HOUSE forward test/);
+    else assert.equal(String(m.chat_id), '2000');
+  }
+  assert.ok(net.sent.some(m => String(m.chat_id) === '2000'), 'the owner gets their alert');
 
   const [pos] = Object.values(await store.getAllPositions('2000'));
   assert.ok(pos.stopLossPrice > 0, 'plan locked on first monitor run');

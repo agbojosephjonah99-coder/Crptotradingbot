@@ -27,8 +27,8 @@
  *   GET  subscription        paid-access status
  *   POST subscribe           { email } → Paystack payment link
  *
- * Public (no login; Paystack calls these):
- *   POST paystack-webhook    (/paystack-webhook) payment events → verified with Paystack's API
+ * Public (no login; the payment providers call these):
+ *   POST paystack-webhook    (/paystack-webhook) refused without a valid x-paystack-signature; then verified with Paystack's API
  *   POST flutterwave-webhook (/flutterwave-webhook) payment events → verified with Flutterwave's API
  *   GET  paystack-callback   (/paid) where Paystack sends the payer back → Telegram
  */
@@ -84,7 +84,13 @@ const PUBLIC = {
   'paystack-webhook': async (req, res) => {
     if (req.method !== 'POST') return res.status(405).json({ ok: false });
     try {
-      const r = await subs.handleWebhook(req.body, req.headers?.['x-paystack-signature']);
+      // Check the signature on the exact bytes Paystack sent when we can get them
+      const raw = await readRawBody(req);
+      const r = await subs.handleWebhook(raw ?? req.body, req.headers?.['x-paystack-signature']);
+      if (r.rejected) {
+        console.warn('[paystack-webhook] refused: bad or missing signature');
+        return res.status(401).json({ ok: false });
+      }
       if (r.credited) await subs.notifyCredited(r);
       return res.status(200).json({ ok: true });
     } catch (err) {
@@ -119,6 +125,20 @@ const PUBLIC = {
     return res.status(302).end();
   },
 };
+
+/** The unparsed request body, if the platform hasn't consumed it yet (else null). */
+function readRawBody(req, timeoutMs = 1500) {
+  if (typeof req.body === 'string' || Buffer.isBuffer(req.body)) return Promise.resolve(req.body);
+  if (!req || typeof req.on !== 'function' || req.readableEnded || req.readable === false) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const chunks = [];
+    const done = (v) => { clearTimeout(t); resolve(v); };
+    const t = setTimeout(() => done(chunks.length ? Buffer.concat(chunks) : null), timeoutMs);
+    req.on('data', (c) => chunks.push(Buffer.from(c)));
+    req.on('end', () => done(chunks.length ? Buffer.concat(chunks) : null));
+    req.on('error', () => done(null));
+  });
+}
 
 function parseBody(req) {
   if (!req.body) return {};

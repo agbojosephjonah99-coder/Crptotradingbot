@@ -1,7 +1,7 @@
 {
   "name": "crypto-signal-bot-v2-enhanced",
-  "version": "2.19.0",
-  "description": "CryptoBot V2 — multi-timeframe signals, Telegram bot, position monitoring (alerts; optional automated exits on Binance — never buys)",
+  "version": "2.20.0",
+  "description": "JijazyBot — Telegram trading assistant: position alerts on 7 exchanges, play-money practice, and buying/selling on each user's own Binance account (tested breakout strategy; keys can never withdraw)",
   "main": "index.js",
   "engines": {
     "node": "22.x"
