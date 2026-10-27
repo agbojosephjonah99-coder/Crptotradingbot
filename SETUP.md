@@ -84,6 +84,8 @@ For users to pay by themselves, set up **Flutterwave** and/or **Paystack**. With
 
 (The old `PAID_ACCESS_ENABLED` / `SUBSCRIPTION_*` Vercel variables still work as defaults, but the panel's settings take priority.)
 
+**Free for small accounts:** with paid access on, users whose Binance Spot balance is $100 or less use the bot free (coins bought by their weekly savings plan don't count). Change the limit in 💳 Subscriptions → 🆓 Free for small accounts, or `subs free 150` / `subs free off`. Optional Vercel default: `FREE_ACCOUNT_LIMIT_USD`.
+
 ## 8. Fixed IP for real Binance trading (Fixie)
 
 Binance deletes trading keys that aren't locked to specific IP addresses. Vercel's addresses change, so the bot sends its Binance account and order requests through Fixie, which has two fixed IPs. Prices and charts don't go through it.
@@ -102,3 +104,13 @@ About 1,500 proxy requests per open live position per month. Upgrade the Fixie p
 - Practice auto-buy works straight away for anyone (`autobuy on`). The bot's own "house" practice account always runs it. That's the forward test.
 - Live auto-buy stays locked until the lab gives a PASS **and** the house account has run 8+ weeks with 20+ closed trades in profit. Then `autobuy unlock` (admin), and each user opts in with `autobuy live on`.
 - Kill switch: `autobuy pause` / `autobuy resume`. Test run: `autobuy run`.
+
+## Optional: 💬 Ask the bot (AI helper)
+
+Users can ask questions in plain words ("why did the bot buy SOL?", "how do I move USDT to Spot?") and get answers based on their own positions, practice, auto-buy reasons and savings plan. The AI **only explains** — it never buys or sells, never picks coins and never predicts prices. Trading decisions stay with the tested strategy.
+
+1. Get an API key: OpenAI (platform.openai.com → API keys) or Anthropic (console.anthropic.com → API keys). Add some credit; a question costs a fraction of a cent.
+2. In Vercel → Settings → Environment Variables add `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`). Optional: `AI_MODEL` (default `gpt-4.1-mini` / `claude-haiku-5-5` — check your provider's current model names), `AI_DAILY_LIMIT` (default 20 questions per user per day; you have no limit).
+3. Redeploy. `/api/health` shows `aiHelper.on: true`. Tap 💬 Ask the Bot, or just type a question.
+
+Without a key the button says the helper isn't switched on, and nothing else changes.

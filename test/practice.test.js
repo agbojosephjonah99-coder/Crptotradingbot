@@ -154,8 +154,9 @@ test('go-live wizard: key and secret pasted as messages are deleted, checked wit
   } finally { console.log = origLog; }
   assert.deepEqual(deleted, [13, 14], 'both codes deleted from the chat');
   assert.ok(!logs.join('\n').includes(KEY) && !logs.join('\n').includes(SECRET));
-  assert.match(n.sent.at(-1).text, /Binance connected/);
-  assert.match(n.sent.at(-1).text, /250\.50/);
+  assert.ok(n.sent.some(m => /Binance connected/.test(m.text)));
+  assert.match(n.sent.at(-1).text, /What to expect with \$/, "then what to expect for their balance");
+  assert.match(n.sent.find(m => /Binance connected/.test(m.text)).text, /250\.50/);
   const st = await require('../src/services/tradingAccounts').getStatus('1000');
   assert.equal(st.connected, true);
   assert.equal(st.testnet, false, 'the wizard connects the real account');

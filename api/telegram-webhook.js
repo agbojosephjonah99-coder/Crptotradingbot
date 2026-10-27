@@ -49,12 +49,17 @@ const autoTrader = require('../src/services/autoTrader');
 const subs = require('../src/services/subscriptionService');
 const practice = require('../src/services/practiceService');
 const autoBuyer = require('../src/services/autoBuyer');
+const expectations = require('../src/services/expectations');
+const savings = require('../src/services/savingsPlan');
+const ai = require('../src/services/aiHelper');
 const box = require('../src/lib/secretBox');
 const { tradingIps } = require('../src/lib/binanceTrade');
 const { baseUrl } = require('../src/lib/dashAuth');
 
 // Commands that work while a subscription has ended (paid access only)
-const FREE_COMMANDS = new Set(['subscribe', 'renew', 'pay', 'account', 'subscription', 'plan', 'help', 'menu', 'dashboard', 'autotrade', 'sell', 'sellentry', 'sellall', 'remove']);
+// Always allowed, even without a subscription: paying, help, closing positions, and
+// connecting Binance / checking the balance (that's how small accounts qualify for free access)
+const FREE_COMMANDS = new Set(['subscribe', 'renew', 'pay', 'account', 'subscription', 'plan', 'help', 'menu', 'dashboard', 'autotrade', 'sell', 'sellentry', 'sellall', 'remove', 'golive', 'live', 'balance', 'wallet', 'bal', 'expect']);
 
 const adminId = () => process.env.TELEGRAM_CHAT_ID;
 const esc = tg.escapeMd;
@@ -79,7 +84,8 @@ const MENU_ROWS = [
   // Automation & practice
   [b('🤖 Auto-trading', 'golive'),         b('🛒 Auto-buy', 'autobuy')],
   [b('💵 Binance Balance', 'balance'),     b('🎮 Practice (play money)', 'practice')],
-  [b('🛡 Today\'s Stops (all coins)', 'stops')],
+  [b('🛡 Today\'s Stops (all coins)', 'stops'), b('🐷 Savings Plan', 'save')],
+  [b('📏 What to Expect', 'expect'), b('💬 Ask the Bot', 'ask')],
   // Market
   [b('🔍 Scan Now', 'scan'),               b('🌕 Moonshots', 'moonshots')],
   [b('🚀 New Listings', 'newlistings'),    b('💼 Split Capital', 'split_help')],
@@ -189,6 +195,29 @@ async function replyChunked(chatId, text, showInline = false) {
 }
 
 const answerCallback = tg.answerCallback;
+
+/** Access check that first re-reads a small account's Binance balance (free access). */
+async function hasAccessNow(chatId) {
+  if (await subs.hasAccess(chatId)) return true;
+  if (!(subs.freeLimit() > 0)) return false;
+  await subs.refreshSmall(chatId).catch(() => null);
+  return subs.hasAccess(chatId);
+}
+
+async function lockedText(chatId) {
+  const limit = subs.freeLimit();
+  const had = chatId ? (await subs.getSub(chatId).catch(() => null))?.paidUntil : null;
+  return [
+    had ? `🔒 *Your subscription has ended.*` : `🔒 *You need a subscription to use this.*`,
+    ``,
+    `${had ? 'Renew' : 'Subscribe'} — ${subs.priceLabel()}:`,
+    `\`subscribe you@example.com\` (your email is for the payment receipt)`,
+    limit > 0 ? `` : null,
+    limit > 0 ? `🆓 *Free for small accounts:* if your Binance Spot balance is ${usd(limit)} or less, the bot is free. Connect Binance with \`golive\` (or send \`balance\` if you already have) and access opens straight away.` : null,
+    ``,
+    `\`account\` shows your status.`,
+  ].filter(x => x !== null).join('\n');
+}
 
 function isAdmin(chatId) {
   const admin = adminId();
@@ -357,15 +386,8 @@ async function handleMessage(chatId, text, from, meta = {}) {
 
     // Paid access: an ended subscription only allows paying, help and closing positions
     const menuText = text.trim() === '📋 MENU' || text.trim() === '🖥 My Dashboard';
-    if (!FREE_COMMANDS.has(cmd) && !menuText && !(await subs.hasAccess(chatId))) {
-      await send(chatId, [
-        `🔒 *Your subscription has ended.*`,
-        ``,
-        `Renew to use the bot again — ${subs.priceLabel()}:`,
-        `\`subscribe you@example.com\` (your email is for the payment receipt)`,
-        ``,
-        `\`account\` shows your status.`,
-      ].join('\n'));
+    if (!FREE_COMMANDS.has(cmd) && !menuText && !(await hasAccessNow(chatId))) {
+      await send(chatId, await lockedText(chatId), subs.freeLimit() > 0 ? { inline_keyboard: [[{ text: '🔗 Connect Binance (free for small accounts)', callback_data: 'golive' }]] } : undefined);
       return;
     }
   }
@@ -562,6 +584,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
   if (cmd === 'balance' || cmd === 'wallet' || cmd === 'bal') {
     try {
       const b = await accounts.getBalances(chatId);
+      const small = !b.testnet && subs.enabled() && subs.freeLimit() > 0 && !isAdmin(chatId) ? await subs.recordBalance(chatId, b.totalUsd).catch(() => null) : null;
       const n = (x) => String(+Number(x).toFixed(8));
       const lines = [
         `💰 *Your Binance balance*${b.testnet ? ' (testnet — fake money)' : ''}`,
@@ -572,6 +595,9 @@ async function handleMessage(chatId, text, from, meta = {}) {
         b.hiddenDust ? `_+ ${b.hiddenDust} tiny balance${b.hiddenDust === 1 ? '' : 's'} under $1_` : '',
         ``,
         `_Spot wallet only. Coins in Funding or Earn aren't counted — move USDT to Spot for the bot to use it._`,
+        small && !(await subs.getSub(chatId)).active ? (small.free
+          ? `\n🆓 *Free access:* your balance${small.savingsUsd ? ' (not counting your savings plan)' : ''} is ${usd(small.usd)} — at or under the ${usd(small.limit)} limit, so the bot is free for you.`
+          : `\n💳 Your balance${small.savingsUsd ? ' (not counting your savings plan)' : ''} is ${usd(small.usd)} — above the ${usd(small.limit)} free limit. Subscribe to use the bot: \`subscribe\`.`) : '',
       ].filter(x => x !== '');
       await send(chatId, lines.join('\n'), { inline_keyboard: [[{ text: '↻ Refresh', callback_data: 'balance' }, { text: '📊 My positions', callback_data: 'positions' }]] });
     } catch (err) {
@@ -613,6 +639,23 @@ async function handleMessage(chatId, text, from, meta = {}) {
   // ── AUTO-BUY (practice now; live only after proven results) ─────────────
   if (cmd === 'autobuy') {
     await handleAutoBuy(chatId, parts.slice(1));
+    return;
+  }
+
+  // ── WHAT TO EXPECT for an amount ─────────────────────────────────────────
+  if (cmd === 'expect' || cmd === 'estimate') {
+    const amt = Number(String(parts[1] || '').replace(/[$,]/g, ''));
+    if (amt > 0) { await send(chatId, expectations.message(amt), { inline_keyboard: [[{ text: '🐷 Weekly savings plan', callback_data: 'save' }, { text: '🚀 Go live', callback_data: 'golive' }]] }); return; }
+    let total = null;
+    try { if ((await accounts.getStatus(chatId)).connected) total = (await accounts.getBalances(chatId)).totalUsd; } catch { /* fall back to the table */ }
+    if (total > 0) { await send(chatId, expectations.message(total), { inline_keyboard: [[{ text: '🐷 Weekly savings plan', callback_data: 'save' }]] }); return; }
+    await reply(chatId, [expectations.table(), ``, `For any amount, send e.g. \`expect 50\`.`].join('\n'));
+    return;
+  }
+
+  // ── WEEKLY SAVINGS PLAN ──────────────────────────────────────────────────
+  if (cmd === 'save' || cmd === 'savings' || cmd === 'saving') {
+    await handleSavings(chatId, parts.slice(1));
     return;
   }
 
@@ -660,6 +703,11 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`balance\` — your Binance Spot wallet`,
       `\`autobuy\` — the bot's buying strategy, test results and settings`,
       `\`stops\` — today's stop-loss for each of the 15 coins`,
+      `\`expect 50\` — what to expect with $50 (or any amount)`,
+      ``,
+      `━━━ *WEEKLY SAVINGS* ━━━`,
+      `\`save 10\` — buy $10 of BTC/ETH every week · \`save\` — your plan`,
+      `\`save day monday\` · \`save real\` / \`practice\` · \`save now\` · \`save pause\` · \`save stop\``,
       ``,
       `━━━ *PRACTICE (play money)* ━━━`,
       `\`practice\` — your $10,000 practice account`,
@@ -674,7 +722,8 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `\`dashboard\` — your web dashboard · \`dashboard logout\` — sign out everywhere`,
       subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : `\`account\` — your access`,
       `\`manual\` — the full user guide`,
-      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` (panel: on/off, plan, give) · \`grant ID DAYS\` or \`grant ID 31/12/2026\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`` : '',
+      `\`ask\` — ask the AI helper a question (or just type it) — it explains, it never trades`,
+      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` (panel: on/off, plan, give, free for small accounts) · \`subs free 100\` · \`grant ID DAYS\` or \`grant ID 31/12/2026\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\`` : '',
     ].filter(x => x !== '').join('\n'));
     return;
   }
@@ -1352,6 +1401,18 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `After each trading day you get your result — wins, losses and profit.`,
       ].join('\n'),
 
+      // ── Section 5b ──
+      [`🐷 *WEEKLY SAVINGS — BEST FOR SMALL AMOUNTS*`,
+      ``,
+      `With a small account, *adding money regularly* grows it far more than any strategy can. \`save 10\` sets up a weekly plan: every week, on your chosen day at 9am, the bot buys $10 of BTC/ETH for you.`,
+      ``,
+      `• *Real money:* top up USDT on Binance (P2P) and move it Funding → Spot before your day. The day before, the bot reminds you if it isn't there.`,
+      `• *Practice:* the same plan with play money — \`save practice\`.`,
+      `• *The bot never sells your savings.* No stops — this is for months and years.`,
+      ``,
+      `\`expect 50\` shows what the trading strategy could make with $50 (or any amount), honestly — including that small amounts make small dollars.`,
+      ].join('\n'),
+
       // ── Section 6 ──
       [`📝 *TRADES YOU MAKE YOURSELF*`,
       ``,
@@ -1407,10 +1468,16 @@ async function handleMessage(chatId, text, from, meta = {}) {
       `USDT bought on P2P lands in your *Funding* wallet. Move it to *Spot* in the Binance app, then send \`balance\`.`,
       ``,
       `*What is the smallest amount?*`,
-      `$5 per order (Binance's minimum). In practice Buy Now needs about $25 and auto-buy about $50 in your account.`,
+      `$5 per order (Binance's minimum). In practice Buy Now needs about $25 and auto-buy about $50 in your account. The weekly savings plan works from $5 a week.`,
+      ``,
+      `*Can I make $10–$20 a month from $20?*`,
+      `No — that would be 50–100% a month, which no honest strategy makes. Anyone promising it is taking huge risks with your money or running a scheme. Send \`expect 20\` to see realistic numbers.`,
       ``,
       `*Can the bot guarantee profits?*`,
       `No. Losses are normal. Only use money you can afford to lose.`,
+      ``,
+      `*Can I ask the bot questions?*`,
+      `If the admin has switched it on: tap 💬 Ask the Bot or just type your question. The AI explains things using your own trades — it never buys, sells or predicts prices.`,
       ``,
       `*Where can I see everything?*`,
       `Send \`dashboard\` for your private web dashboard, or tap 📋 *MENU*.`,
@@ -1707,8 +1774,51 @@ async function handleMessage(chatId, text, from, meta = {}) {
     return;
   }
 
-  // ── Unknown ───────────────────────────────────────────────────────────────
-  await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.`);
+  // ── ASK THE BOT (AI helper: explains, never trades) ─────────────────────
+  if (cmd === 'ask' || cmd === 'question') {
+    const q = text.trim().split(/\s+/).slice(1).join(' ');
+    if (!q) {
+      if (!ai.isConfigured()) { await reply(chatId, aiOffText(chatId)); return; }
+      await store.cmd('SET', askKey(chatId), '1', 'EX', 600);
+      await reply(chatId, `💬 *Ask me anything about the bot or your trades* — just type your question.\n\nFor example: _why did the bot buy SOL?_ · _what is a stop-loss?_ · _how do I move USDT to Spot?_\n\nI explain; I don't tell you what to buy or predict prices.`);
+      return;
+    }
+    await answerQuestion(chatId, q);
+    return;
+  }
+
+  // ── Unknown: a question typed into the chat goes to the AI helper ────────
+  const plainText = text.trim();
+  const looksLikeQuestion = /\?\s*$/.test(plainText) || plainText.split(/\s+/).length >= 3;
+  const looksLikeSecret = /^[A-Za-z0-9]{24,}$/.test(plainText);
+  if (ai.isConfigured() && !plainText.startsWith('/') && !looksLikeSecret && (looksLikeQuestion || (await store.cmd('GET', askKey(chatId))))) {
+    await answerQuestion(chatId, plainText);
+    return;
+  }
+  await reply(chatId, `❓ Unknown command. Tap *📋 MENU* or type \`help\`.${ai.isConfigured() ? ' Or just type a question — e.g. _why did the bot buy SOL?_' : ''}`);
+}
+
+const askKey = (chatId) => `cryptobot:ai:await:${chatId}`;
+
+function aiOffText(chatId) {
+  return isAdmin(chatId)
+    ? `💬 The AI helper isn't switched on. Add \`OPENAI_API_KEY\` (or \`ANTHROPIC_API_KEY\`) in Vercel → Settings → Environment Variables, then redeploy. See SETUP.md.`
+    : `💬 The AI helper isn't switched on for this bot yet. Tap *📋 MENU* → 📚 User Manual, or type \`help\`.`;
+}
+
+async function answerQuestion(chatId, question) {
+  if (!ai.isConfigured()) { await reply(chatId, aiOffText(chatId)); return; }
+  await tg.call('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  try {
+    const answer = await ai.ask(chatId, question, { isAdmin: isAdmin(chatId) });
+    await store.cmd('SET', askKey(chatId), '1', 'EX', 600); // follow-up questions don't need "ask"
+    await tg.send(chatId, `💬 ${answer}\n\n— AI answer: it can make mistakes, and it's not financial advice. Trading decisions are made by the tested strategy, not the AI.`, { plain: true, markup: PERSISTENT_MENU });
+  } catch (err) {
+    const why = err instanceof ai.AiError ? err.message : 'something went wrong';
+    if (why === 'limit') { await reply(chatId, `💬 You've asked ${ai.dailyLimit()} questions today — that's the daily limit. Ask again tomorrow, or see 📚 User Manual.`); return; }
+    if (why === 'empty') { await reply(chatId, `💬 Type your question after \`ask\`, e.g. \`ask what is a stop-loss?\``); return; }
+    await reply(chatId, `💬 Sorry — I couldn't answer right now (${esc(why)}). Try again in a minute, or see 📚 User Manual.`);
+  }
 }
 
 // ─── Auto-buy ─────────────────────────────────────────────────────────────────
@@ -1982,6 +2092,157 @@ async function handlePractice(chatId, args) {
 
 const fmtP = (p) => (p == null ? '—' : p >= 1 ? Number(p).toFixed(4) : Number(p).toPrecision(4));
 
+// ─── 🐷 Weekly savings plan ───────────────────────────────────────────────────
+function savingsHelp() {
+  return [
+    `🐷 *Weekly savings plan*`,
+    ``,
+    `Add a little money every week and let the bot buy BTC/ETH for you. For a small account, adding money regularly matters far more than any trading strategy.`,
+    ``,
+    `\`save 10\` — buy $10 every week ($5 BTC + $5 ETH)`,
+    `\`save 5 btc\` · \`save 20 btc eth\` — choose the coins (${savings.COINS.join(', ')})`,
+    `\`save day monday\` — the day (buys at 9am Lagos time)`,
+    `\`save real\` / \`save practice\` — your Binance account, or play money`,
+    `\`save now\` — buy this week's now · \`save pause\` / \`save resume\` · \`save stop\``,
+    ``,
+    `*How it works (real money):* each week, top up USDT on Binance (P2P) and move it *Funding → Spot*. On your day the bot buys with it. The day before, it reminds you if the USDT isn't there yet.`,
+    `*The bot never sells your savings* — no stops, no take-profits. Prices go down as well as up; this is for months and years.`,
+    `Minimum $${require('../src/config/autobuy').LIMITS.minOrderUsd} per coin (Binance's minimum order).`,
+  ].join('\n');
+}
+
+async function savingsScreen(chatId) {
+  const p = await savings.getPlan(chatId);
+  if (!p) {
+    await send(chatId, savingsHelp(), { inline_keyboard: [
+      [{ text: '🐷 Save $5 a week', callback_data: 'save 5' }, { text: '🐷 $10 a week', callback_data: 'save 10' }, { text: '🐷 $20 a week', callback_data: 'save 20' }],
+      [{ text: '📏 What to expect', callback_data: 'expect' }],
+    ] });
+    return;
+  }
+  const s = await savings.summary(chatId);
+  const other = p.mode === 'live' ? 'practice' : 'live';
+  const otherHas = (await savings.summary(chatId, { mode: other })).buys;
+  const lines = [
+    `🐷 *Weekly savings* — ${savings.tag(p.mode)}${p.mode === 'live' ? ' (your Binance account)' : ' (play money)'}`,
+    ``,
+    `*Every ${savings.DAYS[p.day]}, 9am:* ${savings.usd(p.amount)} → ${p.parts.map(x => `${savings.usd(x.usd)} ${x.coin}`).join(' + ')}`,
+    p.active ? `*Next buy:* ${savings.when(p.nextDue)}` : `⏸ *Paused* — \`save resume\` to restart`,
+    p.waitDue ? `⏳ _Waiting for USDT in your Spot wallet for this week's buy._` : '',
+    ``,
+    s.buys
+      ? `*So far:* ${s.buys} buy${s.buys === 1 ? '' : 's'} · put in ${savings.usd(s.invested)}${s.value !== null ? ` · worth *${savings.usd(s.value)}* (${s.pnl >= 0 ? '+' : '−'}${savings.usd(Math.abs(s.pnl))}, ${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct}%)` : ''}`
+      : `_No buys yet._`,
+    ...s.holdings.map(h => `• ${h.coin}: ${String(+h.qty.toPrecision(6))}${h.usd !== null ? ` ≈ ${savings.usd(h.usd)}` : ''}`),
+    otherHas ? `${savings.tag(other)} savings so far: ${otherHas} buys — \`save ${other === 'live' ? 'real' : 'practice'}\` to switch.` : '',
+    ``,
+    p.mode === 'live' ? `_Keep ${savings.usd(p.amount)} USDT in your Spot wallet before each buy. The bot never sells your savings._` : `_Play money: each week's buy is new pretend money, separate from your $10,000 practice account._`,
+  ];
+  await send(chatId, lines.filter(x => x !== '').join('\n'), { inline_keyboard: [
+    [{ text: '⚡ Buy this week\'s now', callback_data: 'save now' }],
+    [{ text: '✏️ Change amount', callback_data: 'save amount' }, { text: '📅 Change day', callback_data: 'save day' }],
+    [p.active ? { text: '⏸ Pause', callback_data: 'save pause' } : { text: '▶️ Resume', callback_data: 'save resume' },
+      p.mode === 'live' ? { text: '🎮 Switch to practice', callback_data: 'save practice' } : { text: '💰 Switch to real', callback_data: 'save real' }],
+    [{ text: '🛑 Stop the plan', callback_data: 'save stop' }, { text: '❓ How it works', callback_data: 'save help' }],
+  ] });
+}
+
+async function handleSavings(chatId, args) {
+  const a = (args[0] || '').toLowerCase().replace(/^\$/, '');
+  try {
+    if (!a) return await savingsScreen(chatId);
+    if (a === 'help' || a === 'how') { await send(chatId, savingsHelp(), { inline_keyboard: [[{ text: '🐷 My savings plan', callback_data: 'save' }]] }); return; }
+    if (a === 'amount') { await reply(chatId, `✏️ Send the weekly amount, e.g. \`save 10\` (or \`save 10 btc\` for BTC only).`); return; }
+
+    if (a === 'day') {
+      const d = args[1] ? savings.parseDay(args[1]) : -1;
+      if (d < 0) {
+        await send(chatId, `📅 *Which day should the bot buy?* (9am Lagos time)`, { inline_keyboard: [
+          savings.DAYS.slice(1, 4).map((n, i) => ({ text: n, callback_data: `save day ${n.toLowerCase()}` })),
+          [...savings.DAYS.slice(4), savings.DAYS[0]].map(n => ({ text: n, callback_data: `save day ${n.toLowerCase()}` })),
+        ] });
+        return;
+      }
+      const p = await savings.setPlan(chatId, { day: d });
+      await reply(chatId, `📅 Savings day: *${savings.DAYS[p.day]}*, 9am. Next buy: ${savings.when(p.nextDue)}.`);
+      return;
+    }
+
+    if (a === 'real' || a === 'live') {
+      const st = await accounts.getStatus(chatId);
+      if (!st.connected || st.testnet) { await send(chatId, `💰 To save with real money, connect your Binance account first.`, { inline_keyboard: [[{ text: '🚀 Connect Binance', callback_data: 'golive' }]] }); return; }
+      if (!(await savings.getPlan(chatId))) { await reply(chatId, `Start a plan first, e.g. \`save 10\`.`); return; }
+      const p = await savings.setPlan(chatId, { mode: 'live' });
+      await reply(chatId, [
+        `💰 *Savings plan: REAL money*`,
+        `Every ${savings.DAYS[p.day]} at 9am the bot buys ${p.parts.map(x => `${savings.usd(x.usd)} of ${x.coin}`).join(' + ')} on your Binance account. Next: ${savings.when(p.nextDue)}.`,
+        st.enabled ? '' : `⚠️ Auto-trading is off — turn it on (\`golive\`) or the buys will wait.`,
+        `Keep ${savings.usd(p.amount)} USDT in your *Spot* wallet before each buy. The bot never sells your savings.`,
+      ].filter(Boolean).join('\n'));
+      return;
+    }
+    if (a === 'practice' || a === 'play') {
+      if (!(await savings.getPlan(chatId))) { await reply(chatId, `Start a plan first, e.g. \`save 10\`.`); return; }
+      await savings.setPlan(chatId, { mode: 'practice' });
+      await reply(chatId, `🎮 *Savings plan: play money.* Same weekly buys at real prices, no real money. \`save real\` switches back.`);
+      return;
+    }
+    if (a === 'pause' || a === 'off') { await savings.setActive(chatId, false); await reply(chatId, `⏸ Savings plan paused. What you've saved stays where it is. \`save resume\` restarts it.`); return; }
+    if (a === 'resume' || a === 'on') { const p = await savings.setActive(chatId, true); await reply(chatId, `▶️ Savings plan on. Next buy: ${savings.when(p.nextDue)}, 9am.`); return; }
+    if (a === 'stop' || a === 'delete' || a === 'cancel') {
+      if ((args[1] || '').toLowerCase() !== 'confirm') {
+        await send(chatId, `🛑 *Stop your savings plan?* No more weekly buys. Nothing is sold — your coins stay in your account.`, { inline_keyboard: [[{ text: '🛑 Yes, stop it', callback_data: 'save stop confirm' }], [{ text: 'Keep it', callback_data: 'save' }]] });
+        return;
+      }
+      await savings.stop(chatId);
+      await reply(chatId, `🛑 Savings plan stopped. Nothing was sold. Start again any time with \`save 10\`.`);
+      return;
+    }
+    if (a === 'now') {
+      const p = await savings.getPlan(chatId);
+      if (!p) { await reply(chatId, `Start a plan first, e.g. \`save 10\`.`); return; }
+      if (p.mode === 'live' && (args[1] || '').toLowerCase() !== 'confirm') {
+        await send(chatId, `⚡ *Buy now with real money?* ${p.parts.map(x => `${savings.usd(x.usd)} of ${x.coin}`).join(' + ')} on your Binance account.${new Date(p.nextDue) > new Date() ? ` This is an extra buy — the next scheduled one is still ${savings.when(p.nextDue)}.` : ''}`,
+          { inline_keyboard: [[{ text: `✅ Yes, buy ${savings.usd(p.amount)}`, callback_data: 'save now confirm' }], [{ text: 'Not now', callback_data: 'save' }]] });
+        return;
+      }
+      await reply(chatId, `⏳ Buying…`);
+      const r = await savings.runOne(chatId, { scheduled: false });
+      await reply(chatId, r.message || (r.status === 'busy' ? `⏳ A buy is already in progress — try again in a minute.` : `Nothing to buy right now.`));
+      return;
+    }
+
+    // save AMOUNT [coins…]
+    const amt = Number(a.replace(/[$,]/g, ''));
+    if (amt > 0) {
+      const coins = args.slice(1).map(x => x.toUpperCase()).filter(x => !['WEEKLY', 'WEEK', 'A', 'EVERY', 'PER'].includes(x));
+      const before = await savings.getPlan(chatId);
+      let mode;
+      if (!before) {
+        const st = await accounts.getStatus(chatId);
+        mode = st.connected && !st.testnet && st.enabled ? 'live' : 'practice';
+      }
+      const p = await savings.setPlan(chatId, { amount: amt, ...(coins.length ? { coins } : {}), ...(mode ? { mode } : {}) });
+      await send(chatId, [
+        `🐷 *Weekly savings ${before ? 'updated' : 'started'}* — ${savings.tag(p.mode)}${p.mode === 'live' ? ' (your Binance account)' : ' (play money)'}`,
+        ``,
+        `Every *${savings.DAYS[p.day]}* at 9am: ${p.parts.map(x => `${savings.usd(x.usd)} of ${x.coin}`).join(' + ')}.`,
+        `Next buy: ${savings.when(p.nextDue)}.`,
+        p.mode === 'live' ? `Keep ${savings.usd(p.amount)} USDT in your *Spot* wallet before each buy — I'll remind you the day before if it isn't there.`
+          : `This is play money. When you're ready: connect Binance (\`golive\`), turn on auto-trading, then \`save real\`.`,
+        `In a year that's ${savings.usd(p.amount * 52)} put in. The bot never sells your savings.`,
+      ].join('\n'), { inline_keyboard: [
+        [{ text: '⚡ Make the first buy now', callback_data: 'save now' }],
+        [{ text: '📅 Change day', callback_data: 'save day' }, { text: '🐷 My savings plan', callback_data: 'save' }],
+      ] });
+      return;
+    }
+    await send(chatId, savingsHelp());
+  } catch (err) {
+    await reply(chatId, `❌ ${err instanceof savings.SavingsError || err instanceof accounts.TradingError ? err.message : esc(err.message)}`);
+  }
+}
+
 // ─── Go live: step-by-step Binance set-up with buttons ───────────────────────
 const wizardKey = (chatId) => `cryptobot:wizard:${chatId}`;
 const next = (label, data) => ({ inline_keyboard: [[{ text: label, callback_data: data }], [{ text: '✕ Stop for now', callback_data: 'golive cancel' }]] });
@@ -2025,8 +2286,15 @@ async function handleGoLive(chatId, args) {
       `Your money stays in *your own* Binance account the whole time. The bot places stop orders and sells for your positions, buys when you tap ⚡ Buy Now, and — once you turn it on — buys by itself with auto-buy.`,
       ``,
       practiceLine,
-      `⚠️ Real money can be lost. The strategy passed its test on past data (about +23% over 3 years, smaller drops than holding BTC — but less than holding BTC in a boom). Past results don't guarantee future ones.`,
-    ].join('\n'), next('Start step 1 →', 'golive 1'));
+      ``,
+      expectations.table(),
+      `_Holding BTC made more in the same test period, with much bigger drops. Real money can be lost; past results don't guarantee future ones._`,
+      subs.enabled() && subs.freeLimit() > 0 && !isAdmin(chatId) ? `\n🆓 Free for accounts up to ${usd(subs.freeLimit())}.` : '',
+    ].filter(x => x !== '').join('\n'), { inline_keyboard: [
+      [{ text: 'Start step 1 →', callback_data: 'golive 1' }],
+      [{ text: '📏 What to expect for my amount', callback_data: 'expect' }, { text: '🐷 Save weekly instead', callback_data: 'save' }],
+      [{ text: '✕ Stop for now', callback_data: 'golive cancel' }],
+    ] });
     return;
   }
 
@@ -2117,6 +2385,7 @@ async function handleGoLive(chatId, args) {
   if (step === 'on') {
     const st = await accounts.getStatus(chatId);
     if (!st.connected) { await handleGoLive(chatId, ['4']); return; }
+    if (!isAdmin(chatId) && !(await hasAccessNow(chatId))) { await send(chatId, await lockedText(chatId)); return; }
     const open = await autoBuyer.isLiveUnlocked();
     if ((args[1] || '').toLowerCase() !== 'confirm') {
       await send(chatId, [
@@ -2177,14 +2446,19 @@ async function handleWizardKey(chatId, value, meta) {
     try {
       await accounts.connect(chatId, { apiKey, apiSecret: value, live: true });
       await store.cmd('DEL', wizardKey(chatId));
-      let balance = '';
+      let balance = '', total = null, small = null;
       try {
-        const c = await accounts.getAnyClient(chatId);
-        const usdt = await c.freeBalance('USDT');
-        balance = `\n💵 USDT in your Spot wallet: ${usdt.toFixed(2)}${usdt < 10 ? '\n⚠️ That\'s very little — remember to move USDT from Funding to Spot (step 2).' : ''}`;
+        const b = await accounts.getBalances(chatId);
+        total = b.totalUsd;
+        balance = `\n💵 Your Spot wallet: ${usd(b.totalUsd)} (USDT free: ${usd(b.usdtFree)})${b.usdtFree < 10 ? '\n⚠️ That\'s very little — remember to move USDT from Funding to Spot (step 2).' : ''}`;
+        if (subs.enabled() && subs.freeLimit() > 0 && !isAdmin(chatId)) small = await subs.recordBalance(chatId, b.totalUsd).catch(() => null);
       } catch { /* balance is just a nice-to-have */ }
-      await send(chatId, `🔐 *Binance connected!* Key ${'…' + apiKey.slice(-4)}, withdrawals blocked.${balance}\n\nLast step: turn on auto-trading — the bot buys and sells for you.`,
-        { inline_keyboard: [[{ text: '🤖 Turn on auto-trading', callback_data: 'golive on' }]] });
+      const freeLine = small && !(await subs.getSub(chatId)).active
+        ? (small.free ? `\n🆓 Your balance is under ${usd(small.limit)}, so the bot is *free* for you.` : `\n💳 Your balance is above the ${usd(small.limit)} free limit — you'll need a subscription to turn on auto-trading: \`subscribe\`.`)
+        : '';
+      await send(chatId, `🔐 *Binance connected!* Key ${'…' + apiKey.slice(-4)}, withdrawals blocked.${balance}${freeLine}\n\nLast step: turn on auto-trading — the bot buys and sells for you.`,
+        { inline_keyboard: [[{ text: '🤖 Turn on auto-trading', callback_data: 'golive on' }], [{ text: '🐷 Set up weekly savings', callback_data: 'save' }]] });
+      if (total !== null && total > 0) await send(chatId, expectations.message(total)).catch(() => {});
     } catch (err) {
       await store.cmd('SET', wizardKey(chatId), JSON.stringify({ step: 'key' }), 'EX', 900);
       const why = err instanceof accounts.TradingError ? err.message : err.message;
@@ -2257,6 +2531,28 @@ async function handleSubsAdmin(chatId, args) {
       await reply(chatId, `✏️ Send the new price per period as a number, e.g. \`5000\` (currency: ${subs.plan().currency}).`);
       return;
     }
+    if (a === 'free') {
+      if (args[1]) {
+        const limit = await subs.setFreeLimit(args[1]);
+        await reply(chatId, limit > 0 ? `🆓 Free access for Binance balances up to *${usd(limit)}*.` : `⚪ Free access for small accounts is *off*.`);
+        return handleSubsAdmin(chatId, []);
+      }
+      const cur = subs.freeLimit();
+      await send(chatId, [
+        `🆓 *Free for small accounts*`,
+        ``,
+        `With paid access on, users whose Binance *Spot* balance is at or under this limit use the bot for free. Coins bought by their weekly savings plan don't count.`,
+        `Checked when they connect, open \`balance\` or \`account\`, and once a day. Anyone who grows above the limit is told once and asked to subscribe.`,
+        ``,
+        `*Now:* ${cur > 0 ? `up to ${usd(cur)}` : 'off'}`,
+        `Or type \`subs free 150\` / \`subs free off\`.`,
+      ].join('\n'), { inline_keyboard: [
+        [50, 100, 200].map(v => b(`${cur === v ? '✅ ' : ''}$${v}`, `subs free ${v}`)),
+        [b(`${cur === 500 ? '✅ ' : ''}$500`, 'subs free 500'), b(`${cur === 0 ? '✅ ' : ''}Off`, 'subs free off')],
+        [b('💳 Back to Subscriptions', 'subs')],
+      ] });
+      return;
+    }
     if (a === 'days' && args[1]) { await subs.setPlan({ days: args[1] }); return handleSubsAdmin(chatId, ['plan']); }
     if (a === 'currency' && args[1]) { await subs.setPlan({ currency: args[1] }); return handleSubsAdmin(chatId, ['plan']); }
 
@@ -2326,8 +2622,10 @@ async function handleSubsAdmin(chatId, args) {
       `*Plan:* ${subs.priceLabel()}`,
       `*Active subscriptions:* ${active} of ${list.length} approved user${list.length === 1 ? '' : 's'}`,
       `*Payments:* ${subs.providers().length ? subs.providers().map(pv => `✅ ${subs.PROVIDER_NAMES[pv]}`).join(' · ') : '⚠️ not set up — users can\'t pay yet (add FLW_SECRET_KEY or PAYSTACK_SECRET_KEY)'}`,
+      `*Free for small accounts:* ${subs.freeLimit() > 0 ? `🆓 Binance balance up to ${usd(subs.freeLimit())}` : '⚪ off'}`,
     ].join('\n'), { inline_keyboard: [
       [b(on ? '⚪ Turn paid access OFF' : '🟢 Turn paid access ON', 'subs toggle')],
+      [b('🆓 Free for small accounts', 'subs free')],
       [b('💵 Plan & price', 'subs plan'), b('🎁 Give a subscription', 'subs give')],
       [b('👥 List subscribers', 'subs list'), b('⛔ End a subscription', 'subs end')],
     ] });
@@ -2360,16 +2658,20 @@ async function handleSubscribe(chatId, args) {
   }
 
   if (sub === 'status' || (!sub && !subs.enabled())) {
+    if (subs.enabled() && !isAdmin(chatId)) await subs.refreshSmall(chatId).catch(() => null);
     const st = await subs.status(chatId);
+    const paid = st.paidUntil && new Date(st.paidUntil) > new Date();
     await reply(chatId, [
       `💳 *Your account*`,
       ``,
       !st.required ? (st.isAdmin ? `👑 Admin — free access.` : `✅ Access is free on this bot right now.`)
-        : st.active ? `🟢 Active until *${fmtDate(st.paidUntil)}* (${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left)`
+        : paid ? `🟢 Active until *${fmtDate(st.paidUntil)}* (${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left)`
+        : st.freeSmall ? `🆓 *Free — small account.* Your Binance balance is ${usd(st.smallUsd)}, at or under the ${usd(st.freeLimit)} limit. It's re-checked every day.`
         : st.paidUntil ? `🔒 Ended on ${fmtDate(st.paidUntil)}` : `🔒 No subscription yet`,
       st.required ? `` : '',
       st.required ? `Price: ${st.price}` : '',
       st.required ? `Renew any time with \`subscribe\` — time is added to what you have left.` : '',
+      st.required && !paid && !st.freeSmall && st.freeLimit > 0 ? `🆓 Free if your Binance Spot balance is ${usd(st.freeLimit)} or less${st.smallUsd !== null ? ` (last check: ${usd(st.smallUsd)})` : ' — connect with `golive`'}.` : '',
     ].filter(x => x !== '').join('\n'));
     return;
   }

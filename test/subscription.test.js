@@ -60,7 +60,7 @@ test('paid access ON: unpaid users are asked to subscribe; the admin never is', 
   const { net } = setup();
   await approvedUser();
   await say('2000', 'positions');
-  assert.match(net.sent.at(-1).text, /subscription has ended/);
+  assert.match(net.sent.at(-1).text, /need a subscription/);
   await say('1000', 'positions');
   assert.match(net.sent.at(-1).text, /No real positions open/, 'admin is free');
   await say('2000', 'account');

@@ -11,7 +11,10 @@ A Telegram trading assistant that runs on Vercel serverless functions. It **can 
 - **Scan / moonshots:** Binance USDT coins with strong momentum (KuCoin only if Binance is unreachable), with a heuristic score (not backtested, labelled as such).
 - **Navigation:** every screen has a ⬅️ Back button, and tapping a button removes the screen it was on.
 - **Dashboard:** `/dashboard`. Send `/dashboard` to the bot for a private login link.
-- **Paid access (optional):** Paystack and Flutterwave, managed from the admin's 💳 Subscriptions panel.
+- **🐷 Weekly savings plan:** `save 10` — every week on the user's day (9am Lagos) the bot buys a fixed amount of BTC/ETH on their Binance account (or with play money). It never sells savings; it reminds users the day before if their USDT isn't in Spot yet.
+- **📏 What to expect:** `expect 50` turns the strategy's test result into honest dollar figures for any amount (per month, per year, worst drop); also shown in `golive` and after connecting Binance.
+- **💬 Ask the bot (optional AI helper):** `ask …` or just type a question. Answers from the user's own data (positions, practice, auto-buy reasons, savings) in their language. It explains only — it never trades, picks coins or predicts prices. Needs `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- **Paid access (optional):** Paystack and Flutterwave, managed from the admin's 💳 Subscriptions panel — with **free access for small accounts** (Binance Spot balance up to $100 by default; savings-plan coins don't count).
 
 ## Setup
 
@@ -45,7 +48,9 @@ If `CRON_SECRET` is not set, endpoints stay open (with a warning in the logs) so
 
 Practice (play money, real prices): `practice` · `practice buy SOL 100 [2x] [sl 140]` · `practice sell SOL` · `practice reset`
 
-Go live (guided Binance set-up): `golive` · `balance` (your Binance Spot wallet)
+Go live (guided Binance set-up): `golive` · `balance` (your Binance Spot wallet) · `expect 50` (what to expect for an amount)
+
+Weekly savings: `save 10` · `save 5 btc` · `save day monday` · `save real` / `save practice` · `save now` · `save pause` / `resume` · `save stop`
 
 Auto-buy: `autobuy` · `autobuy on|off` (practice) · `autobuy live on|off` (locked until proven) · admin: `autobuy run|pause|resume|unlock|lock` · research: `npm run lab`
 
@@ -53,7 +58,7 @@ Automated exits (optional, Binance): `autotrade` · `autotrade connect KEY SECRE
 
 Paid access (when PAID_ACCESS_ENABLED=true): `account` · `subscribe you@example.com` · `subscribe check`
 
-Admin: `pending` · `users` · `approve ID` · `block ID` · `remove ID` · `invite` · `subs` · `grant ID DAYS` · `revoke ID`
+Admin: `pending` · `users` · `approve ID` · `block ID` · `remove ID` · `invite` · `subs` · `subs free 100` / `subs free off` · `grant ID DAYS` · `revoke ID`
 
 ## Local use
 
@@ -78,7 +83,9 @@ src/services/         scanEngine (live strategy), strategyBacktest + strategySta
                       tradingAccounts + autoTrader (automated exits),
                       subscriptionService (paid access, Paystack),
                       practiceService (play-money practice mode),
-                      autoBuyer + strategyLab + src/strategies (auto-buy)
+                      autoBuyer + strategyLab + src/strategies (auto-buy),
+                      savingsPlan (weekly savings), expectations (what to expect),
+                      aiHelper (💬 Ask the bot)
 data/                 strategy-stats.json (saved backtest summary, shown in alerts)
 public/               Landing page + dashboard
 test/                 node:test suite (no network)

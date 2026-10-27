@@ -459,3 +459,30 @@ test('a failed admin run says so plainly (not "try admin run of 6")', async () =
   assert.match(sent[0], /Send `autobuy run` to try again/);
   assert.doesNotMatch(sent[0], /admin run of|No more/);
 });
+
+test('strategy lab: comparisons (2% risk, breakout + strongest coins, BTC above its 200-day) never change the pick', () => {
+  const { research, btcTrend } = require('../src/services/strategyLab');
+  const walk = (seed, drift) => { let s = seed, px = 100; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647; return Array.from({ length: 1200 }, (_, i) => { const o = px; px *= Math.exp(drift + (rnd() - 0.5) * 0.06); return { time: Date.UTC(2022, 0, 1) + i * DAY, open: o, high: Math.max(o, px) * 1.01, low: Math.min(o, px) * 0.99, close: px, volume: 1 }; }); };
+  const data = {}; ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT'].forEach((s, k) => { data[s] = walk(97 + k * 7919, 0.0015); });
+  const out = research(data);
+  const c = out.comparisons;
+  assert.ok(c, 'comparisons are saved');
+  for (const f of out.families.filter(x => x.chosen)) {
+    assert.ok(c.risk2[f.family], `2% risk for ${f.family}`);
+    if (f.portfolioTest.returnPct > 0) assert.ok(c.risk2[f.family].returnPct > f.portfolioTest.returnPct, '2% risk grows a winning strategy faster');
+  }
+  assert.ok(c.combo && c.combo.test.trades >= Math.max(...['donchian', 'momentum'].map(k => out.families.find(f => f.family === k).test.trades)));
+  assert.ok(c.btcHold && c.btcTrend200 && c.btcTrend200.timeInMarketPct <= 100);
+  assert.equal(c.btcHold.timeInMarketPct, 100);
+  // The pick is still chosen on the training period only
+  const ranked = out.families.filter(f => f.chosen).sort((a, b) => b.train.expectancyR - a.train.expectancyR);
+  assert.equal(out.pick.family, ranked[0].family);
+
+  // BTC trend on a steady rise then a fall: stays in during the rise, gets out in the fall
+  const { prepare } = require('../src/strategies');
+  const up = Array.from({ length: 400 }, (_, i) => 100 * 1.003 ** i);
+  const closes = [...up, ...Array.from({ length: 200 }, (_, i) => up.at(-1) * 0.995 ** (i + 1))];
+  const btc = prepare(closes.map((cl, i) => ({ time: i * DAY, open: i ? closes[i - 1] : cl, high: cl, low: cl, close: cl, volume: 1 })));
+  const t = btcTrend(btc, 250 * DAY, 200), h = btcTrend(btc, 250 * DAY, 0);
+  assert.ok(t.maxDrawdownPct < h.maxDrawdownPct, 'the 200-day rule cuts the fall');
+});

@@ -16,7 +16,7 @@
  *   FAIL       otherwise
  */
 
-const { STRATEGIES, variants, prepare, makeContext } = require('../strategies');
+const { STRATEGIES, variants, prepare, makeContext, sma } = require('../strategies');
 const { meanRange95 } = require('./strategyStats');
 
 const FEE = 0.001;
@@ -157,11 +157,13 @@ function research(candlesBySymbol, { trainFrac = 0.65 } = {}) {
   });
 
   // Choose each family's settings on TRAIN only (min 30 trades), then judge on TEST
+  const chosenTrades = {};
   const families = Object.keys(STRATEGIES).map(family => {
     const cands = all.filter(v => v.family === family && v.train.trades >= 30);
     const best = cands.sort((a, b) => b.train.expectancyR - a.train.expectancyR)[0];
     if (!best) return { family, name: STRATEGIES[family].name, chosen: null, verdict: 'FAIL', why: 'too few trades in the training period' };
     const v = verdictOf(best.test);
+    chosenTrades[family] = best.testTrades;
     return {
       family, name: STRATEGIES[family].name, chosen: { id: best.id, params: best.params, label: best.label },
       train: best.train, test: best.test, portfolioTest: portfolio(best.testTrades), ...v,
@@ -185,8 +187,59 @@ function research(candlesBySymbol, { trainFrac = 0.65 } = {}) {
     families,
     pick: pick ? { family: pick.family, name: pick.name, ...pick.chosen, verdict: pick.verdict, why: pick.why, test: pick.test, train: pick.train, portfolioTest: pick.portfolioTest } : null,
     verdict: pick ? pick.verdict : 'FAIL',
+    comparisons: comparisons({ families, chosenTrades, btc, split }),
     variants: all.map(v => ({ id: v.id, family: v.family, train: v.train, test: v.test })),
   };
 }
 
-module.exports = { backtestCoin, stats, verdictOf, portfolio, research, FEE, SLIP };
+/**
+ * Extra comparisons on the unseen period — FOR INFORMATION ONLY. They never
+ * change the pick (which is chosen on the training period alone), so auto-buy
+ * keeps running exactly the strategy the pick names. They answer:
+ *  - what if each strategy risked 2% per trade instead of 1%?
+ *  - what if breakout and "strongest coins" ran together (one shared account)?
+ *  - what if you simply held BTC, but only while it's above its 200-day average?
+ * Because these are judged on the same unseen period they're compared on, a
+ * better number here is a reason to test further — not proof.
+ */
+function comparisons({ families, chosenTrades, btc, split }) {
+  const risk2 = {};
+  for (const f of families) if (chosenTrades[f.family]) risk2[f.family] = portfolio(chosenTrades[f.family], { riskPct: 0.02 });
+
+  let combo = null;
+  if (chosenTrades.donchian && chosenTrades.momentum) {
+    const seen = new Set();
+    const merged = [...chosenTrades.donchian, ...chosenTrades.momentum].filter(t => {
+      const k = `${t.symbol}|${t.entryTime}`; // the same coin bought the same day by both → one trade
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    const st = stats(merged);
+    combo = { families: ['donchian', 'momentum'], test: st, verdict: verdictOf(st).verdict, portfolio1: portfolio(merged, { riskPct: 0.01 }), portfolio2: portfolio(merged, { riskPct: 0.02 }) };
+  }
+
+  return { risk2, combo, btcTrend200: btcTrend(btc, split, 200), btcHold: btcTrend(btc, split, 0) };
+}
+
+/** Hold BTC from `split` on — always (n = 0), or only while yesterday's close was above its n-day average. Costs charged on every switch. */
+function btcTrend(btc, split, n) {
+  const avg = n ? sma(btc.close, n) : null;
+  const start = Math.max(1, btc.c.findIndex(x => x.time >= split));
+  if (start < 1) return null;
+  const cost = FEE + SLIP;
+  let cash = 1, units = 0, peak = 1, maxDD = 0, switches = 0, daysIn = 0;
+  for (let i = start; i < btc.c.length; i++) {
+    const want = n ? (avg[i - 1] !== null && btc.close[i - 1] > avg[i - 1]) : true;
+    const open = btc.c[i].open;
+    if (want && !units) { units = cash * (1 - cost) / open; cash = 0; switches++; }
+    else if (!want && units) { cash = units * open * (1 - cost); units = 0; switches++; }
+    if (units) daysIn++;
+    const value = units ? units * btc.c[i].close : cash;
+    peak = Math.max(peak, value);
+    maxDD = Math.max(maxDD, (peak - value) / peak);
+  }
+  const end = units ? units * btc.close[btc.close.length - 1] : cash;
+  return { returnPct: round((end - 1) * 100, 1), maxDrawdownPct: round(maxDD * 100, 1), switches, timeInMarketPct: round(daysIn / (btc.c.length - start) * 100, 0) };
+}
+
+module.exports = { backtestCoin, stats, verdictOf, portfolio, research, comparisons, btcTrend, FEE, SLIP };

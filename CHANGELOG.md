@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.22.0 — Fairer strategy comparisons in the lab, and 💬 Ask the bot
+
+**Auto-buy is unchanged** (practice, the house forward test and real money): the lab still picks the strategy on the training period only, `data/auto-strategy.json` keeps the same pick, and the bot trades exactly as before.
+
+- **Strategy lab comparisons** (`npm run lab -- --days 3000`), shown after the main table and saved as `comparisons` — for information only, they never change the pick:
+  - every strategy at **2% risk** per trade next to 1%;
+  - **Breakout + Strongest coins together** in one account (a coin bought by both on the same day counts once): trades, average R, profit factor, verdict, and the 1% / 2% portfolio;
+  - **holding BTC** and **holding BTC only while it's above its 200-day average** (costs on every switch), with the worst drop and the time in the market.
+  - A better number here is a reason to test further, not proof — they're compared on the period they're judged on.
+- **💬 Ask the bot** (optional AI helper): `ask what is a stop-loss?`, the 💬 Ask the Bot button, or just type a question (anything that isn't a command and has a "?" or 3+ words). Follow-up questions within 10 minutes need no "ask".
+  - Answers use the user's own data: real positions (with why each was bought), recent sales, practice account, auto-buy status and the last check's reasons, Binance connection, savings plan. Only that user's data; never keys.
+  - Strict rules: it explains and teaches; it never tells anyone to buy, sell or hold a coin, never predicts prices, never promises returns, never invents numbers, and says honestly that 50–100% a month isn't possible. It replies in the user's language (English, Pidgin, Yoruba, Hausa, Igbo).
+  - Works with OpenAI (`OPENAI_API_KEY`, default model `gpt-4.1-mini`; GPT-5 models supported via `AI_MODEL`) or Anthropic (`ANTHROPIC_API_KEY`, default `claude-haiku-5-5`). 20 questions per user per day (`AI_DAILY_LIMIT`); the admin has no limit.
+  - Answers are sent as plain text with a note: "AI answer: it can make mistakes, and it's not financial advice."
+  - Something that looks like an API key is never sent to the AI.
+  - Without a key nothing changes; the button explains it isn't switched on (and tells the admin how).
+  - `/api/health` shows `aiHelper` (on/off, provider, model).
+- Tests: 179.
+
+## 2.21.0 — Weekly savings, free access for small accounts, what to expect
+
+- **🐷 Weekly savings plan** (`save`, menu button 🐷 Savings Plan). For small accounts, adding money every week grows them far more than any strategy can.
+  - `save 10` — every week on your day (default: today's weekday; `save day monday`), at 9am Lagos time, the bot buys $10 of crypto: $5 BTC + $5 ETH ($5 a week buys BTC only). Choose coins with `save 20 btc eth` (BTC, ETH, BNB, SOL). Minimum $5 per coin — Binance's own minimum.
+  - **💰 Real:** buys on your own Binance account with the USDT in your Spot wallet (auto-trading must be on). The day before, if the USDT isn't there yet, you get a reminder. If it still isn't there at 9am, the bot says so once and tries again every 30 minutes; after 6 days that week is skipped.
+  - **🎮 Practice:** the same plan with play money (`save practice`), new pretend money each week, separate from the $10,000 practice account. New plans start in practice unless auto-trading is already on.
+  - **The bot never sells savings:** no stop orders, no take-profits, and they never show up as positions. Each buy message shows the total put in, what it's worth now and the next buy date.
+  - `save now` makes an extra buy now (real money asks to confirm first) without changing the schedule; if this week's buy is waiting for USDT, it counts as that one. `save pause` / `resume` / `stop` (stop asks first and never sells anything).
+  - Auto-buy leaves alone the USDT that a real savings buy due within a day will need.
+  - Runs from the 30-minute monitor; each week's buy is placed once at most, even across retries.
+- **🆓 Free access for small accounts.** With paid access on, users whose Binance Spot balance is at or under a limit (default **$100**) use the bot for free. Coins bought by their savings plan don't count, so saving never pushes anyone over.
+  - Checked when they connect Binance, open `balance` or `account`, when they hit the "you need a subscription" screen (so access opens straight away), and once a day for everyone. A check older than 3 days no longer counts.
+  - Someone who grows above the limit is told once and asked to subscribe.
+  - Without a subscription, users can now still use `golive`, `balance` and `expect`, so they can connect and qualify. Turning on auto-trading still needs access.
+  - Admin: 💳 Subscriptions → **🆓 Free for small accounts** ($50 / $100 / $200 / $500 / off), or `subs free 150` / `subs free off`. Optional Vercel default `FREE_ACCOUNT_LIMIT_USD`.
+  - `account` shows "🆓 Free — small account" with the balance; `balance` says whether the account is under the limit.
+- **📏 What to expect for your amount** (`expect 50`, menu button 📏 What to Expect):
+  - turns the strategy's honest lab result (the 1%-risk portfolio on the unseen period, from `data/auto-strategy.json`) into dollars for any amount: on average per month and per year, the worst drop in the test, how often it buys, and holding BTC for comparison. With today's result: about 7% a year — $20 → about $0.11 a month.
+  - says plainly when an amount is too small for auto-buy (under about $50) and suggests the savings plan.
+  - **`golive`** now shows a short table ($20 / $50 / $100 / $500 / $1,000) and buttons for "What to expect for my amount" and "Save weekly instead". After connecting Binance, the bot shows the estimate for the user's real balance.
+- **Manual:** a new section on weekly savings, and two new questions ("smallest amount", "Can I make $10–$20 a month from $20?" — honestly: no).
+- The "subscription ended" screen now says "You need a subscription" to users who never had one, and mentions free access for small accounts.
+- `save now` ignores a second tap within 2 minutes, so a double tap never buys twice.
+- Tests: 172.
+
 ## 2.20.3 — Scan and moonshots look at Binance coins
 
 - **🔍 Scan, 🌕 Moonshots and 💼 Split now scan Binance coins.** Before, they only looked at KuCoin, so many picks couldn't be bought on Binance (where Buy Now and auto-trading work). Now:

@@ -89,6 +89,7 @@ module.exports = async (req, res) => {
       const s = require('../src/services/autoBuyer').currentStrategy();
       return { id: s.id, verdict: s.verdict, labResultSaved: !s.missingFile, ...(s.missingFile ? { warning: 'data/auto-strategy.json is missing: using the last passing settings, but live auto-buy cannot be unlocked. Run `npm run lab -- --days 3000` and commit the file.' } : {}) };
     })(),
+    aiHelper: (() => { const a = require('../src/services/aiHelper'); return a.isConfigured() ? { on: true, provider: a.provider(), model: a.model(), dailyLimitPerUser: a.dailyLimit() } : { on: false, howTo: 'add OPENAI_API_KEY or ANTHROPIC_API_KEY in Vercel' }; })(),
     autoExits: {
       available: require('../src/lib/secretBox').isConfigured(),
       dryRun: String(process.env.AUTOTRADE_DRY_RUN || '').toLowerCase() === 'true',

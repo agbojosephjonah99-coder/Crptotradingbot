@@ -21,6 +21,16 @@
  *   cryptobot:payref:{reference}  STRING chatId (set when the payment link is made, 7 days)
  *   cryptobot:paidref:{reference} STRING '1' — credited (SET NX → never twice)
  *   cryptobot:payments            LIST of JSON receipts (newest last)
+ *   cryptobot:small:{chatId}      HASH usd, checkedAt — last Binance balance check (free small accounts)
+ *
+ * FREE FOR SMALL ACCOUNTS (v2.21): with paid access on, users whose Binance
+ * Spot balance is at or below the admin's limit (default $100) use the bot for
+ * free. Coins bought by the weekly savings plan don't count. The balance is
+ * checked when they connect, open `balance` or `account`, when they hit the
+ * "subscription ended" screen, and once a day for everyone; a check older than
+ * 3 days no longer counts. Users above the limit are told once and asked to
+ * subscribe. Admin: 💳 Subscriptions → 🆓 Free for small accounts, or
+ * `subs free 100` / `subs free off`.
  */
 
 const axios = require('axios');
@@ -66,6 +76,107 @@ async function setPaidAccess(on) {
   await loadSettings({ force: true });
   return enabled();
 }
+
+// ─── Free for small accounts ──────────────────────────────────────────────────
+const smallKey = (chatId) => `cryptobot:small:${chatId}`;
+const SMALL_FRESH_MS = 3 * DAY;
+const DEFAULT_FREE_LIMIT = 100;
+
+/** The balance limit (USD) for free access, or 0 when off. */
+function freeLimit() {
+  const v = cache.v.freeLimit;
+  if (v !== undefined && v !== '') return Math.max(0, Number(v) || 0);
+  const env = process.env.FREE_ACCOUNT_LIMIT_USD;
+  if (env !== undefined && env !== '') return Math.max(0, Number(env) || 0);
+  return DEFAULT_FREE_LIMIT;
+}
+
+async function setFreeLimit(value) {
+  const t = String(value ?? '').trim().toLowerCase();
+  const n = ['off', 'no', '0', 'none'].includes(t) ? 0 : Number(t.replace(/[$,]/g, ''));
+  if (!(n >= 0) || n > 100000) throw new PaymentError('Send a dollar amount, e.g. `subs free 100`, or `subs free off`.');
+  await store.cmd('HSET', SETTINGS, 'freeLimit', String(n));
+  await loadSettings({ force: true });
+  return freeLimit();
+}
+
+/** Last balance check: { usd, checkedAt, fresh } or null. */
+async function getSmall(chatId) {
+  const h = store.hashToObject(await store.cmd('HGETALL', smallKey(chatId)));
+  if (h.usd === undefined || !h.checkedAt) return null;
+  return { usd: Number(h.usd), checkedAt: h.checkedAt, fresh: Date.now() - new Date(h.checkedAt).getTime() < SMALL_FRESH_MS };
+}
+
+/** True when this user qualifies for free access right now (based on the last check). */
+async function isFreeSmall(chatId) {
+  const limit = freeLimit();
+  if (!(limit > 0)) return false;
+  const sm = await getSmall(chatId);
+  return !!(sm && sm.fresh && sm.usd <= limit);
+}
+
+/**
+ * Save a balance reading (Spot total minus savings-plan coins).
+ * Returns { usd, free, crossedOver } — crossedOver is true the first time a
+ * user who was free goes above the limit (so they can be told once).
+ */
+async function recordBalance(chatId, totalUsd) {
+  const savings = await require('./savingsPlan').liveHoldingsUsd(chatId).catch(() => 0);
+  const counted = Math.max(0, Math.round((Number(totalUsd) - savings) * 100) / 100);
+  const before = await getSmall(chatId);
+  const limit = freeLimit();
+  const free = limit > 0 && counted <= limit;
+  // Told once: only when the previous check was free and this one isn't
+  const crossedOver = !free && limit > 0 && !!(before && before.fresh && before.usd <= limit);
+  await store.cmd('HSET', smallKey(chatId), 'usd', String(counted), 'checkedAt', new Date().toISOString());
+  return { usd: counted, free, limit, crossedOver, savingsUsd: savings };
+}
+
+/**
+ * Check a user's Binance balance now (if connected) and save it.
+ * Skips users without Binance and checks newer than `minAgeMs`.
+ */
+async function refreshSmall(chatId, { minAgeMs = 10 * 60_000 } = {}) {
+  await loadSettings();
+  if (!(freeLimit() > 0)) return null;
+  const sm = await getSmall(chatId);
+  if (sm && Date.now() - new Date(sm.checkedAt).getTime() < minAgeMs) return { usd: sm.usd, free: sm.fresh && sm.usd <= freeLimit(), limit: freeLimit(), cached: true };
+  const accounts = require('./tradingAccounts');
+  const st = await accounts.getStatus(chatId);
+  if (!st.connected || st.testnet) return null;
+  const b = await accounts.getBalances(chatId);
+  return recordBalance(chatId, b.totalUsd);
+}
+
+/** Once a day: re-check every connected user without a paid subscription. */
+async function refreshAllSmall({ send = async () => {}, now = new Date() } = {}) {
+  await loadSettings();
+  if (!enabled() || !(freeLimit() > 0)) return { skipped: 'off' };
+  const day = now.toISOString().slice(0, 10);
+  const first = await store.cmd('SET', `cryptobot:small:ran:${day}`, '1', 'NX', 'EX', 3 * 86400).catch(() => 'OK');
+  if (first !== 'OK') return { skipped: 'already ran today' };
+  let checked = 0, free = 0, over = 0;
+  for (const u of await users.getUsersByStatus('approved')) {
+    if (users.isAdminId(u.chatId) || (await getSub(u.chatId)).active) continue;
+    try {
+      const r = await refreshSmall(u.chatId, { minAgeMs: 0 });
+      if (!r) continue;
+      checked++;
+      if (r.free) free++; else over++;
+      if (r.crossedOver) {
+        await send(u.chatId, [
+          `💳 *Your Binance balance is now ${fmtUsd(r.usd)}* — above the free limit of ${fmtUsd(r.limit)}.`,
+          ``,
+          `Free access is for small accounts. To keep using the bot (alerts, auto-trading, savings), subscribe — ${priceLabel()}:`,
+          `\`subscribe you@example.com\``,
+        ].join('\n')).catch(() => {});
+      }
+    } catch (err) { console.error('[Subs] small check', u.chatId, err.message); }
+  }
+  return { checked, free, over };
+}
+
+const fmtUsd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const CURRENCIES = ['NGN', 'GHS', 'ZAR', 'KES', 'USD'];
 async function setPlan({ price, days, currency } = {}) {
@@ -143,16 +254,23 @@ async function getSub(chatId) {
 async function hasAccess(chatId) {
   await loadSettings();
   if (!enabled() || users.isAdminId(chatId)) return true;
-  return (await getSub(chatId)).active;
+  if ((await getSub(chatId)).active) return true;
+  return isFreeSmall(chatId);
 }
 
 async function status(chatId) {
   await loadSettings();
   const s = await getSub(chatId);
+  const small = await getSmall(chatId);
+  const freeSmall = !s.active && (await isFreeSmall(chatId));
   return {
     required: enabled() && !users.isAdminId(chatId),
     isAdmin: users.isAdminId(chatId),
-    active: !enabled() || users.isAdminId(chatId) || s.active,
+    active: !enabled() || users.isAdminId(chatId) || s.active || freeSmall,
+    freeSmall,
+    freeLimit: freeLimit(),
+    smallUsd: small?.usd ?? null,
+    smallCheckedAt: small?.checkedAt ?? null,
     paidUntil: s.paidUntil,
     daysLeft: s.daysLeft,
     email: s.email,
@@ -374,7 +492,7 @@ async function listSubscribers() {
 }
 
 module.exports = {
-  PaymentError, enabled, plan, priceLabel, providers, PROVIDER_NAMES, handleFlutterwaveWebhook, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
+  PaymentError, enabled, plan, priceLabel, freeLimit, setFreeLimit, getSmall, isFreeSmall, recordBalance, refreshSmall, refreshAllSmall, providers, PROVIDER_NAMES, handleFlutterwaveWebhook, loadSettings, setPaidAccess, setPlan, parseDate, setUntil, giveAllWithout, countWithoutAccess, CURRENCIES, _resetSettingsCache, getSub, hasAccess, status, getChatIdsWithAccess,
   startCheckout, confirmPayment, extend, revoke, handleWebhook, paystackSignatureOk, sendReminders, listSubscribers, validEmail,
 };
 

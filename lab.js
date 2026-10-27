@@ -6,7 +6,8 @@
  *   npm run lab -- --refresh     # re-download (otherwise cached for 24h)
  *
  * Tests 3 strategy families × their settings × with/without a BTC market filter
- * (22 variants). Settings are chosen on the older 65% of the history and judged
+ * (22 variants), then shows comparisons for information only: 2% risk, breakout +
+ * strongest coins together, and holding BTC only above its 200-day average. Settings are chosen on the older 65% of the history and judged
  * on the newer 35% only. Fees, slippage and price gaps are charged.
  *
  * Writes data/auto-strategy.json — commit it: the bot uses it to decide which
@@ -63,6 +64,18 @@ const r = (x) => (x === null || x === undefined ? '—' : `${x >= 0 ? '+' : ''}$
     console.log(`${f.name.padEnd(24)}${f.chosen.id.padEnd(32)}${String(t.trades).padStart(6)}  ${String(t.winRatePct ?? '—').padStart(5)}  ${r(t.expectancyR).padStart(7)}  ${JSON.stringify(t.expectancyRange95).padEnd(17)}  ${String(t.profitFactor ?? '—').padStart(4)}  ${pct(f.portfolioTest.returnPct).padStart(8)} (max DD ${f.portfolioTest.maxDrawdownPct}%)  ${f.verdict}`);
   }
   console.log(`\nBTC buy & hold over the unseen period: ${pct(out.btcBuyHoldTestPct)}`);
+
+  const cmp = out.comparisons || {};
+  console.log('\nComparisons on the unseen period — for information only (they do NOT change the pick or auto-buy):');
+  const pf = (p) => (p ? `${pct(p.returnPct).padStart(8)} (max DD ${p.maxDrawdownPct}%)` : '—');
+  for (const f of out.families) if (f.chosen && cmp.risk2?.[f.family]) console.log(`  ${f.name.padEnd(28)} 1% risk ${pf(f.portfolioTest)}   2% risk ${pf(cmp.risk2[f.family])}`);
+  if (cmp.combo) {
+    const t = cmp.combo.test;
+    console.log(`  ${'Breakout + Strongest coins'.padEnd(28)} 1% risk ${pf(cmp.combo.portfolio1)}   2% risk ${pf(cmp.combo.portfolio2)}   ${t.trades} trades, ${r(t.expectancyR)} avg, PF ${t.profitFactor ?? '—'}, ${cmp.combo.verdict}`);
+  }
+  if (cmp.btcHold) console.log(`  ${'Hold BTC'.padEnd(28)} ${pf(cmp.btcHold)}`);
+  if (cmp.btcTrend200) console.log(`  ${'Hold BTC above its 200-day'.padEnd(28)} ${pf(cmp.btcTrend200)}   in the market ${cmp.btcTrend200.timeInMarketPct}% of days, ${cmp.btcTrend200.switches} buys/sells`);
+  console.log('  A better number here is a reason to test further, not proof: these were compared on the same period they are judged on.');
   if (out.pick) {
     console.log(`\nPICKED (best on the training data): ${out.pick.label}`);
     console.log(`VERDICT: ${out.verdict} — ${out.pick.why}`);

@@ -317,9 +317,14 @@ module.exports = async (req, res) => {
   try {
     // Paid access: renewal reminders, and only users with access are monitored
     const reminders = await subs.sendReminders((id, text) => tg.send(id, text)).catch(err => ({ error: err.message }));
+    // Free for small accounts: re-check Binance balances once a day (before deciding who has access)
+    const smallAccounts = await subs.refreshAllSmall({ send: (id, text) => tg.send(id, text) }).catch(err => ({ error: err.message }));
     const userIds = await subs.getChatIdsWithAccess();
     // Auto-buy: once a day after the daily close (practice, house forward test, live if unlocked)
     const autobuy = await autoBuyer.runDaily({ allowed: new Set(userIds.map(String)), send: (id, text) => tg.send(id, text) })
+      .catch(err => ({ error: err.message }));
+    // Weekly savings plans: day-before reminders and due buys
+    const savings = await require('../src/services/savingsPlan').runDue({ allowed: new Set(userIds.map(String)), send: (id, text) => tg.send(id, text) })
       .catch(err => ({ error: err.message }));
     const jobs = [];
     const autoOn = new Map();
@@ -332,7 +337,7 @@ module.exports = async (req, res) => {
       await autoTrader.sweepOrphans(userId, positions.map(p => p.positionId)).catch(() => 0);
     }
     if (jobs.length === 0) {
-      return res.status(200).json({ success: true, message: 'No open positions across any users', reminders, autobuy });
+      return res.status(200).json({ success: true, message: 'No open positions across any users', reminders, autobuy, savings, smallAccounts });
     }
 
     // Fetch market data ONCE per coin+exchange (not once per position), a few in parallel
@@ -369,6 +374,8 @@ module.exports = async (req, res) => {
       results,
       reminders,
       autobuy,
+      savings,
+      smallAccounts,
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {

@@ -373,7 +373,9 @@ async function runLiveAccount(chatId, strategy, sig, { buy = true } = {}) {
   const { usdt, equity } = await liveEquity(c, mine);
   const lastEquity = Number(await store.cmd('GET', K.lastEq(`live:${chatId}`))) || null;
   const held = new Set(mine.map(p => p.symbol));
-  let open = held.size, cash = usdt;
+  // Leave alone the USDT a weekly savings buy due within a day will need
+  const reserved = await require('./savingsPlan').reservedUsd(chatId).catch(() => 0);
+  let open = held.size, cash = Math.max(0, usdt - reserved);
   for (const b of sig.buys) {
     if (held.has(b.symbol)) continue;
     const z = size({ equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
