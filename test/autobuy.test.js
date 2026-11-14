@@ -323,7 +323,7 @@ test('stops: today\'s stop and signal for every coin', async () => {
 // ─── v2.20: reasons, quiet-day notes, the admin report, retry after a failure ──
 const dayStartPlus = (min) => new Date(Math.floor(Date.now() / DAY) * DAY + min * 60_000);
 
-test('every auto-buy says why: the signal, the market filter, the test and the amount; house buys reach the admin', async () => {
+test('every auto-buy says why: the signal, the market filter, the test and the amount; house buys are only in the admin report', async () => {
   const { net, ab } = setup();
   await ab.setPractice('2000', true);
   const sent = [];
@@ -340,8 +340,8 @@ test('every auto-buy says why: the signal, the market filter, the test and the a
   assert.match(m, /Why this amount:\* if the stop is hit you lose about \$[\d,.]+ — 1% of your \$10,000\.00 account/);
   assert.match(m, /How it sells:\* the stop follows the lowest low of the last 20 days/);
 
-  const house = sent.filter(x => x.id === '1000' && /HOUSE forward test · 🤖 \*Auto-bought/.test(x.text));
-  assert.ok(house.length >= 1, 'the admin sees what the house forward test bought, with reasons');
+  const house = sent.filter(x => /HOUSE forward test/.test(x.text));
+  assert.equal(house.length, 0, 'no separate message for each house buy');
   const report = sent.find(x => x.id === '1000' && /Auto-buy daily check/.test(x.text));
   assert.ok(report, 'the admin gets the daily report');
   assert.match(report.text, /Buy signals \(\d+\)/);

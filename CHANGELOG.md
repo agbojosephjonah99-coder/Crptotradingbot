@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.23.2 — No separate messages for house buys
+
+- The house forward-test account no longer sends the admin a message for every coin it buys (they looked like double buys next to the admin's own practice buys). Its buys are still listed in the admin's daily report (🛒 Bought: 🏠 house: …), and its results are in `autobuy`.
+- Tests: 191.
+
 ## 2.23.1 — Fixed: auto-buy could buy the same coin more than once a day
 
 - **Cause:** auto-buy only skipped a coin you were *still holding*. With the 1% stop (Daily movers), coins are often sold within hours, so a second check on the same day (`autobuy run` after the nightly check, a retry, or two checks running at the same moment) bought the same coins again.

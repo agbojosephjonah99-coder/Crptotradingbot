@@ -555,9 +555,9 @@ async function runDaily({ allowed = new Set(), send = async () => {}, force = fa
       if (!(await once(`p:${id}`))) continue;
       try {
         const msgs = await runPracticeAccount(id, strategy, sig, { buy: id === HOUSE || practiceOn.has(String(id)), trail, date });
-        // The house account's buys go to the admin, so the forward test is visible
-        const to = id === HOUSE ? admin : id;
-        if (to) for (const m of msgs) if (id !== HOUSE || /Auto-bought/.test(m)) await send(to, m);
+        // The house account sends no messages of its own: its buys are listed in
+        // the admin's daily report (🏠 house: …) and its results in `autobuy`.
+        if (id !== HOUSE) for (const m of msgs) await send(id, m);
         if (msgs.bought?.length) out.bought[id === HOUSE ? 'house' : `practice:${id}`] = msgs.bought;
         out.practice++;
       } catch (err) { console.error('[AutoBuy] practice', id, err.message); }
