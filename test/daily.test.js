@@ -207,3 +207,53 @@ test('switching back to breakout restores the lab pick', async () => {
   assert.equal((await ab.activeStrategy()).id, 'donchian:55-20:btc');
   await assert.rejects(ab.setStrategy('yolo'), /Unknown strategy/);
 });
+
+test('a coin is auto-bought at most once per account per day, even after it was sold and `autobuy run` is sent again', async () => {
+  const { ab, practice, state, net } = setup();
+  await ab.setStrategy('daily');
+  await ab.setPractice('2000', true);
+  const send = async (id, text) => net.sent.push({ chat_id: id, text });
+  const allowed = new Set(['2000']);
+  await ab.runDaily({ allowed, send, now: afterClose() });
+  assert.equal((await practice.getPositions('2000')).length, 3);
+
+  // The 1% stops are hit (price 130 → 128): everything is sold
+  state.price = 128;
+  await practice.syncUser('2000');
+  assert.equal((await practice.getPositions('2000')).length, 0);
+  assert.equal((await practice.getTrades('2000')).length, 3);
+
+  // The admin runs the check again the same day
+  state.price = 130;
+  await ab.runDaily({ allowed, send, force: true });
+  assert.equal((await practice.getPositions('2000')).length, 0, 'nothing bought again today');
+  assert.ok(net.sent.some(m => m.chat_id === '2000' && /already auto-bought today/.test(m.text)), 'the user is told why');
+  assert.equal((await practice.getPositions('house')).length, 3, 'the house account kept its 3 and bought no more');
+});
+
+test('two checks running at the same moment cannot both buy the same coin', async () => {
+  const { ab, practice } = setup();
+  await ab.setStrategy('daily');
+  await ab.setPractice('2000', true);
+  const allowed = new Set(['2000']);
+  await Promise.all([
+    ab.runDaily({ allowed, force: true, send: async () => {} }),
+    ab.runDaily({ allowed, force: true, send: async () => {} }),
+  ]);
+  for (const id of ['2000', 'house']) {
+    const syms = (await practice.getPositions(id)).map(p => p.symbol);
+    assert.equal(syms.length, new Set(syms).size, `${id}: no coin twice`);
+    assert.equal(syms.length, 3);
+  }
+});
+
+test('the next day the same coin can be bought again (once per day, not once ever)', async () => {
+  const { ab, practice, state } = setup();
+  await ab.setStrategy('daily');
+  const yesterday = new Date(Date.now() - DAY).toISOString().slice(0, 10);
+  const store = require('../src/lib/redis');
+  await store.cmd('SET', `cryptobot:autobuy:bought:${yesterday}:p:house:AAAUSDT`, '1');
+  state.price = 130;
+  await ab.runDaily({ allowed: new Set(), force: true, send: async () => {} });
+  assert.ok((await practice.getPositions('house')).some(p => p.symbol === 'AAAUSDT'));
+});

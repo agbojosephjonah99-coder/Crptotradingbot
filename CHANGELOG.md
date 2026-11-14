@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.23.1 — Fixed: auto-buy could buy the same coin more than once a day
+
+- **Cause:** auto-buy only skipped a coin you were *still holding*. With the 1% stop (Daily movers), coins are often sold within hours, so a second check on the same day (`autobuy run` after the nightly check, a retry, or two checks running at the same moment) bought the same coins again.
+- **Fix:** each account (practice, house and real) now auto-buys a coin **at most once per day**, even if it was already sold. The check is atomic, so two checks running together can't both buy. If a buy fails, the coin can be tried again the same day. The next day the same coin can be bought again if it's one of that day's picks.
+- A forced `autobuy run` tells the user "already auto-bought today" instead of buying again.
+- Tests: 191.
+
 ## 2.23.0 — Daily movers strategy (whole market, every day, 1% stop)
 
 **Nothing changes until the admin switches it on.** The breakout strategy stays the default.

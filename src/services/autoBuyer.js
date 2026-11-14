@@ -47,6 +47,7 @@ const K = {
   running: 'cryptobot:lock:autobuy',
   tries: (d) => `cryptobot:autobuy:tries:${d}`,
   did: (d, id) => `cryptobot:autobuy:did:${d}:${id}`,
+  bought: (d, id, sym) => `cryptobot:autobuy:bought:${d}:${id}:${sym}`,
 };
 
 class AutoBuyError extends Error {}
@@ -267,6 +268,20 @@ function makeTrailer(active, sig) {
   };
 }
 
+/**
+ * Auto-buy buys a coin at most ONCE per account per day. Holding the coin isn't
+ * enough of a check: with a tight stop (daily movers) a coin is often sold within
+ * hours, and a second check the same day (`autobuy run`, a retry, or two checks
+ * at the same moment) would buy it again. This claim is atomic (SET NX), so two
+ * checks running together can't both get it. Released if the buy fails.
+ */
+async function claimBuy(date, accountId, symbol) {
+  return (await store.cmd('SET', K.bought(date, accountId, symbol), '1', 'NX', 'EX', 3 * 86400).catch(() => 'OK')) === 'OK';
+}
+async function releaseBuy(date, accountId, symbol) {
+  await store.cmd('DEL', K.bought(date, accountId, symbol)).catch(() => {});
+}
+
 /** How many dollars to put in, or a reason not to. */
 function size({ equity, cash, entry, stop, open, lastEquity }) {
   const L = cfg.LIMITS;
@@ -388,7 +403,7 @@ async function todayCheck(now = new Date()) {
 }
 
 // ─── Practice accounts ────────────────────────────────────────────────────────
-async function runPracticeAccount(chatId, strategy, sig, { buy = true, trail = makeTrailer(strategy, sig) } = {}) {
+async function runPracticeAccount(chatId, strategy, sig, { buy = true, trail = makeTrailer(strategy, sig), date = today() } = {}) {
   const msgs = [];
   const bought = [];
   const fp = fixedPct(strategy);
@@ -408,15 +423,16 @@ async function runPracticeAccount(chatId, strategy, sig, { buy = true, trail = m
     if (held.has(b.symbol)) continue;
     const z = size({ equity: s.equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
     if (z.skip) { msgs.push(`🎮🤖 Skipped ${b.symbol.replace('USDT', '')}: ${z.skip}`); if (/max|fell/.test(z.skip)) break; continue; }
+    if (!(await claimBuy(date, `p:${chatId}`, b.symbol))) { msgs.push(`🎮🤖 Skipped ${coinOf(b.symbol)}: already auto-bought today (once per coin per day)`); continue; }
     try {
       const live = await fetchPrice(b.symbol, { exchange: 'binance' });
       const stop = fp && live ? live * (1 - fp) : b.stop; // a fixed % stop is set from today's price, not yesterday's close
-      if (!live || stop >= live) { msgs.push(`🎮🤖 Skipped ${b.symbol.replace('USDT', '')}: price already at the stop`); continue; }
+      if (!live || stop >= live) { await releaseBuy(date, `p:${chatId}`, b.symbol); msgs.push(`🎮🤖 Skipped ${b.symbol.replace('USDT', '')}: price already at the stop`); continue; }
       const { position, cash: left } = await practice.buy(chatId, { symbol: b.symbol, amount: z.usd, stop, strategy, why: b.why, trailPct: fp });
       cash = left; open++; held.add(b.symbol);
       bought.push(coinOf(b.symbol));
       msgs.push(buyMessage({ mode: chatId === HOUSE ? 'house' : 'practice', b: { ...b, stop: position.stopLossPrice }, strategy, sig, z, equity: s.equity, price: position.buyPrice, qty: position.quantity }));
-    } catch (err) { msgs.push(`🎮🤖 Couldn't buy ${b.symbol.replace('USDT', '')}: ${err.message}`); }
+    } catch (err) { await releaseBuy(date, `p:${chatId}`, b.symbol); msgs.push(`🎮🤖 Couldn't buy ${b.symbol.replace('USDT', '')}: ${err.message}`); }
   }
   await store.cmd('SET', K.lastEq(chatId), String(s.equity));
   return Object.assign(msgs, { bought });
@@ -449,7 +465,7 @@ async function liveBuy(chatId, c, { symbol, usd: spend, stop, strategy, autoBoug
   return { qty, avg, stop, positionId: pos.positionId };
 }
 
-async function runLiveAccount(chatId, strategy, sig, { buy = true, trail = makeTrailer(strategy, sig) } = {}) {
+async function runLiveAccount(chatId, strategy, sig, { buy = true, trail = makeTrailer(strategy, sig), date = today() } = {}) {
   const msgs = [];
   const bought = [];
   const fp = fixedPct(strategy);
@@ -475,12 +491,13 @@ async function runLiveAccount(chatId, strategy, sig, { buy = true, trail = makeT
     if (held.has(b.symbol)) continue;
     const z = size({ equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
     if (z.skip) { msgs.push(`🤖 Skipped ${b.symbol.replace('USDT', '')}: ${z.skip}`); if (/max|fell/.test(z.skip)) break; continue; }
+    if (!(await claimBuy(date, `l:${chatId}`, b.symbol))) { msgs.push(`🤖 Skipped ${coinOf(b.symbol)}: already auto-bought today (once per coin per day)`); continue; }
     try {
       const { qty, avg, stop } = await liveBuy(chatId, c, { symbol: b.symbol, usd: z.usd, stop: b.stop, strategy, autoBought: true, why: b.why, trailPct: fp });
       cash -= z.usd; open++; held.add(b.symbol);
       bought.push(coinOf(b.symbol));
       msgs.push(buyMessage({ mode: 'live', b: { ...b, stop }, strategy, sig, z, equity, price: avg, qty }));
-    } catch (err) { msgs.push(`⚠️ Auto-buy ${b.symbol.replace('USDT', '')} failed: ${err.message}`); }
+    } catch (err) { await releaseBuy(date, `l:${chatId}`, b.symbol); msgs.push(`⚠️ Auto-buy ${b.symbol.replace('USDT', '')} failed: ${err.message}`); }
   }
   await store.cmd('SET', K.lastEq(`live:${chatId}`), String(equity));
   return Object.assign(msgs, { bought });
@@ -537,7 +554,7 @@ async function runDaily({ allowed = new Set(), send = async () => {}, force = fa
     for (const id of practiceIds) {
       if (!(await once(`p:${id}`))) continue;
       try {
-        const msgs = await runPracticeAccount(id, strategy, sig, { buy: id === HOUSE || practiceOn.has(String(id)), trail });
+        const msgs = await runPracticeAccount(id, strategy, sig, { buy: id === HOUSE || practiceOn.has(String(id)), trail, date });
         // The house account's buys go to the admin, so the forward test is visible
         const to = id === HOUSE ? admin : id;
         if (to) for (const m of msgs) if (id !== HOUSE || /Auto-bought/.test(m)) await send(to, m);
@@ -555,7 +572,7 @@ async function runDaily({ allowed = new Set(), send = async () => {}, force = fa
       if (!hasStrategyPos && !buy) continue;
       if (!(await once(`l:${id}`))) continue;
       try {
-        const msgs = await runLiveAccount(id, strategy, sig, { buy, trail });
+        const msgs = await runLiveAccount(id, strategy, sig, { buy, trail, date });
         for (const m of msgs) await send(id, m);
         if (msgs.bought?.length) out.bought[`live:${id}`] = msgs.bought;
         out.live++;
