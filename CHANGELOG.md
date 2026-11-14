@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.24.1 — 🧭 Strategy button
+
+- **Admin menu:** new row with **🧭 Strategy** and **▶️ Run Auto-buy Now**.
+- **🧭 Strategy** opens a picker with one button per strategy: 📈 Breakout (1% risk), 💪 Strongest coins (2% risk), ⚡ Daily movers (1% stop). Each has a one-line summary with its lab result, and the one in use is marked ✅.
+- Tapping a strategy asks for confirmation first (switching restarts the house forward test). After switching: ▶️ Run today's check now · 🛒 Auto-buy status. Typed `autobuy strategy NAME` asks too; `autobuy strategy NAME confirm` switches straight away.
+- The 🛒 Auto-buy screen has a 🧭 Change strategy button for the admin. Only the admin can switch.
+- Tests: 195.
+
+## 2.24.0 — Strongest coins at 2% risk (`autobuy strategy momentum`)
+
+- **New strategy choice for the admin:** `autobuy strategy momentum`. Every day it buys the coins that are among the **3 strongest of the 15 large coins over the last 56 days**, still rising and above their 50-day average, but **only while BTC is above its 100-day average**. The stop trails 4× the coin's average daily range below its highest close and only moves up.
+  - The settings come from the lab (`data/auto-strategy.json`, "Strongest coins" family), which gave it a **PASS** on its own: 101 trades on unseen data, +0.40R per trade after fees.
+  - **2% of the account at risk per trade** (breakout uses 1%). In the lab's unseen test period (Dec 2023 → Oct 2026) that gave **+68.8% with a worst drop of 16.3%**, against +21.5% / 4.2% for breakout at 1%. That's past performance in a period that included a boom, not a promise. Same other limits: max 20% per coin, 5 coins, no buys after a 3% daily drop.
+  - Buy messages show the lab verdict (PASSED) and the real % at risk. The `autobuy on` and live-auto-buy texts show the strategy's risk (2%) instead of always 1%.
+- `autobuy strategy` now lists three choices: `breakout` (default), `momentum`, `daily`. Switching restarts the house forward test; coins already held keep their own stop rules.
+- Tests: 194.
+
 ## 2.23.2 — No separate messages for house buys
 
 - The house forward-test account no longer sends the admin a message for every coin it buys (they looked like double buys next to the admin's own practice buys). Its buys are still listed in the admin's daily report (🛒 Bought: 🏠 house: …), and its results are in `autobuy`.

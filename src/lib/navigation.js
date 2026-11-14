@@ -35,6 +35,7 @@ const VIEWS = [
   /^(menu|positions|pos|profit|stats|pnl|balance|wallet|bal|stops|coins|account|subscription|plan|help|manual|guide|pending|users|scan|moonshots|newlistings|autobuy|practice|golive|live|buynow|subs|subscribers|subscriptions|save|savings|expect|ask)$/,
   /^(buy|sell|sold|split|setstop|check|buynow)_(help|guide)$/,
   /^golive [123]$/,
+  /^autobuy strategy$/,
   /^practice help$/,
   /^subs (plan|give|list|end|free)$/,
   /^save (help|day|amount)$/,

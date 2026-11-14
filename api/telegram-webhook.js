@@ -96,6 +96,7 @@ const MENU_ROWS = [
 const ADMIN_ROWS = [
   [b('⏳ Pending', 'pending'),   b('👥 Users', 'users')],
   [b('💳 Subscriptions', 'subs'),  b('🔗 Invite Links', 'invite')],
+  [b('🧭 Strategy', 'autobuy strategy'), b('▶️ Run Auto-buy Now', 'autobuy run')],
 ];
 const INLINE_MENU = { inline_keyboard: MENU_ROWS };
 const menuFor = (chatId) => ({ inline_keyboard: isAdmin(chatId) ? [...MENU_ROWS, ...ADMIN_ROWS] : MENU_ROWS });
@@ -723,7 +724,7 @@ async function handleMessage(chatId, text, from, meta = {}) {
       subs.enabled() ? `\`account\` — your subscription · \`subscribe\` — renew` : `\`account\` — your access`,
       `\`manual\` — the full user guide`,
       `\`ask\` — ask the AI helper a question (or just type it) — it explains, it never trades`,
-      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` (panel: on/off, plan, give, free for small accounts) · \`subs free 100\` · \`grant ID DAYS\` or \`grant ID 31/12/2026\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\` · \`autobuy strategy breakout|daily\`` : '',
+      isAdmin(chatId) ? `\n━━━ *ADMIN* ━━━\n\`pending\` · \`users\` · \`approve ID\` · \`block ID\` · \`remove ID\` · \`invite\`\n\`subs\` (panel: on/off, plan, give, free for small accounts) · \`subs free 100\` · \`grant ID DAYS\` or \`grant ID 31/12/2026\` · \`revoke ID\`\n\`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\` · \`autobuy strategy\` (or 🧭 Strategy in the menu)` : '',
     ].filter(x => x !== '').join('\n'));
     return;
   }
@@ -1847,6 +1848,62 @@ async function forwardWarning() {
   return `⚠️ *Not proven yet:* the bot's own practice run has ${g.forward.days} of ${g.needs.days} days and ${g.forward.closedTrades} of ${g.needs.trades} trades${g.forward.closedTrades ? `, ${g.forward.equity >= g.forward.start ? 'in profit' : 'currently at a loss'}` : ''}.`;
 }
 
+// ─── Strategy picker (admin): 🧭 Strategy in the menu ─────────────────────────
+const STRATEGY_INFO = {
+  breakout: { icon: '📈', title: 'Breakout (1% risk)', text: 'The lab\'s tested pick: 15 large coins, buys a new 55-day high, only while BTC is above its 100-day average. About 3 trades a month. Lab: +21.5% in the test period, worst drop 4.2%.' },
+  momentum: { icon: '💪', title: 'Strongest coins (2% risk)', text: 'The 3 strongest of the 15 coins over 56 days, only while BTC is above its 100-day average. Lab: PASS, +68.8% in the test period, worst drop 16.3%.' },
+  daily: { icon: '⚡', title: 'Daily movers (1% stop)', text: 'The whole Binance market every day: the 3 coins that rose most yesterday, 1% trailing stop. ⚠️ Not proven.' },
+};
+
+async function handleStrategy(chatId, choice, confirm) {
+  const current = await autoBuyer.strategyKey();
+  // The picker
+  if (!choice) {
+    const lines = [`🧭 *Auto-buy strategy* — used for everyone's auto-buy (practice, house and real)`, ``];
+    for (const [key, info] of Object.entries(STRATEGY_INFO)) {
+      lines.push(`${key === current ? '✅' : info.icon} *${info.title}*${key === current ? ' — *in use*' : ''}`, info.text, ``);
+    }
+    lines.push(`_Tap one to switch. Switching restarts the house forward test from $10,000; coins already held keep their own stop rules._`);
+    const kb = Object.entries(STRATEGY_INFO).map(([key, info]) => [{ text: `${key === current ? '✅ ' : ''}${info.icon} ${info.title}`, callback_data: `autobuy strategy ${key}` }]);
+    kb.push([{ text: '🛒 Auto-buy status', callback_data: 'autobuy' }]);
+    await send(chatId, lines.join('\n'), { inline_keyboard: kb });
+    return;
+  }
+  const info = STRATEGY_INFO[choice];
+  if (!info) throw new autoBuyer.AutoBuyError(`Unknown strategy "${esc(choice)}". Choose: ${Object.keys(STRATEGY_INFO).join(', ')}`);
+  if (choice === current) {
+    await send(chatId, `✅ *${info.title}* is already the strategy in use.`, { inline_keyboard: [[{ text: '🧭 Choose another', callback_data: 'autobuy strategy' }], [{ text: '🛒 Auto-buy status', callback_data: 'autobuy' }]] });
+    return;
+  }
+  // Ask first: switching restarts the house forward test
+  if (!confirm) {
+    await send(chatId, [
+      `🧭 *Switch auto-buy to ${info.title}?*`,
+      ``,
+      info.text,
+      ``,
+      `• Everyone's auto-buy (practice, house and real) uses it from the next daily check.`,
+      `• The house forward test restarts from $10,000.`,
+      `• Coins already held keep their own stop rules.`,
+    ].join('\n'), { inline_keyboard: [
+      [{ text: `✅ Yes, switch to ${info.title}`, callback_data: `autobuy strategy ${choice} confirm` }],
+      [{ text: 'Cancel', callback_data: 'autobuy strategy' }],
+    ] });
+    return;
+  }
+  const st = await autoBuyer.setStrategy(choice);
+  await send(chatId, [
+    `🧭 *Auto-buy strategy set:* ${esc(st.label)}`,
+    st.verdict === 'PASS' ? `✅ Lab verdict: PASS.` : `⚠️ Lab verdict: ${st.verdict}. Real-money auto-buy can still be opened early with \`autobuy unlock\`; everyone sees this warning before switching it on.`,
+    st.portfolio2 ? `📊 In the lab's unseen test period: ${st.portfolio2.returnPct >= 0 ? '+' : ''}${st.portfolio2.returnPct}% with a worst drop of ${st.portfolio2.maxDrawdownPct}% (past results, not a promise).` : '',
+    st.params?.regime ? `_It only buys while BTC is above its 100-day average, so it may wait several days or weeks._` : '',
+    `The house forward test restarted from $10,000. The next daily check uses it — or tap below to run it now.`,
+  ].filter(Boolean).join('\n'), { inline_keyboard: [
+    [{ text: '▶️ Run today\'s check now', callback_data: 'autobuy run' }],
+    [{ text: '🛒 Auto-buy status', callback_data: 'autobuy' }],
+  ] });
+}
+
 /** Extra warning for a strategy the admin chose that the lab hasn't passed (daily movers). */
 async function strategyWarning() {
   const s = await autoBuyer.activeStrategy().catch(() => null);
@@ -1870,13 +1927,13 @@ async function handleAutoBuy(chatId, args) {
         ``,
         daily
           ? `Every day just after midnight (UTC) the bot looks at the *whole Binance market* and buys the ${strat.params.topN} coins that rose most the day before with your *play money* — at most 20% of the account per coin, 5 coins at once.`
-          : `Every day just after midnight (UTC) the bot checks ${strat.name.toLowerCase()} signals on 15 large coins and buys the ones that qualify with your *play money* — about 1% of the account at risk per trade, at most 5 at once.`,
+          : `Every day just after midnight (UTC) the bot checks ${strat.name.toLowerCase()} signals on 15 large coins and buys the ones that qualify with your *play money* — about ${strat.riskPct || 1}% of the account at risk per trade, at most 5 at once.`,
         daily
           ? `Each coin gets a stop ${strat.params.stopPct}% below the buy price that follows the price up (always ${strat.params.stopPct}% below the best price) and never moves down. You'll get a message for every buy and every sale.`
           : `It sells by a trailing stop that only moves up. You'll get a message for every buy (with the reasons it chose that coin) and every sale — and on days with nothing to buy, a short note saying why.`,
         daily
           ? `_⚠️ This strategy is not proven: a ${strat.params.stopPct}% stop is often hit by normal price swings within hours, and fees take about 0.3% of each trade. Watch the practice results before using real money._`
-          : `_Signals are rare (about 3 a month across all coins), so several quiet days in a row are normal._`,
+          : `_Signals are rare (a few a month across all coins), and nothing is bought while BTC is below its 100-day average, so several quiet days in a row are normal._`,
         ``,
         today ? today.text : `*Your first check:* just after 1am Lagos time.`,
         ``,
@@ -1893,7 +1950,8 @@ async function handleAutoBuy(chatId, args) {
       if (b === 'off') { await autoBuyer.setLive(chatId, false); await reply(chatId, `⏸ Live auto-buy OFF. No new buys; open positions keep their Binance stop orders.`); return; }
       if (b === 'on' && (args[2] || '').toLowerCase() === 'confirm') {
         await autoBuyer.setLive(chatId, true);
-        await reply(chatId, `🟢 *Live auto-buy ON.* The bot may now buy on your Binance account, about 1% of the account at risk per trade and 5 positions at once. \`autobuy live off\` stops it any time.`);
+        const risk = (await autoBuyer.activeStrategy().catch(() => ({}))).riskPct || 1;
+        await reply(chatId, `🟢 *Live auto-buy ON.* The bot may now buy on your Binance account, about ${risk}% of the account at risk per trade and 5 positions at once. \`autobuy live off\` stops it any time.`);
         return;
       }
       if (b === 'on') {
@@ -1901,7 +1959,7 @@ async function handleAutoBuy(chatId, args) {
         await send(chatId, [
           `⚠️ *Real money — the bot will BUY for you*`,
           ``,
-          `Each day it may buy coins on your Binance account using your USDT: about 1% of the account at risk per trade, no coin above 20%, at most 5 positions, and no buying after a 3% drop in a day.`,
+          `Each day it may buy coins on your Binance account using your USDT: about ${(await autoBuyer.activeStrategy().catch(() => ({}))).riskPct || 1}% of the account at risk per trade, no coin above 20%, at most 5 positions, and no buying after a 3% drop in a day.`,
           await strategyWarning(),
           await forwardWarning(),
           `Losses are possible even with a tested strategy.`,
@@ -1911,24 +1969,7 @@ async function handleAutoBuy(chatId, args) {
     }
     // Admin controls
     if (isAdmin(chatId) && a === 'strategy') {
-      if (!b) {
-        const cur = await autoBuyer.activeStrategy();
-        await reply(chatId, [
-          `🧭 *Auto-buy strategy now:* ${esc(cur.label)}`,
-          ``,
-          `\`autobuy strategy breakout\` — the lab's tested pick (15 large coins, only while BTC is above its 100-day average; about 3 trades a month)`,
-          `\`autobuy strategy daily\` — daily movers: the whole Binance market every day, the top 3 coins by yesterday's rise, 1% trailing stop (⚠️ not proven)`,
-          ``,
-          `_Switching restarts the house forward test from $10,000. Coins already held keep their own stop rules._`,
-        ].join('\n'));
-        return;
-      }
-      const st = await autoBuyer.setStrategy(b);
-      await reply(chatId, [
-        `🧭 *Auto-buy strategy set:* ${esc(st.label)}`,
-        st.verdict === 'PASS' ? `✅ Lab verdict: PASS.` : `⚠️ Lab verdict: ${st.verdict}. Real-money auto-buy can still be opened early with \`autobuy unlock\`; everyone sees this warning before switching it on.`,
-        `The house forward test restarted from $10,000. The next daily check uses it — or send \`autobuy run\` to run it now.`,
-      ].join('\n'));
+      await handleStrategy(chatId, b, (args[2] || '').toLowerCase() === 'confirm');
       return;
     }
     if (isAdmin(chatId) && ['unlock', 'lock', 'pause', 'resume', 'run'].includes(a)) {
@@ -1978,7 +2019,10 @@ async function handleAutoBuy(chatId, args) {
     if (st.unlocked) kb.push([st.liveOn ? { text: '⏸ Live auto-buy off', callback_data: 'autobuy live off' } : { text: '💰 Live auto-buy on', callback_data: 'autobuy live on' }]);
     kb.push([{ text: '🛡 Today\'s stop for each coin', callback_data: 'stops' }]);
     kb.push([{ text: '🎮 My practice account', callback_data: 'practice' }]);
-    if (isAdmin(chatId)) lines.push('', `_Admin: \`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\` · \`autobuy strategy\`_`);
+    if (isAdmin(chatId)) {
+      kb.push([{ text: '🧭 Change strategy', callback_data: 'autobuy strategy' }]);
+      lines.push('', `_Admin: \`autobuy run\` · \`autobuy pause\`/\`resume\` · \`autobuy unlock\`/\`lock\` · \`autobuy strategy\`_`);
+    }
     await send(chatId, lines.filter(x => x !== '').join('\n'), { inline_keyboard: kb });
   } catch (err) {
     await reply(chatId, `❌ ${err instanceof autoBuyer.AutoBuyError ? err.message : `Auto-buy error: ${esc(err.message)}`}`);

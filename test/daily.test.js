@@ -85,8 +85,11 @@ test('admin switches to daily movers: the house restarts; the daily run buys the
   const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
 
   await say('autobuy strategy');
-  assert.match(net.sent.at(-1).text, /autobuy strategy daily/);
+  assert.match(net.sent.at(-1).text, /Daily movers/);
   await say('autobuy strategy daily');
+  assert.match(net.sent.at(-1).text, /Switch auto-buy to Daily movers/);
+  assert.equal((await ab.activeStrategy()).family, 'donchian', 'nothing changes before confirming');
+  await say('autobuy strategy daily confirm');
   assert.match(net.sent.at(-1).text, /strategy set:\* Daily movers/);
   assert.match(net.sent.at(-1).text, /NOT TESTED/);
   assert.equal((await ab.activeStrategy()).family, 'dailyTop');
@@ -256,4 +259,97 @@ test('the next day the same coin can be bought again (once per day, not once eve
   state.price = 130;
   await ab.runDaily({ allowed: new Set(), force: true, send: async () => {} });
   assert.ok((await practice.getPositions('house')).some(p => p.symbol === 'AAAUSDT'));
+});
+
+// ─── Strongest coins at 2% risk ───────────────────────────────────────────────
+function labFile() {
+  const fs = require('fs');
+  const file = path.join(os.tmpdir(), `lab-momentum-${Date.now()}-${Math.random()}.json`);
+  fs.writeFileSync(file, JSON.stringify({
+    verdict: 'PASS', period: { from: '2018-08-10', split: '2023-12-11', to: '2026-10-26' },
+    pick: { family: 'donchian', params: { entryN: 55, exitN: 20, regime: true }, id: 'donchian:55-20:btc', label: 'Breakout', name: 'Breakout to a new high', test: { trades: 108, expectancyR: 0.403 } },
+    families: [{ family: 'momentum', chosen: { id: 'momentum:56-3-4:btc', params: { lookback: 56, topN: 3, k: 4, regime: true } }, verdict: 'PASS', test: { trades: 101, expectancyR: 0.399 } }],
+    comparisons: { risk2: { momentum: { taken: 78, returnPct: 68.8, maxDrawdownPct: 16.3 } } },
+  }));
+  return file;
+}
+
+test('sizing at 2% risk: twice the amount of 1%, still capped at 20% of the account', () => {
+  const { size } = require('../src/services/autoBuyer');
+  assert.equal(size({ equity: 10_000, cash: 10_000, entry: 100, stop: 80, open: 0 }).usd, 500, '1%: $100 / 20% stop');
+  assert.equal(size({ equity: 10_000, cash: 10_000, entry: 100, stop: 80, open: 0, riskPct: 2 }).usd, 1000, '2%: $200 / 20% stop');
+  assert.equal(size({ equity: 10_000, cash: 10_000, entry: 100, stop: 95, open: 0, riskPct: 2 }).usd, 2000, 'capped at 20%');
+});
+
+test('admin switches to strongest coins at 2%: the lab\'s settings and verdict, 2% risk, buys the top 3 of the 15 coins', async () => {
+  const { net, ab, practice, state } = setup();
+  state.price = daily(300, 0.01).at(-1).close * 1.001; // just above yesterday's close
+  process.env.AUTO_STRATEGY_FILE = labFile();
+  const say = (text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id: 1000 }, from: {}, text } } }), fakeRes());
+  await say('autobuy strategy momentum confirm');
+  const reply = net.sent.at(-1).text;
+  assert.match(reply, /Strongest coins/);
+  assert.match(reply, /Lab verdict: PASS/);
+  assert.match(reply, /\+68\.8% with a worst drop of 16\.3%/);
+
+  const st = await ab.activeStrategy();
+  assert.equal(st.id, 'momentum:56-3-4:btc');
+  assert.equal(st.riskPct, 2);
+  assert.deepEqual(st.params, { lookback: 56, topN: 3, k: 4, regime: true });
+
+  await ab.setPractice('2000', true);
+  const sent = [];
+  const r = await ab.runDaily({ allowed: new Set(['2000']), send: async (id, text) => sent.push({ id, text }), now: afterClose() });
+  assert.equal(r.strategy, 'momentum:56-3-4:btc');
+  const pos = await practice.getPositions('2000');
+  assert.equal(pos.length, 3, 'top 3 coins');
+  assert.ok(pos.every(p => p.strategy === 'momentum:56-3-4:btc' && !p.trailPct), 'trailing ATR stop, not the 1% rule');
+  const m = sent.find(x => /Auto-bought/.test(x.text)).text;
+  assert.match(m, /Strongest coins: #\d of the list by 56-day return/);
+  assert.match(m, /Strategy test: PASSED/);
+  assert.ok(!/not proven/.test(m));
+});
+
+test('strongest coins waits while BTC is below its 100-day average', async () => {
+  const { ab, practice } = setup();
+  process.env.AUTO_STRATEGY_FILE = labFile();
+  await ab.setStrategy('momentum');
+  // Every coin (BTC included) in a long fall
+  const fall = (limit) => { const end = Math.floor(Date.now() / DAY) * DAY; return Array.from({ length: limit }, (_, i) => { const c = 100 * 0.997 ** i; return { time: end - (limit - i) * DAY, open: c / 0.997, high: c / 0.997 * 1.001, low: c * 0.999, close: c, volume: 1 }; }); };
+  mockNet({ price: 40, klines: (sym, interval, limit) => fall(limit) });
+  const r = await ab.runDaily({ allowed: new Set(), force: true, send: async () => {} });
+  assert.equal(r.signals, 0);
+  assert.equal((await practice.getPositions('house')).length, 0);
+});
+
+
+test('🧭 Strategy button: in the admin menu (not for users); tap a strategy, confirm, switched', async () => {
+  const { net, ab } = setup();
+  const say = (id, text) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { message: { chat: { id }, from: {}, text } } }), fakeRes());
+  const tap = (id, data) => require('../api/telegram-webhook')(fakeReq({ method: 'POST', body: { callback_query: { id: 'q', data, from: {}, message: { chat: { id }, message_id: 1 } } } }), fakeRes());
+  const buttons = (m) => (m.reply_markup?.inline_keyboard || []).flat().map(x => x.callback_data);
+
+  await say(1000, 'menu');
+  assert.ok(net.sent.some(m => buttons(m).includes('autobuy strategy')), 'admin menu has 🧭 Strategy');
+  require('../src/services/userService');
+  net.sent.length = 0;
+
+  await tap(1000, 'autobuy strategy');
+  const picker = net.sent.at(-1);
+  assert.match(picker.text, /✅ \*Breakout \(1% risk\)\* — \*in use\*/);
+  assert.ok(['autobuy strategy breakout', 'autobuy strategy momentum', 'autobuy strategy daily'].every(d => buttons(picker).includes(d)));
+
+  await tap(1000, 'autobuy strategy momentum');
+  assert.ok(buttons(net.sent.at(-1)).includes('autobuy strategy momentum confirm'));
+  assert.equal(await ab.strategyKey(), 'breakout', 'not switched before confirming');
+  await tap(1000, 'autobuy strategy momentum confirm');
+  assert.equal(await ab.strategyKey(), 'momentum');
+  assert.ok(buttons(net.sent.at(-1)).includes('autobuy run'), 'offers to run the check now');
+
+  await tap(1000, 'autobuy strategy momentum');
+  assert.match(net.sent.at(-1).text, /already the strategy in use/);
+
+  // A normal user can't switch
+  await tap(2000, 'autobuy strategy daily confirm');
+  assert.equal(await ab.strategyKey(), 'momentum');
 });

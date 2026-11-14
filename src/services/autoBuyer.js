@@ -89,13 +89,41 @@ function dailyStrategy() {
     why: 'chosen by the admin; not proven to make money after fees', tested: !!lab, chosenByAdmin: true, market: true,
   };
 }
-const STRATEGY_CHOICES = { breakout: currentStrategy, daily: dailyStrategy };
+/**
+ * Strongest coins at 2% risk: the lab's "momentum" family with the settings the
+ * lab chose for it (it PASSED on its own), sized at 2% of the account per trade.
+ * The lab's 2%-risk comparison is the evidence: +68.8%, worst drop 16.3% on the
+ * unseen period (Oct 2026 run) — vs +21.5% / 4.2% for breakout at 1%.
+ */
+const MOMENTUM_FALLBACK = { id: 'momentum:56-3-4:btc', params: { lookback: 56, topN: 3, k: 4, regime: true } };
+function momentumStrategy() {
+  const family = 'momentum';
+  const res = loadResearch();
+  const lab = res?.families?.find(f => f.family === family && f.chosen);
+  const chosen = lab?.chosen || MOMENTUM_FALLBACK;
+  const s = STRATEGIES[family];
+  const riskPct = 2;
+  return {
+    family, params: chosen.params, id: chosen.id, name: `${s.name} (${riskPct}% risk)`,
+    label: `${s.name} — ${s.describe(chosen.params)}${chosen.params.regime ? ', only while BTC is above its 100-day average' : ''}; ${riskPct}% of the account at risk per trade`,
+    verdict: lab?.verdict || 'NOT TESTED', test: lab?.test || null, period: res?.period || null,
+    portfolio2: res?.comparisons?.risk2?.[family] || null,
+    why: 'chosen by the admin from the lab results', tested: !!lab, chosenByAdmin: true, riskPct,
+  };
+}
+const STRATEGY_CHOICES = { breakout: currentStrategy, daily: dailyStrategy, momentum: momentumStrategy };
 
 /** The strategy auto-buy runs today: the admin's choice, else the lab's pick. */
 async function activeStrategy() {
   const f = await flags().catch(() => ({}));
   const pick = STRATEGY_CHOICES[f.strategy];
   return pick ? pick() : currentStrategy();
+}
+
+/** Which choice is in use: 'breakout' (default), 'momentum' or 'daily'. */
+async function strategyKey() {
+  const f = await flags().catch(() => ({}));
+  return STRATEGY_CHOICES[f.strategy] ? f.strategy : 'breakout';
 }
 
 /**
@@ -250,7 +278,7 @@ function trailFor(prepared, strategy, pos) {
  */
 function makeTrailer(active, sig) {
   const lab = currentStrategy();
-  const known = new Map([[cfg.FALLBACK.id, { ...cfg.FALLBACK }], [lab.id, lab], [dailyStrategy().id, dailyStrategy()], [active.id, active]]);
+  const known = new Map([[cfg.FALLBACK.id, { ...cfg.FALLBACK }], [MOMENTUM_FALLBACK.id, { family: 'momentum', ...MOMENTUM_FALLBACK }], [lab.id, lab], [dailyStrategy().id, dailyStrategy()], [momentumStrategy().id, momentumStrategy()], [active.id, active]]);
   const cache = new Map();
   return async (pos) => {
     const strat = known.get(pos.strategy);
@@ -283,8 +311,8 @@ async function releaseBuy(date, accountId, symbol) {
 }
 
 /** How many dollars to put in, or a reason not to. */
-function size({ equity, cash, entry, stop, open, lastEquity }) {
-  const L = cfg.LIMITS;
+function size({ equity, cash, entry, stop, open, lastEquity, riskPct = null }) {
+  const L = { ...cfg.LIMITS, ...(riskPct > 0 && riskPct <= 5 ? { riskPct } : {}) };
   if (open >= L.maxOpen) return { skip: `already ${open} auto positions (max ${L.maxOpen})` };
   if (lastEquity && equity < lastEquity * (1 - L.dailyLossPct / 100)) return { skip: `account fell ${r2((1 - equity / lastEquity) * 100)}% since yesterday — no new buys today` };
   const riskUsd = equity * (L.riskPct / 100);
@@ -421,7 +449,7 @@ async function runPracticeAccount(chatId, strategy, sig, { buy = true, trail = m
   let open = held.size, cash = s.cash;
   for (const b of sig.buys) {
     if (held.has(b.symbol)) continue;
-    const z = size({ equity: s.equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
+    const z = size({ equity: s.equity, cash, entry: b.close, stop: b.stop, open, lastEquity, riskPct: strategy.riskPct });
     if (z.skip) { msgs.push(`🎮🤖 Skipped ${b.symbol.replace('USDT', '')}: ${z.skip}`); if (/max|fell/.test(z.skip)) break; continue; }
     if (!(await claimBuy(date, `p:${chatId}`, b.symbol))) { msgs.push(`🎮🤖 Skipped ${coinOf(b.symbol)}: already auto-bought today (once per coin per day)`); continue; }
     try {
@@ -489,7 +517,7 @@ async function runLiveAccount(chatId, strategy, sig, { buy = true, trail = makeT
   let open = held.size, cash = Math.max(0, usdt - reserved);
   for (const b of sig.buys) {
     if (held.has(b.symbol)) continue;
-    const z = size({ equity, cash, entry: b.close, stop: b.stop, open, lastEquity });
+    const z = size({ equity, cash, entry: b.close, stop: b.stop, open, lastEquity, riskPct: strategy.riskPct });
     if (z.skip) { msgs.push(`🤖 Skipped ${b.symbol.replace('USDT', '')}: ${z.skip}`); if (/max|fell/.test(z.skip)) break; continue; }
     if (!(await claimBuy(date, `l:${chatId}`, b.symbol))) { msgs.push(`🤖 Skipped ${coinOf(b.symbol)}: already auto-bought today (once per coin per day)`); continue; }
     try {
@@ -736,7 +764,7 @@ const fmtP = (p) => (p >= 1 ? Number(p).toFixed(4) : Number(p).toPrecision(4));
 const usd = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 module.exports = {
-  AutoBuyError, HOUSE, currentStrategy, activeStrategy, setStrategy, dailyStrategy, fixedPct, makeTrailer, loadResearch, computeSignals, trailFor, size, runDaily,
+  AutoBuyError, HOUSE, currentStrategy, activeStrategy, setStrategy, strategyKey, dailyStrategy, momentumStrategy, fixedPct, makeTrailer, loadResearch, computeSignals, trailFor, size, runDaily,
   analyseCoin, buyNow, coinTable, sendDailySummaries, dailyMessage, buyMessage, noBuyMessage, adminReport,
   setPractice, setLive, todayCheck, gateStatus, unlock, missing, lock, pause, isPaused, isLiveUnlocked, userStatus,
 };
