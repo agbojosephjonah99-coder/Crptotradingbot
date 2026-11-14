@@ -212,7 +212,10 @@ test('strategy lab: on random prices nothing passes', () => {
   const data = {}; ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT'].forEach((s, k) => { data[s] = walk(97 + k * 7919); });
   const out = research(data);
   assert.notEqual(out.verdict, 'PASS');
-  assert.ok(out.families.length === 3 && out.variants.length === 22);
+  assert.ok(out.families.length === 4 && out.variants.length === 24);
+  const daily = out.families.find(f => f.family === 'dailyTop');
+  assert.ok(daily, 'the daily movers strategy is tested too');
+  assert.notEqual(out.pick?.family, 'dailyTop', 'daily movers is reported, never picked');
 });
 
 test('buynow (practice): tells you whether the strategy agrees, buys after you confirm, managed by the trailing stop', async () => {

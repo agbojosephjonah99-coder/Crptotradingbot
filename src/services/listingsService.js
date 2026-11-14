@@ -183,6 +183,31 @@ async function getBinanceTickers() {
     .slice(0, 30); // top 30 by volume go to deep analysis
 }
 
+/**
+ * The whole Binance USDT spot market for the daily-movers strategy: every real
+ * coin (no stablecoins, gold or wrapped tokens) with at least `minVolUsd` of
+ * trading in the last 24 hours, so orders fill near the price. Returns the
+ * `prefilter` coins that moved most in the last 24h (their closed daily candles
+ * decide the final ranking) plus how many coins qualified in total.
+ */
+async function getMarketUniverse({ minVolUsd = 5_000_000, prefilter = 40 } = {}) {
+  const r = await binanceGet('/ticker/24hr');
+  const rows = Array.isArray(r?.data) ? r.data : [];
+  if (!rows.length) throw new Error('Binance tickers unavailable');
+  const fresh = Date.now() - 2 * 3_600_000; // delisted pairs stop updating
+  const ok = rows.filter(t => {
+    const sym = String(t.symbol || '');
+    const base = sym.replace(/USDT$/, '');
+    return sym.endsWith('USDT') && base && !NOT_COINS.has(base) && Number(t.count) > 0 &&
+      Number(t.closeTime) >= fresh && parseFloat(t.lastPrice) > 0 && (parseFloat(t.quoteVolume) || 0) >= minVolUsd;
+  });
+  const symbols = ok
+    .sort((a, b) => parseFloat(b.priceChangePercent) - parseFloat(a.priceChangePercent))
+    .slice(0, prefilter)
+    .map(t => t.symbol);
+  return { symbols, total: ok.length, minVolUsd };
+}
+
 /** Binance coins; KuCoin only if Binance can't be reached. Tagged with the source. */
 async function getScanTickers() {
   try {
@@ -277,4 +302,4 @@ async function getNewListingsWithMetadata() {
   return { hotCoins, trending };
 }
 
-module.exports = { getMoonshots, getBinanceTickers, getScanTickers, getNewListingsWithMetadata, getMarketsBySymbols, getCoinDetail };
+module.exports = { getMoonshots, getBinanceTickers, getScanTickers, getMarketUniverse, getNewListingsWithMetadata, getMarketsBySymbols, getCoinDetail };

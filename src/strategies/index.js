@@ -162,6 +162,46 @@ const STRATEGIES = {
     },
     exitText: (p) => `the stop trails ${p.k}× the coin's average daily range below its highest close and only ever moves up; when the price falls to it, the bot sells`,
   },
+  /**
+   * Daily movers (chosen by the admin, NOT a lab pick): every day, rank the
+   * whole Binance USDT market (coins with enough trading) by yesterday's move
+   * and buy the top N. Stop: a fixed % below the buy price, then trailed that
+   * same % below the best price seen (checked every 10 minutes). It trades
+   * every day and was never shown to have an edge — the lab tests it on the
+   * 15 large coins for information, but never picks it.
+   */
+  dailyTop: {
+    name: 'Daily movers (1% stop)',
+    grid: [{ topN: 3, stopPct: 1 }],
+    warmup: 14,         // at least two weeks of history (skips brand-new listings)
+    minCandles: 15,
+    cross: true,        // ranking needs the other coins
+    market: true,       // its coin list is the whole Binance market, not the 15 coins
+    excludeFromPick: true,
+    fixedStopPct: (p) => p.stopPct,
+    describe: (p) => `buy the ${p.topN} coins that rose most yesterday across the whole Binance market; stop ${p.stopPct}% below the buy price, trailing ${p.stopPct}% below the best price`,
+    entry(ind, i, p, ctx) {
+      if (i < 1) return false;
+      return ctx.rank(ind.symbol, ind.c[i].time, 1) < p.topN;
+    },
+    initialStop(ind, i, p, entry) { return entry * (1 - p.stopPct / 100); },
+    trail(ind, i, p, pos) { return (pos?.highestClose || ind.close[i]) * (1 - p.stopPct / 100); },
+    explain(ind, i, p, ctx) {
+      const r = ret(ind, i, 1);
+      if (r === null) return { text: 'not enough history yet', gap: null };
+      const rank = ctx ? ctx.rank(ind.symbol, ind.c[i].time, 1) + 1 : null;
+      const ok = rank !== null && rank <= p.topN;
+      return {
+        text: ok
+          ? `Daily mover: #${rank} of the market by yesterday's move (${pct(r)}, closed at ${$(ind.close[i])})`
+          : `ranked #${rank ?? '?'} by yesterday's move (${pct(r)}); the bot buys the top ${p.topN}`,
+        gap: ok ? 0 : null,
+        rank,
+        movePct: r,
+      };
+    },
+    exitText: (p) => `the stop starts ${p.stopPct}% below the buy price and follows the price up, always ${p.stopPct}% below the best price since buying (checked every 10 minutes, and a real stop order sits on Binance in real mode); it never moves down. When the price falls to it, the bot sells`,
+  },
 };
 
 /** Every variant: each family × its grid × with / without the BTC market filter. */

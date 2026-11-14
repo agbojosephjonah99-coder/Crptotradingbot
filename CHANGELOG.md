@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.23.0 — Daily movers strategy (whole market, every day, 1% stop)
+
+**Nothing changes until the admin switches it on.** The breakout strategy stays the default.
+
+- **New admin command `autobuy strategy`**: shows the strategy in use. `autobuy strategy daily` switches auto-buy to **Daily movers**; `autobuy strategy breakout` switches back to the lab's pick.
+- **Daily movers**: every day just after the daily close (about 1:05am Lagos) the bot looks at the **whole Binance USDT market** (every real coin with $5M+ traded in 24 hours; no stablecoins, gold or wrapped tokens) and buys the **3 coins that rose most yesterday**. No BTC market filter, so it trades every day.
+  - **Stop 1% below the price actually paid**, then it follows the price up: always 1% below the best price since buying, checked every 10 minutes. It never moves down. In real mode a real stop order sits on Binance and is moved up with it (no message for every move; one message when the stop passes the buy price).
+  - The other safety limits still apply: max 20% of the account per coin, max 5 coins at once, no new buys after the account falls 3% in a day, admin kill switch.
+  - Works in **practice** (play money) and **real money**. Real-money auto-buy stays behind the same gate: the admin can open it early (`autobuy unlock`), and every user sees an "⚠️ not proven" warning before switching it on.
+  - ⚡ Buy Now uses the 1% stop too while this strategy is on, and says whether the coin is one of today's picks.
+  - `stops` shows today's top 15 movers across the market.
+  - **Not proven**: a 1% stop is often hit by normal price swings within hours, and fees and slippage take about 0.3% of each trade. Every buy message says so.
+- Switching strategy **restarts the house forward test** from $10,000, so its results belong to the strategy that's running. **Coins already held keep their own stop rules**: a breakout coin keeps its breakout stop after you switch, and the other way round.
+- **Strategy lab** (`npm run lab`) now also tests Daily movers on the 15 large coins and reports its verdict, for information. It is never the lab's pick.
+- The buy message's "Why this amount" now shows the real % of the account at risk (it always said 1%, even when the 20% cap made it smaller).
+- Tests: 188.
+
 ## 2.22.1 — User manual brought up to date
 
 - **📚 The manual's test figures now come from the latest lab result** (`data/auto-strategy.json`), so they update every time you run `npm run lab` and commit. It said "about 23% over 3 years, BTC made 85%"; it now says, from the current result: 108 trades, about 22% over 2.9 years (about 7% a year, worst drop 4.2%), holding BTC 94% with far bigger drops.

@@ -69,7 +69,7 @@ function avgFill(order, fallback) {
  * @returns {Promise<null|{actions: string[], closed?: boolean, error?: string}>}
  *          null when auto-exits don't apply to this position
  */
-async function sync(chatId, positionId, { price = null } = {}) {
+async function sync(chatId, positionId, { price = null, quietMove = false } = {}) {
   const c = await accounts.getActiveClient(chatId).catch(() => null);
   if (!c) return null;
   const first = await ps.getPositionById(chatId, positionId);
@@ -226,7 +226,7 @@ async function sync(chatId, positionId, { price = null } = {}) {
           a.stopQty = qty;
           a.lastError = null;
           await store.cmd('HSET', ordersKey(chatId), positionId, JSON.stringify({ symbol: sym, orderId: a.stopOrderId }));
-          msgs.push(`💰 REAL · 🤖 *${moved ? 'Stop moved' : 'Stop placed'} on Binance${dry}:* sell ${qty} ${coin} if price falls to $${money(stop)}${tag}.`);
+          if (!(moved && quietMove)) msgs.push(`💰 REAL · 🤖 *${moved ? 'Stop moved' : 'Stop placed'} on Binance${dry}:* sell ${qty} ${coin} if price falls to $${money(stop)}${tag}.`);
           actions.push(moved ? 'move-stop' : 'place-stop');
         }
       }

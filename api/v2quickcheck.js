@@ -40,6 +40,18 @@ async function runPractice(allowed) {
 
 const APPROACH_PCT = 5;
 
+/**
+ * Positions with a fixed % trailing stop (daily movers): a new best price moves
+ * the stop to that % below it. Only ever up. Returns the updates, or null.
+ */
+function trailUpdate(pos, price) {
+  const pct = Number(pos.trailPct);
+  if (!(pct > 0 && pct < 0.5) || !(price > 0) || pos.stopLossHit) return null;
+  if (!(price > (Number(pos.highWater) || Number(pos.buyPrice) || 0))) return null;
+  const next = price * (1 - pct);
+  return next > (Number(pos.stopLossPrice) || 0) ? { highWater: price, stopLossPrice: next, stopStage: 'trail' } : { highWater: price };
+}
+
 function fmtPrice(p) {
   return p < 0.01 ? p.toFixed(8) : p.toFixed(4);
 }
@@ -167,6 +179,20 @@ module.exports = async (req, res) => {
       if (!currentPrice) { results.push({ symbol, error: 'Could not fetch price' }); continue; }
 
       for (const pos of list) {
+        // Fixed % trailing stop (daily movers): follow the price up, move the Binance stop order
+        const trail = trailUpdate(pos, currentPrice);
+        if (trail) {
+          Object.assign(pos, trail);
+          await updatePosition(pos.chatId, pos.positionId, trail);
+          if (trail.stopLossPrice) {
+            const moved = await autoTrader.sync(pos.chatId, pos.positionId, { price: currentPrice, quietMove: true }).catch(err => ({ error: err.message }));
+            results.push({ symbol, positionId: pos.positionId, event: 'TRAIL', stop: trail.stopLossPrice, ...(moved ? { auto: moved.actions, autoError: moved.error } : {}) });
+          }
+          if (trail.stopLossPrice >= pos.buyPrice && !pos.lockNotified) {
+            await updatePosition(pos.chatId, pos.positionId, { lockNotified: true });
+            await tg.send(pos.chatId, `💰 REAL · 🤖 *${pos.symbol.replace('USDT', '')}:* the stop is now above your buy price ($${fmtPrice(trail.stopLossPrice)}), so this trade can no longer lose money before fees. It keeps following the price up.`, { silent: true }).catch(() => {});
+          }
+        }
         const outcome = evaluateQuick(pos, currentPrice);
         if (!outcome) continue;
         await tg.send(pos.chatId, outcome.text);
@@ -196,3 +222,4 @@ module.exports = async (req, res) => {
 };
 
 module.exports.evaluateQuick = evaluateQuick;
+module.exports.trailUpdate = trailUpdate;

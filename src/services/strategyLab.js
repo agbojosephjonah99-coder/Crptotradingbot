@@ -171,7 +171,8 @@ function research(candlesBySymbol, { trainFrac = 0.65 } = {}) {
   });
 
   // Overall pick: the family whose chosen settings did best on TRAIN (no peeking at test)
-  const ranked = families.filter(f => f.chosen).sort((a, b) => b.train.expectancyR - a.train.expectancyR);
+  // (families marked excludeFromPick — e.g. the admin-chosen daily movers — are reported, never picked)
+  const ranked = families.filter(f => f.chosen && !STRATEGIES[f.family].excludeFromPick).sort((a, b) => b.train.expectancyR - a.train.expectancyR);
   const pick = ranked[0] || null;
   const iSplit = btc.c.findIndex(x => x.time >= split);
   const btcHold = iSplit >= 0 ? round((btc.close[btc.close.length - 1] / btc.c[iSplit].open - 1) * 100, 1) : null;

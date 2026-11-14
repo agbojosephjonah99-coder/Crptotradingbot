@@ -87,7 +87,7 @@ function parseTarget(t) {
 }
 
 /** Buy `amount` dollars of a coin at the live Binance price. */
-async function buy(chatId, { symbol, amount, stop = null, target = null, strategy = null, why = null }) {
+async function buy(chatId, { symbol, amount, stop = null, target = null, strategy = null, why = null, trailPct = null }) {
   const sym = normaliseSymbol(symbol || '');
   if (!/^[A-Z0-9]{2,20}USDT$/.test(sym)) throw new PracticeError('Which coin? e.g. `practice buy SOL 100`');
   const spend = Number(amount);
@@ -101,6 +101,8 @@ async function buy(chatId, { symbol, amount, stop = null, target = null, strateg
 
   // Trade plan first (network), then the money moves inside the lock
   const fill = live * (1 + SLIP);
+  const trail = Number(trailPct) > 0 && Number(trailPct) < 0.5 ? Number(trailPct) : null;
+  const fixedStop = trail ? fill * (1 - trail) : null; // fixed % stop (daily movers): from the price paid
   let plan = null;
   if (strategy) { /* auto-buy: the strategy's own stop, trailing; no take-profits */ } else try {
     const { candles1h, candles4h } = await fetchCurrentData(sym, { exchange: 'binance' });
@@ -116,9 +118,10 @@ async function buy(chatId, { symbol, amount, stop = null, target = null, strateg
     const p = {
       id: `${sym}:${Date.now()}`, symbol: sym, buyPrice: fill, livePriceAtBuy: live,
       quantity: r8(qty), remainingQty: r8(qty), cost: spend, fees: fee,
-      stopLossPrice: plan?.stopLossPrice ?? userStop, takeProfits: plan?.takeProfits || null,
+      stopLossPrice: fixedStop ?? plan?.stopLossPrice ?? userStop, takeProfits: plan?.takeProfits || null,
       stopStage: strategy ? 'trail' : userStop ? 'user' : (plan ? 'initial' : null),
-      strategy: strategy ? strategy.id : null, auto: !!strategy, highestClose: strategy ? live : null, initialStopPrice: userStop,
+      strategy: strategy ? strategy.id : null, auto: !!strategy, highestClose: strategy ? live : null, initialStopPrice: fixedStop ?? userStop,
+      ...(trail ? { trailPct: trail, highWater: fill } : {}),
       targetMultiple, targetPrice: targetMultiple ? fill * targetMultiple : null,
       tp1Hit: false, tp2Hit: false, tp3Hit: false, targetHit: false,
       sold: [], openedAt: now, lastCheckAt: now,
@@ -189,6 +192,22 @@ function applyExits(p, price, candles = []) {
   return sales;
 }
 
+/**
+ * For positions with a fixed % trailing stop: a new best price moves the stop
+ * up to that % below it. Uses the price at the check (not 1-minute highs), so a
+ * spike and drop between checks can never be counted in the bot's favour.
+ * @returns the new stop, or null if it didn't move. Mutates p.
+ */
+function raiseTrail(p, price) {
+  if (!(p.trailPct > 0) || !(price > 0)) return null;
+  if (!(price > (p.highWater || p.buyPrice || 0))) return null;
+  p.highWater = price;
+  const next = price * (1 - p.trailPct);
+  if (!(next > (p.stopLossPrice || 0))) return null;
+  p.stopLossPrice = next;
+  return next;
+}
+
 /** Close a fully sold position: save the trade and remove it. */
 async function closeIfDone(chatId, p, price) {
   if (p.remainingQty * price >= 1) return null; // more than $1 left → still open
@@ -232,6 +251,13 @@ async function syncUser(chatId, cache = new Map()) {
 
       const sales = applyExits(p, price, candles);
       p.lastCheckAt = new Date().toISOString();
+      // Fixed % trailing stop: follows the best price seen at these checks (only up)
+      const raised = !sales.length ? raiseTrail(p, price) : null;
+      // One message when the stop first passes the buy price (not every 10 minutes)
+      if (raised && raised >= p.buyPrice && !p.lockNotified && chatId !== 'house') {
+        p.lockNotified = true;
+        msgs.push(`🎮🤖 ${coinOf(p.symbol)}: the stop is now above your buy price ($${px(raised)}), so this trade can no longer lose money before fees. It keeps following the price up.`);
+      }
       for (const s of sales) {
         cash += s.net;
         msgs.push(`🎮 PRACTICE · *${coinOf(p.symbol)} ${LABEL[s.reason]}:* sold ${r8(s.qty)} at $${px(s.at)} (fee ${usd(s.fee)}) → +${usd(s.net)}`);
@@ -317,7 +343,7 @@ async function summary(chatId) {
       quantity: p.quantity, remainingQty: p.remainingQty, cost: r2(p.cost), value: value === null ? null : r2(value),
       pnlUsd: pnl === null ? null : r2(pnl), pnlPct: pnl === null ? null : r2((pnl / p.cost) * 100),
       stopLossPrice: p.stopLossPrice, stopStage: p.stopStage, takeProfits: p.takeProfits,
-      tp1Hit: p.tp1Hit, tp2Hit: p.tp2Hit, tp3Hit: p.tp3Hit, targetPrice: p.targetPrice, targetHit: p.targetHit,
+      trailPct: p.trailPct ?? null, highWater: p.highWater ?? null, tp1Hit: p.tp1Hit, tp2Hit: p.tp2Hit, tp3Hit: p.tp3Hit, targetPrice: p.targetPrice, targetHit: p.targetHit,
       sold: p.sold.length, openedAt: p.openedAt, auto: !!p.auto, strategy: p.strategy || null,
     };
   });
@@ -334,4 +360,4 @@ async function summary(chatId) {
   };
 }
 
-module.exports = { PracticeError, START, FEE, SLIP, getAccount, getPositions, getTrades, buy, raiseStop, applyExits, syncUser, allUsers, sellNow, reset, summary };
+module.exports = { PracticeError, START, FEE, SLIP, getAccount, getPositions, getTrades, buy, raiseStop, applyExits, raiseTrail, syncUser, allUsers, sellNow, reset, summary };
